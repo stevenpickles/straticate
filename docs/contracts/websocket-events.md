@@ -4,7 +4,7 @@ Status: **authoritative** — the Pydantic event models in
 `backend/src/straticate/schemas/events.py` (feature 005) are the source of
 truth, exposed via OpenAPI components so TypeScript types are generated, not
 hand-written. The WebSocket event *hub* (the server that emits these events)
-lands with feature 013.
+is `backend/src/straticate/jobs/hub.py` (feature 013).
 
 Endpoint: `WS /api/v1/ws`. Server → client push only (initially); the server
 broadcasts to all connected clients. All messages are JSON objects
@@ -118,9 +118,35 @@ Sampled ~1 Hz while a job runs. GPU block is `null` on CPU; `utilization` and
 }
 ```
 
+## Connection lifecycle
+
+The server accepts the connection immediately (no handshake message) and
+starts pushing at once. There is no client → server protocol in v1: anything a
+client sends is read and discarded, never parsed, and never closes the
+connection.
+
+Close codes the server may send:
+
+| Code | Meaning | Client action |
+| --- | --- | --- |
+| `1001` | Server is shutting down. | Reconnect with backoff. |
+| `1011` | Sending to this client failed. | Reconnect. |
+| `1013` | This client could not keep up; its outbound buffer overflowed with events that may not be dropped. | Reconnect, then resync over REST. |
+
+Backpressure: each connection has a bounded server-side outbound buffer. When
+it overflows, the oldest buffered `job_progress` / `runtime_metrics` message
+is dropped (both are periodic samples superseded by the next one). Events that
+cannot be reconstructed — `job_created`, `job_started`, `job_stage_changed`,
+and the terminal `job_completed` / `job_cancelled` / `job_failed` — are never
+dropped: a client whose buffer is saturated with them is disconnected with
+`1013` instead. Terminal events are therefore either delivered or followed by
+a visible disconnect, never silently lost.
+
 ## Client behavior
 
 - On connect (or reconnect), fetch current jobs via REST, then apply events.
 - Unknown `type` values must be ignored (forward compatibility).
 - The frontend WS layer decodes events into the generated types and feeds the
   application store; components never touch the raw socket.
+- Reconnect on any close code and refetch over REST; the server never replays
+  missed events.
