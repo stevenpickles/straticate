@@ -3,7 +3,7 @@
 Branch: `018-device-detection`
 Status: PR OPEN
 Dependencies: 005
-PR: #…
+PR: #12
 
 ## Objective
 

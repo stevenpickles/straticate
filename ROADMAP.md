@@ -80,7 +80,7 @@ is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
 | 015 | Job REST endpoints (create/get/cancel/list)  | PLANNED | 012, 014   | | |
 | 016 | Frontend job + WebSocket clients             | PLANNED | 003, 005*  | | |
 | 017 | Progress UI + cancel + error handling        | PLANNED | 011, 016   | | |
-| 018 | Compute device detection + devices API       | PLANNED | 005        | | |
+| 018 | Compute device detection + devices API       | PR OPEN | 005        | `018-device-detection` | #12 |
 | 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
 | 020 | Telemetry panel UI (model/GPU/processing)    | PLANNED | 016        | | |
 | 021 | Result management + stem serving             | PLANNED | 014, 015   | | |
