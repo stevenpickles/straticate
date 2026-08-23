@@ -1,6 +1,7 @@
 """Application errors and the consistent JSON error envelope.
 
-Every error response from the API uses the shape::
+Every error response from the API uses the shape defined by
+:class:`straticate.schemas.ErrorEnvelope`::
 
     {"error": {"code": "...", "message": "...", "detail": {...}}}
 """
@@ -13,6 +14,8 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from straticate.schemas import ErrorEnvelope, ErrorInfo
 
 logger = logging.getLogger(__name__)
 
@@ -56,17 +59,21 @@ def error_response(
     message: str,
     detail: Any = None,
 ) -> JSONResponse:
-    """Build a :class:`JSONResponse` carrying the standard error envelope."""
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "detail": jsonable_encoder(detail) if detail is not None else {},
-            }
-        },
+    """Build a :class:`JSONResponse` carrying the standard error envelope.
+
+    The body is built from the shared contract schemas
+    (:class:`~straticate.schemas.ErrorEnvelope` /
+    :class:`~straticate.schemas.ErrorInfo`) so responses and the published
+    OpenAPI contract cannot drift apart.
+    """
+    envelope = ErrorEnvelope(
+        error=ErrorInfo(
+            code=code,
+            message=message,
+            detail=jsonable_encoder(detail) if detail is not None else {},
+        )
     )
+    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
 
 
 async def _handle_application_error(request: Request, exc: Exception) -> JSONResponse:

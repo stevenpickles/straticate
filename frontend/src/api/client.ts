@@ -6,6 +6,8 @@
  * WebSockets in later features.
  */
 
+import type { HealthStatus, VersionInfo } from './types'
+
 /** Payload of the backend error envelope: `{"error": {code, message, detail}}`. */
 export interface ApiErrorBody {
   code: string
@@ -84,22 +86,12 @@ export function post<T>(path: string, body?: unknown): Promise<T> {
   })
 }
 
-/** Response of `GET /api/health`. */
-export interface HealthResponse {
-  status: string
-}
-
-/** Response of `GET /api/version`. */
-export interface VersionResponse {
-  version: string
-}
-
 /** Fetch the backend health status. */
-export function getHealth(): Promise<HealthResponse> {
-  return get<HealthResponse>('/health')
+export function getHealth(): Promise<HealthStatus> {
+  return get<HealthStatus>('/health')
 }
 
 /** Fetch the backend version. */
-export function getVersion(): Promise<VersionResponse> {
-  return get<VersionResponse>('/version')
+export function getVersion(): Promise<VersionInfo> {
+  return get<VersionInfo>('/version')
 }

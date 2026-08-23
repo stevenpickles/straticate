@@ -1,8 +1,10 @@
-# WebSocket Event Contract (v1 proposal)
+# WebSocket Event Contract (v1)
 
-Status: **proposal** — becomes authoritative when feature 013 merges the
-corresponding Pydantic event models (exposed via OpenAPI components so
-TypeScript types are generated, not hand-written).
+Status: **authoritative** — the Pydantic event models in
+`backend/src/straticate/schemas/events.py` (feature 005) are the source of
+truth, exposed via OpenAPI components so TypeScript types are generated, not
+hand-written. The WebSocket event *hub* (the server that emits these events)
+lands with feature 013.
 
 Endpoint: `WS /api/v1/ws`. Server → client push only (initially); the server
 broadcasts to all connected clients. All messages are JSON objects
