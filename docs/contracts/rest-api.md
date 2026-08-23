@@ -53,9 +53,15 @@ and stem streaming (audio bytes). IDs are ULIDs.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/audio` | Multipart upload (`file` field). Validates and probes. → `AudioFile` |
+| POST | `/audio` | Multipart upload (`file` field). Validates and probes. → `201` + `AudioFile` |
 | GET | `/audio/{audio_id}` | Fetch `AudioFile` |
-| DELETE | `/audio/{audio_id}` | Remove uploaded audio and derived data |
+| DELETE | `/audio/{audio_id}` | Remove uploaded audio and derived data → `204` |
+
+Upload validation runs in order: size limit (configurable via
+`STRATICATE_MAX_UPLOAD_BYTES`, default 1 GiB) → ffprobe decodability.
+Error codes: `audio_too_large` (413), `audio_not_decodable` (422),
+`audio_not_found` (404, GET/DELETE); a missing `file` part is a standard
+`validation_error` (422).
 
 `AudioFile`:
 
