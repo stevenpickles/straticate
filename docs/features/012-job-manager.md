@@ -27,9 +27,12 @@ feature 013; the separation engine is feature 014).
 - `backend/src/straticate/jobs/manager.py` — `JobManager`, `JobExecutor`
   protocol, `JobContext`, typed listener hook, progress throttling (≤ 4 Hz per
   job), `get_job_manager` FastAPI dependency.
-- Wiring: `create_app()` creates a `JobManager` on `app.state.job_manager`;
-  the FastAPI lifespan starts it and closes it (`start()` / `aclose()`).
-- New backend dependency: `python-ulid` (job IDs are ULID strings).
+- Wiring: the FastAPI lifespan creates a **fresh** `JobManager` per lifespan
+  cycle (a closed manager cannot be restarted), stores it on
+  `app.state.job_manager`, starts it, and closes it on shutdown (`start()` /
+  `aclose()`).
+- Job IDs are ULID strings via `python-ulid` (already a backend dependency
+  since feature 006, which uses it for audio IDs — not new to this feature).
 
 ## Out of scope
 
@@ -82,6 +85,16 @@ transition raises `InvalidJobTransition`; raising listener doesn't break
 processing; coroutine listeners; progress throttling with guaranteed final
 delivery; `aclose()` with pending jobs; lifespan wiring + `get_job_manager`.
 
+Added after code review: worker resilience (non-`SeparationResult` return,
+executor-internal `CancelledError`, an error inside the manager's own terminal
+marking — each fails the job and the queue keeps running); a listener removing
+itself mid-dispatch does not skip later listeners; a gated coroutine listener
+still observes events in strict emission order; `NaN` progress is ignored and
+negative audio seconds clamp to `0.0`; the manager moves a starting job to
+`preparing` and `set_stage` to the current stage is a no-op; `cancel()` after
+`aclose()` raises `RuntimeError` while `get()` still works; two sequential
+`TestClient` lifespans on one app; `ApplicationError.to_error_info()`.
+
 ## Interfaces for downstream features
 
 These contracts are what 013/014/015 build against; import everything from
@@ -102,6 +115,11 @@ class JobExecutor(Protocol):
   cancellation; raise `ApplicationError` for expected failures (its `code`,
   `message`, `detail` are preserved in the job's `ErrorInfo` and the
   `job_failed` event); any other exception maps to code `separation_failed`.
+- Returning anything that is not a `SeparationResult` is a protocol violation:
+  the job fails with code `separation_failed` (the worker survives).
+- An executor-internal `asyncio.CancelledError` (i.e. not caused by manager
+  shutdown) also fails the job with `separation_failed`; only during
+  `aclose()` does `CancelledError` mean shutdown (job ends `cancelled`).
 - If the executor returns normally although cancellation had been requested,
   the cancellation wins: the job ends `cancelled` and the result is discarded.
 
@@ -111,13 +129,19 @@ class JobExecutor(Protocol):
   `raise_if_cancelled()` between chunks (safe to read from worker threads).
 - `context.set_stage(stage: JobState)` — forward-only processing stages
   (skipping is fine, terminal states are rejected); updates the job record and
-  emits `job_stage_changed`. Must be called on the manager's event loop.
+  emits `job_stage_changed`. Setting the stage the job is already in is a
+  **no-op** (no duplicate event) — the manager itself moves the job
+  `queued → preparing` before the executor runs, so an initial
+  `set_stage(PREPARING)` does nothing. Must be called on the manager's event
+  loop.
 - `context.report_progress(progress, chunks_completed, chunks_total,
   audio_processed_seconds=None, audio_total_seconds=None)` — updates
   `job.progress` immediately; the `job_progress` event is throttled to one per
-  0.25 s per job, except `progress ≥ 1.0` which always emits. Unknown audio
-  seconds are reported as `0.0` in the event. Must be called on the manager's
-  event loop.
+  0.25 s per job, except `progress ≥ 1.0` which always emits. Inputs are
+  sanitized before the record is touched: a `NaN` `progress` makes the whole
+  report a logged no-op; `progress` is clamped to `[0, 1]`; unknown, negative,
+  or `NaN` audio seconds are reported as `0.0`. Must be called on the
+  manager's event loop.
 
 ### Listener contract (the hook for feature 013)
 
@@ -129,9 +153,14 @@ class JobExecutor(Protocol):
   JobCancelledEvent | JobFailedEvent` from `straticate.schemas.events`,
   constructed per `docs/contracts/websocket-events.md`. (`runtime_metrics` is
   produced by the telemetry sampler, feature 019 — not by the job manager.)
-- Listeners are invoked in registration order, in event order, on the
-  manager's event loop; coroutine results run as background tasks awaited at
-  `aclose()`. A raising listener is logged and never affects job processing.
+- Delivery is **strictly ordered**: a single dispatcher task consumes an
+  internal FIFO event queue; for each event it calls every listener in
+  registration order and awaits coroutine listeners before touching the next
+  event (a client can therefore never observe `job_completed` before the
+  final `job_progress`). A raising listener is logged and never affects job
+  processing or the other listeners; a listener may remove itself during
+  dispatch without skipping the remaining listeners. `aclose()` drains the
+  queue before returning.
 
 ### Manager API (for feature 015)
 
@@ -141,24 +170,39 @@ class JobExecutor(Protocol):
 - `get(job_id) -> Job` · `list_jobs() -> list[Job]` (submission order) ·
   `cancel(job_id) -> Job` (idempotent on terminal jobs; `job_not_found` /
   404 for unknown ids).
+- After `aclose()`: `get()`/`list_jobs()` remain available (read-only);
+  `submit()` and `cancel()` raise `RuntimeError` — there is no worker or
+  dispatcher left to act on them.
 - All returned `Job` objects are deep-copy snapshots — re-read with `get()`
   or subscribe with a listener for updates.
 - Dependency accessor: `get_job_manager(request)` for use with `Depends`;
-  the instance lives on `app.state.job_manager` and is started/closed by the
-  application lifespan.
+  the instance is created, started, and closed by the application lifespan
+  (a fresh instance per lifespan cycle) and lives on `app.state.job_manager`.
+- **Feature 015 note:** endpoint handlers using the manager must be
+  `async def` so they run on the manager's event loop — sync handlers execute
+  in the threadpool, off-loop. (Dispatch has a `call_soon_threadsafe` safety
+  net for off-loop emission, but the manager's mutating API is
+  single-loop by contract.)
 
 ## Notes / decisions
 
 - **Concurrency contract:** the manager is single-event-loop, in-process
   state. All manager/`JobContext` calls happen on the app's event loop; only
   `CancellationToken` is safe to touch from worker threads.
-- **Cancel of a not-yet-staged running job:** a running job can still show
-  state `queued` until its first `set_stage`; an internal running flag (not
-  the state) decides between "remove from queue" and "cooperative token"
-  cancellation, so a cancel in that window is still cooperative.
+- **State authority:** the manager owns the `queued → preparing` transition —
+  a job leaves the queue as `preparing` (with `started_at` set and
+  `job_started` + `job_stage_changed` emitted) *before* its executor runs.
+  `Job.state` is therefore the single predicate for "is this job running":
+  `cancel()` cancels a `queued` job immediately and uses the cooperative
+  token for anything past `queued`; there is no shadow "running" flag.
+- **Worker resilience:** no single job can kill the worker or stall the
+  queue. A protocol-violating executor return value, an executor-internal
+  `CancelledError`, or even an error in the manager's own terminal-marking
+  marks the job `failed` (`separation_failed`) and the loop continues.
 - **Shutdown semantics:** `aclose()` cancels the worker; a job running at
   shutdown is marked `cancelled` (it receives `asyncio.CancelledError`);
   still-queued jobs simply remain `queued` — nothing survives the process.
+  The event queue is drained before `aclose()` returns.
 - `report_progress` accepts an extra optional `audio_total_seconds` keyword
   (beyond the originally sketched signature) so executors can fill the
   contract-required `audio_total_seconds` field of `job_progress` events.

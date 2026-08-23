@@ -5,18 +5,28 @@ The :class:`JobManager` is the job engine described in ARCHITECTURE.md §6:
 - ``submit()`` creates a ``Job`` record (state ``queued``), enqueues it, and
   returns immediately — inference never runs inside a request handler.
 - A single asyncio worker task processes jobs strictly first-in-first-out,
-  **one active job at a time**.
+  **one active job at a time**. The worker is defensive: no executor outcome
+  (including protocol violations) can kill it or stall the queue.
+- The manager owns the ``queued → preparing`` transition: a job leaves the
+  queue as ``preparing`` before its executor runs, so ``Job.state`` is the
+  single source of truth for "is this job running".
 - State transitions are validated by :func:`straticate.jobs.state.assert_transition`.
 - Cancellation is cooperative via :class:`straticate.jobs.cancellation.CancellationToken`.
 - Every lifecycle change is published to registered listeners as the typed
   event models from :mod:`straticate.schemas.events` (the WebSocket hub of
   feature 013 subscribes here; REST endpoints of feature 015 call the manager
-  directly).
+  directly). Delivery is strictly ordered: a single dispatcher task consumes
+  an internal FIFO event queue and awaits coroutine listeners before moving
+  to the next event.
 
 Concurrency contract: all ``JobManager`` methods (and ``JobContext`` calls)
-must be made from the event loop the manager runs on. The manager is
-single-loop, in-process state — no cross-thread access, except for
-``CancellationToken`` reads which are thread-safe.
+must be made from the event loop the manager runs on — feature 015's endpoint
+handlers must therefore be ``async def`` (so they run on the app's loop), not
+sync handlers executed in the threadpool. The manager is single-loop,
+in-process state; ``CancellationToken`` reads are the only thread-safe
+exception. As a safety net, event dispatch detects off-loop calls after
+``start()`` and marshals the event onto the manager's loop via
+``call_soon_threadsafe``.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -71,10 +82,11 @@ the job manager).
 JobEventListener = Callable[[JobEvent], Awaitable[None] | None]
 """A listener registered via :meth:`JobManager.add_listener`.
 
-Listeners may be plain callables or coroutine functions. They are invoked in
-event order on the manager's event loop; coroutine results are scheduled as
-background tasks. A listener raising (or its task failing) is logged and never
-breaks job processing.
+Listeners may be plain callables or coroutine functions. A single dispatcher
+task delivers events strictly in emission order: for each event it calls every
+listener in registration order and **awaits** coroutine listeners before
+touching the next event. A listener raising is logged and never breaks job
+processing or the delivery of the event to other listeners.
 """
 
 DEFAULT_PROGRESS_MIN_INTERVAL_SECONDS = 0.25
@@ -100,7 +112,9 @@ class JobExecutor(Protocol):
       or raise: :class:`~straticate.jobs.cancellation.JobCancelled` for
       cancellation, :class:`~straticate.errors.ApplicationError` for expected
       failures (its ``code`` is preserved), anything else for unexpected
-      failures (mapped to error code ``separation_failed``).
+      failures (mapped to error code ``separation_failed``). Returning
+      anything that is not a ``SeparationResult`` is a protocol violation and
+      fails the job with code ``separation_failed``.
     """
 
     async def __call__(self, job: Job, context: JobContext) -> SeparationResult:
@@ -115,13 +129,23 @@ class _JobEntry:
     job: Job
     executor: JobExecutor
     token: CancellationToken = field(default_factory=CancellationToken)
-    running: bool = False
     started_monotonic: float | None = None
     last_progress_emit: float | None = None
 
 
 _ChangeStage = Callable[[JobState], None]
 _ReportProgress = Callable[[float, int, int, float | None, float | None], None]
+
+
+def _sane_seconds(value: float | None) -> float:
+    """Sanitize an optional seconds value to a non-negative float.
+
+    ``None`` and ``NaN`` map to ``0.0`` ("unknown" per the event contract);
+    negative values (e.g. tiny float-arithmetic undershoots) clamp to ``0.0``.
+    """
+    if value is None or math.isnan(value):
+        return 0.0
+    return max(value, 0.0)
 
 
 class JobContext:
@@ -154,12 +178,15 @@ class JobContext:
         """Move the job to a later processing stage.
 
         Emits a ``job_stage_changed`` event. Only forward moves along the
-        processing order are allowed (skipping stages is fine); terminal
-        states are owned by the manager — return or raise instead.
+        processing order are allowed (skipping stages is fine); setting the
+        stage the job is already in is a no-op (no duplicate event) — the
+        manager itself moves the job to ``preparing`` when it starts, so an
+        executor's initial ``set_stage(PREPARING)`` simply does nothing.
+        Terminal states are owned by the manager — return or raise instead.
 
         Raises:
-            InvalidJobTransition: If ``stage`` is terminal, equal to the
-                current stage, or backward along the processing order.
+            InvalidJobTransition: If ``stage`` is terminal or backward along
+                the processing order.
         """
         if stage.is_terminal:
             raise InvalidJobTransition(
@@ -183,8 +210,16 @@ class JobContext:
         ``progress_min_interval`` (default 0.25 s → ≤ 4 Hz) per job, except a
         report with ``progress >= 1.0`` which is always delivered.
 
+        Inputs are sanitized before the job record is touched: a ``NaN``
+        ``progress`` makes the whole report a logged no-op; ``progress`` is
+        clamped to ``[0, 1]``; negative or ``NaN`` audio seconds are reported
+        as ``0.0``. The event is validated before the record is mutated, so an
+        invalid report (e.g. negative chunk counts) raises without corrupting
+        the live job.
+
         Args:
-            progress: Overall progress in ``[0, 1]`` (clamped).
+            progress: Overall progress in ``[0, 1]`` (clamped; ``NaN`` ignores
+                the report).
             chunks_completed: Chunks processed so far.
             chunks_total: Total chunks to process.
             audio_processed_seconds: Audio processed so far, in seconds
@@ -206,8 +241,10 @@ class JobManager:
 
     Lifecycle: construct, :meth:`start` on the running event loop (done by the
     FastAPI lifespan), submit/cancel/query while running, :meth:`aclose` on
-    shutdown. All returned ``Job`` objects are deep-copy **snapshots**; use
-    :meth:`get` to re-read current state or :meth:`add_listener` for pushes.
+    shutdown. A closed manager cannot be restarted — the application lifespan
+    creates a fresh instance per cycle. All returned ``Job`` objects are
+    deep-copy **snapshots**; use :meth:`get` to re-read current state or
+    :meth:`add_listener` for pushes.
 
     Args:
         progress_min_interval: Minimum seconds between ``job_progress`` events
@@ -222,24 +259,30 @@ class JobManager:
         self._progress_min_interval = progress_min_interval
         self._entries: dict[str, _JobEntry] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._events: asyncio.Queue[JobEvent | None] = asyncio.Queue()
         self._listeners: list[JobEventListener] = []
-        self._listener_tasks: set[asyncio.Task[None]] = set()
         self._worker_task: asyncio.Task[None] | None = None
+        self._dispatcher_task: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
 
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
-        """Start the single worker task. Idempotent; requires a running loop.
+        """Start the worker and dispatcher tasks. Idempotent; requires a running loop.
 
         Raises:
             RuntimeError: If the manager was already closed.
         """
         if self._closed:
             raise RuntimeError("JobManager is closed")
+        loop = asyncio.get_running_loop()
+        self._loop = loop
         if self._worker_task is None:
-            self._worker_task = asyncio.get_running_loop().create_task(
-                self._worker_loop(), name="straticate-job-worker"
+            self._worker_task = loop.create_task(self._worker_loop(), name="straticate-job-worker")
+        if self._dispatcher_task is None:
+            self._dispatcher_task = loop.create_task(
+                self._dispatcher_loop(), name="straticate-job-dispatcher"
             )
 
     async def aclose(self) -> None:
@@ -247,18 +290,24 @@ class JobManager:
 
         A job running at shutdown receives ``asyncio.CancelledError`` and is
         marked ``cancelled``; jobs still queued remain ``queued`` (this is an
-        in-memory engine — nothing survives the process anyway). Outstanding
-        coroutine-listener tasks are awaited.
+        in-memory engine — nothing survives the process anyway). The internal
+        event queue is drained: every already-emitted event (including the
+        shutdown cancellation) is delivered to listeners before ``aclose()``
+        returns.
         """
         self._closed = True
-        task = self._worker_task
+        worker = self._worker_task
         self._worker_task = None
-        if task is not None:
-            task.cancel()
+        if worker is not None:
+            worker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await task
-        if self._listener_tasks:
-            await asyncio.gather(*self._listener_tasks, return_exceptions=True)
+                await worker
+        dispatcher = self._dispatcher_task
+        self._dispatcher_task = None
+        if dispatcher is not None:
+            self._events.put_nowait(None)  # sentinel: exit after draining
+            with contextlib.suppress(asyncio.CancelledError):
+                await dispatcher
 
     # -- public API --------------------------------------------------------
 
@@ -307,11 +356,17 @@ class JobManager:
         return job.model_copy(deep=True)
 
     def get(self, job_id: str) -> Job:
-        """Return a snapshot of the job, or raise ``job_not_found`` (404)."""
+        """Return a snapshot of the job, or raise ``job_not_found`` (404).
+
+        Remains available after :meth:`aclose` (read-only).
+        """
         return self._entry_or_404(job_id).job.model_copy(deep=True)
 
     def list_jobs(self) -> list[Job]:
-        """Return snapshots of all jobs in submission order."""
+        """Return snapshots of all jobs in submission order.
+
+        Remains available after :meth:`aclose` (read-only).
+        """
         return [entry.job.model_copy(deep=True) for entry in self._entries.values()]
 
     def cancel(self, job_id: str) -> Job:
@@ -319,62 +374,95 @@ class JobManager:
 
         - A ``queued`` job is cancelled immediately (it will never run) and a
           ``job_cancelled`` event is emitted.
-        - A running job has its cancellation token set; the executor's next
-          cooperative check ends it and the job then becomes ``cancelled``.
+        - A running job (any non-terminal state past ``queued`` — the manager
+          moves a job to ``preparing`` before its executor runs) has its
+          cancellation token set; the executor's next cooperative check ends
+          it and the job then becomes ``cancelled``.
         - A job already in a terminal state is left untouched (idempotent).
 
         Raises:
             ApplicationError: ``job_not_found`` (404) for an unknown id.
+            RuntimeError: If the manager was already closed (there is no
+                worker or dispatcher left to act on the request).
         """
+        if self._closed:
+            raise RuntimeError("JobManager is closed")
         entry = self._entry_or_404(job_id)
         job = entry.job
         if not job.state.is_terminal:
-            if entry.running:
-                # A running job may still show state "queued" until its first
-                # stage change — the running flag, not the state, decides.
-                entry.token.cancel()
-            else:
+            if job.state is JobState.QUEUED:
                 self._mark_cancelled(entry)
+            else:
+                entry.token.cancel()
         return job.model_copy(deep=True)
 
     def add_listener(self, listener: JobEventListener) -> None:
         """Register a listener for every :data:`JobEvent` the manager emits.
 
-        Listeners are invoked in registration order, in event order, on the
-        manager's event loop. A coroutine listener's awaitable is scheduled as
-        a background task. Listener errors are logged and never affect job
-        processing.
+        Listeners are invoked in registration order, in strict event order, on
+        the manager's event loop by a single dispatcher task; a coroutine
+        listener is awaited before the next event is delivered. Listener
+        errors are logged and never affect job processing.
         """
         self._listeners.append(listener)
 
     def remove_listener(self, listener: JobEventListener) -> None:
-        """Unregister a previously added listener (no-op if absent)."""
+        """Unregister a previously added listener (no-op if absent).
+
+        Safe to call from inside a listener: dispatch iterates a snapshot, so
+        the remaining listeners still receive the event being delivered.
+        """
         with contextlib.suppress(ValueError):
             self._listeners.remove(listener)
 
     # -- internal: job execution -------------------------------------------
 
     async def _worker_loop(self) -> None:
-        """Process queued jobs strictly FIFO, one at a time, forever."""
+        """Process queued jobs strictly FIFO, one at a time, forever.
+
+        Defensive by design: no exception from a single job — executor bugs,
+        protocol violations, even bugs in the manager's own terminal-marking —
+        may kill this loop and stall the queue.
+        """
         while True:
             job_id = await self._queue.get()
             try:
                 entry = self._entries.get(job_id)
                 if entry is None or entry.job.state is not JobState.QUEUED:
                     continue  # cancelled while queued — logically dequeued
-                await self._run_job(entry)
+                try:
+                    await self._run_job(entry)
+                except asyncio.CancelledError:
+                    raise  # manager shutdown
+                except Exception:
+                    logger.exception(
+                        "Internal job engine error while finishing job %s", entry.job.id
+                    )
+                    if not entry.job.state.is_terminal:
+                        try:
+                            self._mark_failed(
+                                entry,
+                                ErrorInfo(
+                                    code="separation_failed",
+                                    message="Internal job engine error.",
+                                ),
+                            )
+                        except Exception:
+                            logger.exception("Could not mark job %s as failed", entry.job.id)
             finally:
                 self._queue.task_done()
 
     async def _run_job(self, entry: _JobEntry) -> None:
         """Run one job's executor and drive it to a terminal state."""
         job = entry.job
-        entry.running = True
         job.started_at = datetime.now(UTC)
         entry.started_monotonic = time.monotonic()
         self._dispatch(
             JobStartedEvent(type="job_started", job_id=job.id, started_at=job.started_at)
         )
+        # The manager owns leaving the queue: the job is `preparing` before
+        # the executor runs, so Job.state alone answers "is this running".
+        self._change_stage(entry, JobState.PREPARING)
         context = JobContext(
             token=entry.token,
             change_stage=partial(self._change_stage, entry),
@@ -386,14 +474,26 @@ class JobManager:
             if not job.state.is_terminal:
                 self._mark_cancelled(entry)
         except asyncio.CancelledError:
-            # Manager shutdown while this job was running.
-            if not job.state.is_terminal:
-                self._mark_cancelled(entry)
-            raise
-        except ApplicationError as exc:
-            self._mark_failed(
-                entry, ErrorInfo(code=exc.code, message=exc.message, detail=exc.detail)
+            if self._closed:
+                # Manager shutdown while this job was running.
+                if not job.state.is_terminal:
+                    self._mark_cancelled(entry)
+                raise
+            # An executor-internal CancelledError (not our shutdown) must not
+            # kill the worker: treat it as an unexpected executor failure.
+            logger.error(
+                "Executor for job %s raised CancelledError outside manager shutdown", job.id
             )
+            if not job.state.is_terminal:
+                self._mark_failed(
+                    entry,
+                    ErrorInfo(
+                        code="separation_failed",
+                        message="Executor raised CancelledError outside manager shutdown.",
+                    ),
+                )
+        except ApplicationError as exc:
+            self._mark_failed(entry, exc.to_error_info())
         except Exception as exc:
             logger.exception("Executor for job %s raised an unexpected error", job.id)
             self._mark_failed(
@@ -401,18 +501,39 @@ class JobManager:
                 ErrorInfo(code="separation_failed", message=str(exc) or type(exc).__name__),
             )
         else:
+            # The annotation promises a SeparationResult; a real executor is
+            # not type-checked at runtime, so verify it before trusting it.
+            result_obj = cast(object, result)
             if entry.token.is_cancelled:
                 # Cancellation was requested but the executor finished without
                 # observing it; the user's cancellation wins.
                 self._mark_cancelled(entry)
+            elif isinstance(result_obj, SeparationResult):
+                self._mark_completed(entry, result_obj)
             else:
-                self._mark_completed(entry, result)
-        finally:
-            entry.running = False
+                # Protocol violation: the executor "succeeded" but returned
+                # something that is not a SeparationResult.
+                logger.error(
+                    "Executor for job %s returned %s instead of a SeparationResult",
+                    job.id,
+                    type(result_obj).__name__,
+                )
+                self._mark_failed(
+                    entry,
+                    ErrorInfo(
+                        code="separation_failed",
+                        message=(
+                            "Executor violated the JobExecutor protocol: expected a "
+                            f"SeparationResult, got {type(result_obj).__name__}."
+                        ),
+                    ),
+                )
 
     def _change_stage(self, entry: _JobEntry, stage: JobState) -> None:
         job = entry.job
         previous = job.state
+        if stage is previous:
+            return  # same-state set_stage is a no-op (no duplicate event)
         assert_transition(previous, stage)
         job.state = stage
         self._dispatch(
@@ -431,8 +552,10 @@ class JobManager:
         audio_total_seconds: float | None,
     ) -> None:
         job = entry.job
+        if math.isnan(progress):
+            logger.warning("Ignoring NaN progress report for job %s", job.id)
+            return
         progress = min(max(progress, 0.0), 1.0)
-        job.progress = progress
         now = time.monotonic()
         is_final = progress >= 1.0
         if (
@@ -440,22 +563,25 @@ class JobManager:
             and entry.last_progress_emit is not None
             and now - entry.last_progress_emit < self._progress_min_interval
         ):
+            job.progress = progress
             return  # throttled (≤ 4 Hz per job); job.progress stays current
-        entry.last_progress_emit = now
         elapsed = 0.0 if entry.started_monotonic is None else now - entry.started_monotonic
-        self._dispatch(
-            JobProgressEvent(
-                type="job_progress",
-                job_id=job.id,
-                stage=job.state,
-                progress=progress,
-                chunks_completed=chunks_completed,
-                chunks_total=chunks_total,
-                elapsed_seconds=elapsed,
-                audio_processed_seconds=audio_processed_seconds or 0.0,
-                audio_total_seconds=audio_total_seconds or 0.0,
-            )
+        # Build (and validate) the event first; mutate the record only on
+        # success so an invalid report cannot corrupt the live job.
+        event = JobProgressEvent(
+            type="job_progress",
+            job_id=job.id,
+            stage=job.state,
+            progress=progress,
+            chunks_completed=chunks_completed,
+            chunks_total=chunks_total,
+            elapsed_seconds=elapsed,
+            audio_processed_seconds=_sane_seconds(audio_processed_seconds),
+            audio_total_seconds=_sane_seconds(audio_total_seconds),
         )
+        job.progress = progress
+        entry.last_progress_emit = now
+        self._dispatch(event)
 
     # -- internal: terminal transitions ------------------------------------
 
@@ -500,26 +626,45 @@ class JobManager:
         return entry
 
     def _dispatch(self, event: JobEvent) -> None:
-        """Deliver ``event`` to every listener; listener errors never propagate."""
-        for listener in self._listeners:
-            try:
-                outcome = listener(event)
-            except Exception:
-                logger.exception("Job event listener %r failed handling %r", listener, event.type)
-                continue
-            if inspect.isawaitable(outcome):
-                task = asyncio.get_running_loop().create_task(
-                    self._await_listener(outcome, event.type)
-                )
-                self._listener_tasks.add(task)
-                task.add_done_callback(self._listener_tasks.discard)
+        """Enqueue ``event`` for strictly ordered delivery by the dispatcher.
 
-    @staticmethod
-    async def _await_listener(outcome: Awaitable[None], event_type: str) -> None:
+        Normally called on the manager's loop; as a safety net, a call from
+        another thread after :meth:`start` marshals the event onto the
+        manager's loop via ``call_soon_threadsafe`` (delivery order is then
+        only guaranteed relative to other off-loop calls from that thread).
+        """
+        loop = self._loop
         try:
-            await outcome
-        except Exception:
-            logger.exception("Async job event listener failed handling %r", event_type)
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if loop is not None and running is not loop:
+            loop.call_soon_threadsafe(self._events.put_nowait, event)
+        else:
+            self._events.put_nowait(event)
+
+    async def _dispatcher_loop(self) -> None:
+        """Deliver queued events to listeners in strict emission order."""
+        while True:
+            event = await self._events.get()
+            try:
+                if event is None:
+                    return  # aclose() sentinel: queue drained, we are done
+                # Snapshot: a listener removing itself (or others) during
+                # dispatch must not skip the remaining listeners.
+                for listener in list(self._listeners):
+                    try:
+                        outcome = listener(event)
+                        if inspect.isawaitable(outcome):
+                            await outcome
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "Job event listener %r failed handling %r", listener, event.type
+                        )
+            finally:
+                self._events.task_done()
 
 
 def get_job_manager(request: Request) -> JobManager:
@@ -530,7 +675,9 @@ def get_job_manager(request: Request) -> JobManager:
         @router.post("/jobs")
         async def create_job(manager: Annotated[JobManager, Depends(get_job_manager)]): ...
 
-    The instance is created in ``create_app()`` and started/closed by the
-    application lifespan.
+    Endpoints using the manager must be ``async def`` so they run on the
+    manager's event loop (see the concurrency contract above). The instance is
+    created and started by the application lifespan (a fresh one per lifespan
+    cycle) and stored on ``app.state.job_manager``.
     """
     return cast(JobManager, request.app.state.job_manager)

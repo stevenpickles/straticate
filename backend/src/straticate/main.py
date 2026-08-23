@@ -7,7 +7,6 @@ Run the development server with::
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,14 +24,17 @@ API_PREFIX = "/api/v1"
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    """Run the job manager for the lifetime of the application.
+    """Run a job manager for the lifetime of the application.
 
-    The :class:`JobManager` instance is created in :func:`create_app` and
-    stored on ``app.state.job_manager`` (retrieved in endpoints via
-    :func:`straticate.jobs.get_job_manager`); its worker task starts here and
-    is shut down cleanly on application exit.
+    A **fresh** :class:`JobManager` is created per lifespan cycle (a closed
+    manager cannot be restarted, and an app object may go through several
+    lifespans, e.g. under repeated ``TestClient`` usage). It is stored on
+    ``app.state.job_manager`` (retrieved in endpoints via
+    :func:`straticate.jobs.get_job_manager`), started here, and shut down
+    cleanly on application exit.
     """
-    manager = cast(JobManager, app.state.job_manager)
+    manager = JobManager()
+    app.state.job_manager = manager
     manager.start()
     try:
         yield
@@ -57,7 +59,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Straticate", version=__version__, lifespan=_lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
-    app.state.job_manager = JobManager()
 
     app.add_middleware(
         CORSMiddleware,

@@ -23,15 +23,13 @@ they raise :class:`InvalidJobTransition` (which is deliberately *not* an
 
 from straticate.schemas.jobs import JobState
 
-_PROCESSING_ORDER: tuple[JobState, ...] = (
-    JobState.QUEUED,
-    JobState.PREPARING,
-    JobState.DECODING,
-    JobState.LOADING_MODEL,
-    JobState.SEPARATING,
-    JobState.POST_PROCESSING,
-    JobState.ENCODING,
-    JobState.COMPLETED,
+# The linear processing order is derived from the declaration order of
+# ``JobState`` (which documents itself as the processing order), excluding the
+# abnormal terminal states, which are handled specially in
+# ``assert_transition``. A stage added to the enum automatically joins the
+# order here — no second hand-maintained list to fall out of sync.
+_PROCESSING_ORDER: tuple[JobState, ...] = tuple(
+    state for state in JobState if state not in (JobState.CANCELLED, JobState.FAILED)
 )
 
 _ORDER_INDEX: dict[JobState, int] = {state: i for i, state in enumerate(_PROCESSING_ORDER)}

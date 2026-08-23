@@ -6,9 +6,11 @@ so timing is deterministic — no sleeps as synchronization.
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
+from typing import cast
 
 import pytest
 from fastapi import Request
+from fastapi.testclient import TestClient
 
 from straticate.errors import ApplicationError
 from straticate.jobs import JobContext, JobEvent, JobExecutor, JobManager, get_job_manager
@@ -418,6 +420,70 @@ async def test_backward_stage_change_fails_the_job(
     assert manager.get(job.id).state is JobState.FAILED
 
 
+# -- worker resilience ------------------------------------------------------
+
+
+async def test_non_separation_result_return_fails_job_and_worker_survives(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    """A protocol-violating return value fails the job, never the worker."""
+
+    async def bad_executor(job: Job, context: JobContext) -> SeparationResult:
+        return cast(SeparationResult, {"not": "a result"})
+
+    job = manager.submit(make_configuration(), bad_executor)
+    failed = await recorder.wait_for_terminal(job.id)
+
+    assert isinstance(failed, JobFailedEvent)
+    assert failed.error.code == "separation_failed"
+    assert "SeparationResult" in failed.error.message
+    assert manager.get(job.id).state is JobState.FAILED
+
+    # The worker survived: a subsequent job still runs to completion.
+    follow_up = manager.submit(make_configuration(), instant_executor)
+    assert isinstance(await recorder.wait_for_terminal(follow_up.id), JobCompletedEvent)
+
+
+async def test_executor_internal_cancelled_error_fails_job_and_worker_survives(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    """CancelledError raised by the executor (no shutdown) is a job failure."""
+
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        raise asyncio.CancelledError
+
+    job = manager.submit(make_configuration(), executor)
+    failed = await recorder.wait_for_terminal(job.id)
+
+    assert isinstance(failed, JobFailedEvent)
+    assert failed.error.code == "separation_failed"
+    assert manager.get(job.id).state is JobState.FAILED
+
+    follow_up = manager.submit(make_configuration(), instant_executor)
+    assert isinstance(await recorder.wait_for_terminal(follow_up.id), JobCompletedEvent)
+
+
+async def test_worker_survives_internal_terminal_marking_error(
+    manager: JobManager, recorder: EventRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a bug in the manager's own terminal-marking cannot stall the queue."""
+
+    def broken_mark_completed(entry: object, result: object) -> None:
+        raise RuntimeError("terminal marking bug")
+
+    monkeypatch.setattr(manager, "_mark_completed", broken_mark_completed)
+    job = manager.submit(make_configuration(), instant_executor)
+    failed = await recorder.wait_for_terminal(job.id)
+
+    assert isinstance(failed, JobFailedEvent)
+    assert failed.error.code == "separation_failed"
+    assert manager.get(job.id).state is JobState.FAILED
+
+    monkeypatch.undo()
+    follow_up = manager.submit(make_configuration(), instant_executor)
+    assert isinstance(await recorder.wait_for_terminal(follow_up.id), JobCompletedEvent)
+
+
 # -- listeners --------------------------------------------------------------
 
 
@@ -450,7 +516,12 @@ async def test_coroutine_listeners_are_supported(manager: JobManager) -> None:
     manager.add_listener(listener)
     job = manager.submit(make_configuration(), instant_executor)
     await asyncio.wait_for(done.wait(), timeout=WAIT_TIMEOUT)
-    assert [e.type for e in received] == ["job_created", "job_started", "job_completed"]
+    assert [e.type for e in received] == [
+        "job_created",
+        "job_started",
+        "job_stage_changed",
+        "job_completed",
+    ]
     assert all(e.job_id == job.id for e in received)
 
 
@@ -461,6 +532,70 @@ async def test_remove_listener_stops_delivery(manager: JobManager, recorder: Eve
     job = manager.submit(make_configuration(), instant_executor)
     await recorder.wait_for_terminal(job.id)
     assert removable.events == []
+
+
+async def test_listener_removing_itself_does_not_skip_later_listeners(
+    manager: JobManager,
+) -> None:
+    calls: list[str] = []
+    later = EventRecorder()
+
+    def self_removing(event: JobEvent) -> None:
+        calls.append(event.type)
+        manager.remove_listener(self_removing)
+
+    manager.add_listener(self_removing)
+    manager.add_listener(later)
+
+    job = manager.submit(make_configuration(), instant_executor)
+    await later.wait_for_terminal(job.id)
+
+    # The later listener received every event, including the one during whose
+    # dispatch the earlier listener removed itself.
+    assert [e.type for e in later.for_job(job.id)] == [
+        "job_created",
+        "job_started",
+        "job_stage_changed",
+        "job_completed",
+    ]
+    assert calls == ["job_created"]
+
+
+async def test_coroutine_listener_observes_events_in_emission_order(
+    manager: JobManager,
+) -> None:
+    """A slow coroutine listener never sees later events before earlier ones."""
+    received: list[str] = []
+    release = asyncio.Event()
+    done = asyncio.Event()
+
+    async def slow_listener(event: JobEvent) -> None:
+        if event.type == "job_created":
+            await release.wait()  # hold the first event's delivery
+        received.append(event.type)
+        if isinstance(event, JobCompletedEvent):
+            done.set()
+
+    manager.add_listener(slow_listener)
+    job = manager.submit(make_configuration(), instant_executor)
+
+    # Let the job run to completion (emitting all remaining events) while the
+    # first event's delivery is still gated.
+    async def job_terminal() -> None:
+        while not manager.get(job.id).state.is_terminal:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(job_terminal(), timeout=WAIT_TIMEOUT)
+    assert received == []  # strictly ordered: nothing may overtake the gate
+
+    release.set()
+    await asyncio.wait_for(done.wait(), timeout=WAIT_TIMEOUT)
+    assert received == [
+        "job_created",
+        "job_started",
+        "job_stage_changed",
+        "job_completed",
+    ]
 
 
 # -- progress throttling ----------------------------------------------------
@@ -493,6 +628,101 @@ async def test_progress_events_are_throttled_and_final_progress_delivered() -> N
         await m.aclose()
 
 
+async def test_nan_progress_report_is_ignored(manager: JobManager, recorder: EventRecorder) -> None:
+    """A NaN progress report is dropped entirely — never stored in the job."""
+    reported = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        context.set_stage(JobState.SEPARATING)
+        context.report_progress(0.25, 1, 4)
+        context.report_progress(float("nan"), 2, 4)
+        reported.set()
+        await gate.wait()
+        return make_result(job.id)
+
+    job = manager.submit(make_configuration(), executor)
+    await asyncio.wait_for(reported.wait(), timeout=WAIT_TIMEOUT)
+    assert manager.get(job.id).progress == 0.25  # NaN never reached the record
+
+    gate.set()
+    await recorder.wait_for_terminal(job.id)
+    progress_events = [e for e in recorder.for_job(job.id) if isinstance(e, JobProgressEvent)]
+    assert [e.progress for e in progress_events] == [0.25]
+    assert manager.get(job.id).state is JobState.COMPLETED
+
+
+async def test_negative_audio_seconds_are_clamped_to_zero(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        context.set_stage(JobState.SEPARATING)
+        context.report_progress(1.0, 4, 4, audio_processed_seconds=-1e-9, audio_total_seconds=-5.0)
+        return make_result(job.id)
+
+    job = manager.submit(make_configuration(), executor)
+    completed = await recorder.wait_for_terminal(job.id)
+    assert isinstance(completed, JobCompletedEvent)
+
+    progress_events = [e for e in recorder.for_job(job.id) if isinstance(e, JobProgressEvent)]
+    assert len(progress_events) == 1
+    assert progress_events[0].audio_processed_seconds == 0.0
+    assert progress_events[0].audio_total_seconds == 0.0
+
+
+# -- state authority --------------------------------------------------------
+
+
+async def test_running_job_is_preparing_before_first_set_stage(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    """The manager itself moves queued → preparing when the job starts."""
+    started = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        assert job.state is JobState.PREPARING  # snapshot already reflects it
+        started.set()
+        await gate.wait()
+        return make_result(job.id)
+
+    job = manager.submit(make_configuration(), executor)
+    await asyncio.wait_for(started.wait(), timeout=WAIT_TIMEOUT)
+
+    live = manager.get(job.id)
+    assert live.state is JobState.PREPARING
+    assert live.started_at is not None
+
+    # Cancelling in this window is cooperative (token), not immediate.
+    manager.cancel(job.id)
+    assert manager.get(job.id).state is JobState.PREPARING
+    gate.set()
+
+    cancelled = await recorder.wait_for_terminal(job.id)
+    assert isinstance(cancelled, JobCancelledEvent)
+    assert cancelled.stage_at_cancellation is JobState.PREPARING
+
+
+async def test_set_stage_to_current_stage_is_a_noop(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        context.set_stage(JobState.PREPARING)  # already preparing: no-op
+        context.set_stage(JobState.SEPARATING)
+        context.set_stage(JobState.SEPARATING)  # same stage again: no-op
+        return make_result(job.id)
+
+    job = manager.submit(make_configuration(), executor)
+    await recorder.wait_for_terminal(job.id)
+
+    stage_events = [e for e in recorder.for_job(job.id) if isinstance(e, JobStageChangedEvent)]
+    assert [(e.previous_stage, e.stage) for e in stage_events] == [
+        (JobState.QUEUED, JobState.PREPARING),
+        (JobState.PREPARING, JobState.SEPARATING),
+    ]
+    assert manager.get(job.id).state is JobState.COMPLETED
+
+
 # -- shutdown ---------------------------------------------------------------
 
 
@@ -523,15 +753,28 @@ async def test_aclose_with_running_and_queued_jobs_shuts_down_cleanly(
     # Second aclose (from the fixture) must be a clean no-op.
 
 
+async def test_cancel_after_aclose_raises_runtime_error(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    job = manager.submit(make_configuration(), instant_executor)
+    await recorder.wait_for_terminal(job.id)
+    await manager.aclose()
+
+    with pytest.raises(RuntimeError):
+        manager.cancel(job.id)
+    # Reads remain available after close.
+    assert manager.get(job.id).state is JobState.COMPLETED
+
+
 # -- app wiring -------------------------------------------------------------
 
 
 async def test_app_lifespan_starts_and_closes_the_job_manager() -> None:
     app = create_app()
-    manager = app.state.job_manager
-    assert isinstance(manager, JobManager)
 
     async with app.router.lifespan_context(app):
+        manager = app.state.job_manager
+        assert isinstance(manager, JobManager)
         request = Request({"type": "http", "app": app})
         assert get_job_manager(request) is manager
 
@@ -543,3 +786,29 @@ async def test_app_lifespan_starts_and_closes_the_job_manager() -> None:
 
     with pytest.raises(RuntimeError):
         manager.submit(make_configuration(), instant_executor)
+
+
+def test_two_sequential_testclient_lifespans_on_one_app() -> None:
+    """A second ``TestClient`` lifespan on the same app must not crash."""
+    app = create_app()
+    managers: list[JobManager] = []
+    for _ in range(2):
+        with TestClient(app):
+            manager = app.state.job_manager
+            assert isinstance(manager, JobManager)
+            managers.append(manager)
+    first, second = managers
+    assert first is not second  # a fresh manager per lifespan cycle
+
+
+async def test_second_lifespan_manager_still_processes_jobs() -> None:
+    """Each lifespan cycle yields a manager that actually runs jobs."""
+    app = create_app()
+    for _ in range(2):
+        async with app.router.lifespan_context(app):
+            manager = app.state.job_manager
+            assert isinstance(manager, JobManager)
+            recorder = EventRecorder()
+            manager.add_listener(recorder)
+            job = manager.submit(make_configuration(), instant_executor)
+            assert isinstance(await recorder.wait_for_terminal(job.id), JobCompletedEvent)
