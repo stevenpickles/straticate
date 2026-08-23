@@ -191,12 +191,21 @@ Cancelling a `queued` job removes it from the queue directly.
 
 ```python
 class Separator(Protocol):
+    @property
+    def info(self) -> SeparatorInfo: ...          # model descriptor (§9 fields)
+
+    def runtime_stats(self) -> SeparatorRuntimeStats | None: ...   # telemetry source (§12)
+
     async def separate(
         self,
         input_path: Path,
         configuration: SeparationConfiguration,
-        progress_callback: ProgressCallback,   # (stage, progress, chunk info)
+        progress_callback: ProgressCallback,      # (chunks done/total, audio seconds)
         cancellation_token: CancellationToken,
+        *,
+        job_id: str,
+        output_dir: Path,
+        stage_callback: StageCallback | None = None,   # (stage)
     ) -> SeparationResult: ...
 ```
 
@@ -204,7 +213,16 @@ Rules:
 
 - The job manager and API never know which architecture runs underneath.
 - Separators report progress as `completed_chunks / total_chunks` — real work,
-  never a timer, once real inference exists.
+  never a timer, once real inference exists. Stage changes are a *separate*
+  callback so a separator announces only the stages it really performs; the
+  `JobExecutor` adapter forwards both verbatim and invents nothing.
+- `job_id` and `output_dir` are keyword-only inputs, not part of the
+  `SeparationConfiguration` contract: a separator writes its stems where the
+  caller tells it to, and the on-disk layout stays the application's decision
+  (`{data_dir}/jobs/{job_id}/stems/{stem}.wav`).
+- A separator instance is long-lived and runs **one separation at a time**,
+  which is what makes `runtime_stats()` unambiguous. Compute that would block
+  the event loop is offloaded by the separator itself.
 - Implementations: `FakeSeparator` first (see §8), then RoFormer-, MDX/MDXC-,
   and Demucs-family separators.
 - A separator declares nothing about UI; the frontend renders choices from
@@ -219,6 +237,14 @@ fake model/GPU statistics, cooperative cancellation, and placeholder stems
 powers all normal CI and enables the complete
 upload → configure → job → WebSocket → progress → telemetry → results → export
 loop with no CUDA, no model downloads, and no ML infrastructure.
+
+The placeholder stems are **not** separation and never pretend to be: the
+source is decoded with FFmpeg and each stem is one cheap, deterministic
+feed-forward comb filter of it (per-stem delay, polarity and gain), so the
+outputs are playable, audibly distinct, never silent, and byte-reproducible.
+The number of stems always comes from the model's stem list, so two-stem and
+four-stem modes exercise the same code path. See
+[docs/features/014-fake-separator.md](docs/features/014-fake-separator.md).
 
 ## 9. Model catalog and model management
 
