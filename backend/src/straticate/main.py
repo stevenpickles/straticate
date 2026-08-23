@@ -5,6 +5,10 @@ Run the development server with::
     uv run uvicorn straticate.main:app --port 8000
 """
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from typing import cast
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -13,9 +17,27 @@ from straticate.api import audio, system
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
 from straticate.errors import register_error_handlers
+from straticate.jobs import JobManager
 from straticate.logging import configure_logging
 
 API_PREFIX = "/api/v1"
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    """Run the job manager for the lifetime of the application.
+
+    The :class:`JobManager` instance is created in :func:`create_app` and
+    stored on ``app.state.job_manager`` (retrieved in endpoints via
+    :func:`straticate.jobs.get_job_manager`); its worker task starts here and
+    is shut down cleanly on application exit.
+    """
+    manager = cast(JobManager, app.state.job_manager)
+    manager.start()
+    try:
+        yield
+    finally:
+        await manager.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -32,9 +54,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
-    app = FastAPI(title="Straticate", version=__version__)
+    app = FastAPI(title="Straticate", version=__version__, lifespan=_lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
+    app.state.job_manager = JobManager()
 
     app.add_middleware(
         CORSMiddleware,
