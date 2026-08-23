@@ -33,11 +33,18 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE = '/api/v1'
+/** URL prefix for all v1 REST routes (proxied to the backend in development). */
+export const API_BASE = '/api/v1'
 
-async function parseErrorBody(response: Response): Promise<ApiErrorBody> {
+/**
+ * Interpret a raw response body as the backend error envelope
+ * (`{"error": {code, message, detail}}`), falling back to a generic
+ * `unknown_error` body when it is not valid JSON or not the envelope.
+ * Shared by the fetch-based helpers here and XHR-based calls (uploads).
+ */
+export function errorBodyFromText(status: number, text: string): ApiErrorBody {
   try {
-    const payload: unknown = await response.json()
+    const payload: unknown = JSON.parse(text)
     if (
       typeof payload === 'object' &&
       payload !== null &&
@@ -51,7 +58,7 @@ async function parseErrorBody(response: Response): Promise<ApiErrorBody> {
         message:
           typeof error.message === 'string'
             ? error.message
-            : `HTTP ${String(response.status)}`,
+            : `HTTP ${String(status)}`,
         detail: error.detail,
       }
     }
@@ -60,8 +67,13 @@ async function parseErrorBody(response: Response): Promise<ApiErrorBody> {
   }
   return {
     code: 'unknown_error',
-    message: `HTTP ${String(response.status)}`,
+    message: `HTTP ${String(status)}`,
   }
+}
+
+async function parseErrorBody(response: Response): Promise<ApiErrorBody> {
+  const text = await response.text().catch(() => '')
+  return errorBodyFromText(response.status, text)
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -87,6 +99,14 @@ export function post<T>(path: string, body?: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
   })
+}
+
+/**
+ * Perform a DELETE request against the backend. Resolves `undefined` for a
+ * `204 No Content` response; otherwise parses the JSON response.
+ */
+export function del<T = void>(path: string): Promise<T> {
+  return request<T>(path, { method: 'DELETE' })
 }
 
 /** Fetch the backend health status. */
