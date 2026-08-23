@@ -3,7 +3,7 @@
 Branch: `010-model-catalog`
 Status: PR OPEN
 Dependencies: 005
-PR: #…
+PR: #11
 
 ## Objective
 
