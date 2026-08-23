@@ -45,10 +45,10 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 | 002 | Backend skeleton (FastAPI, tooling, health)  | MERGED  | 001        | `002-backend-skeleton` | #2 |
 | 003 | Frontend skeleton (Vite/React/TS, shell)     | MERGED  | 001        | `003-frontend-skeleton` | #3 |
 | 004 | CI pipeline (backend + frontend checks)      | MERGED  | 002, 003   | `004-ci-pipeline` | #4 |
-| 005 | API contracts v1 (schemas, OpenAPI → TS)     | PR OPEN | 002        | `005-api-contracts` | #5 |
-| 006 | Audio upload + validation + temp storage     | PR OPEN | 005        | `006-audio-upload` | #6 |
+| 005 | API contracts v1 (schemas, OpenAPI → TS)     | MERGED  | 002        | `005-api-contracts` | #5 |
+| 006 | Audio upload + validation + temp storage     | MERGED  | 005        | `006-audio-upload` | #6 |
 | 007 | Audio metadata extraction (ffprobe)          | MERGED  | 006        | folded into 006 | #6 |
-| 008 | Drag-drop + file picker + upload state UI    | PLANNED | 003, 005   | | |
+| 008 | Drag-drop + file picker + upload state UI    | PR OPEN | 003, 005   | `008-drag-drop-ui` | #7 |
 | 009 | Metadata display UI                          | PLANNED | 008        | | |
 | 010 | Model catalog + capabilities backend         | PLANNED | 005        | | |
 | 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |

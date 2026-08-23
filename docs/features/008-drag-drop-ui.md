@@ -3,7 +3,7 @@
 Branch: `008-drag-drop-ui`
 Status: PR OPEN
 Dependencies: 003, 005
-PR: #…
+PR: #7
 
 ## Objective
 
