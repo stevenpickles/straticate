@@ -75,8 +75,8 @@ is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
 | 010 | Model catalog + capabilities backend         | PR OPEN | 005        | `010-model-catalog` | #11 |
 | 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |
 | 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |
-| 013 | WebSocket event hub + typed events           | PLANNED | 012        | | |
-| 014 | Separator interface + FakeSeparator          | PR OPEN | 012        | `014-fake-separator` | #15 |
+| 013 | WebSocket event hub + typed events           | PR OPEN | 012        | `013-websocket-hub` | #13 |
+| 014 | Separator interface + FakeSeparator          | MERGED  | 012        | `014-fake-separator` | #15 |
 | 015 | Job REST endpoints (create/get/cancel/list)  | PLANNED | 012, 014   | | |
 | 016 | Frontend job + WebSocket clients             | PR OPEN | 003, 005*  | `016-job-ws-clients` | #14 |
 | 017 | Progress UI + cancel + error handling        | PLANNED | 011, 016   | | |
