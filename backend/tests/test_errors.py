@@ -1,5 +1,6 @@
 """Tests for the consistent error envelope."""
 
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -76,3 +77,26 @@ async def test_unhandled_exception_returns_internal_error(app: FastAPI) -> None:
     assert error["code"] == "internal_error"
     assert "secret traceback detail" not in response.text
     assert "RuntimeError" not in response.text
+
+
+def test_application_error_to_error_info_json_encodes_detail() -> None:
+    exc = ApplicationError(
+        "teapot",
+        "I'm a teapot.",
+        status_code=418,
+        detail={"when": datetime(2026, 1, 1, tzinfo=UTC), "hint": "short and stout"},
+    )
+    info = exc.to_error_info()
+    assert info.code == "teapot"
+    assert info.message == "I'm a teapot."
+    # detail passes through jsonable_encoder, exactly like error_response:
+    # non-JSON-native values become their JSON-safe representations.
+    when = info.detail["when"]
+    assert isinstance(when, str)
+    assert when.startswith("2026-01-01T00:00:00")
+    assert info.detail["hint"] == "short and stout"
+
+
+def test_application_error_to_error_info_defaults_to_empty_detail() -> None:
+    info = ApplicationError("code_only", "No detail.").to_error_info()
+    assert info.detail == {}
