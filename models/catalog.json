@@ -1,0 +1,29 @@
+{
+  "catalog_version": 1,
+  "models": [
+    {
+      "schema_version": 1,
+      "id": "fake-vocals-001",
+      "display_name": "Fake Vocals (development)",
+      "architecture": "fake",
+      "version": "1.0",
+      "separation_mode": "vocals",
+      "stems": ["vocals", "instrumental"],
+      "sample_rate": 44100,
+      "requirements": { "recommended_vram_mb": 0 },
+      "capabilities": { "cuda": true, "cpu": true }
+    },
+    {
+      "schema_version": 1,
+      "id": "fake-standard-001",
+      "display_name": "Fake Standard Stems (development)",
+      "architecture": "fake",
+      "version": "1.0",
+      "separation_mode": "standard_stems",
+      "stems": ["vocals", "drums", "bass", "other"],
+      "sample_rate": 44100,
+      "requirements": { "recommended_vram_mb": 0 },
+      "capabilities": { "cuda": true, "cpu": true }
+    }
+  ]
+}

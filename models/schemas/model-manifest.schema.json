@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://straticate.dev/schemas/model-manifest.schema.json",
+  "title": "Straticate model manifest",
+  "description": "A logical model entry in the Straticate model catalog. schema_version 1.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "id",
+    "display_name",
+    "architecture",
+    "version",
+    "separation_mode",
+    "stems",
+    "sample_rate",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "description": "Stable logical model ID, e.g. 'vocals-hq-001'."
+    },
+    "display_name": { "type": "string", "minLength": 1 },
+    "architecture": {
+      "type": "string",
+      "description": "Implementation family, e.g. 'mel_band_roformer', 'mdx', 'mdxc', 'demucs', 'fake'. Open set — application code must not branch on it outside the inference package."
+    },
+    "version": { "type": "string", "minLength": 1 },
+    "separation_mode": {
+      "type": "string",
+      "description": "Logical mode ID this model serves, e.g. 'vocals', 'standard_stems'."
+    },
+    "stems": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "sample_rate": { "type": "integer", "minimum": 8000 },
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "recommended_vram_mb": { "type": "integer", "minimum": 0 },
+        "minimum_ram_mb": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Compute backends this model supports. Open set of backend IDs.",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "artifact": {
+      "type": "object",
+      "description": "Downloadable weights artifact. Absent for built-in separators (e.g. fake).",
+      "required": ["download_url", "size_bytes", "sha256"],
+      "additionalProperties": false,
+      "properties": {
+        "download_url": { "type": "string", "format": "uri" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
+    "licensing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code_license": { "type": "string" },
+        "weights_license": { "type": "string" },
+        "redistribution_permitted": { "type": "boolean" },
+        "commercial_use_permitted": { "type": "boolean" },
+        "attribution": { "type": "string" }
+      }
+    },
+    "default_inference_parameters": {
+      "type": "object",
+      "description": "Architecture-specific defaults (segment size, overlap, batch size, …). Opaque to application code; consumed only by the matching separator implementation.",
+      "additionalProperties": true
+    }
+  }
+}
