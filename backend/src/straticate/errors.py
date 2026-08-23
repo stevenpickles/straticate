@@ -62,6 +62,31 @@ class ApplicationError(Exception):
         self.status_code = status_code
         self.detail: dict[str, Any] = detail or {}
 
+    def to_error_info(self) -> ErrorInfo:
+        """This error as the contract :class:`~straticate.schemas.ErrorInfo`.
+
+        ``detail`` is passed through ``jsonable_encoder`` (exactly as
+        :func:`error_response` does) so every consumer — the HTTP exception
+        handler and the job manager's failure path alike — produces the same
+        JSON-safe shape.
+        """
+        return ErrorInfo(code=self.code, message=self.message, detail=jsonable_encoder(self.detail))
+
+
+def _envelope_response(
+    status_code: int,
+    error: ErrorInfo,
+    *,
+    headers: Mapping[str, str] | None = None,
+) -> JSONResponse:
+    """Wrap an :class:`ErrorInfo` in the envelope as a :class:`JSONResponse`."""
+    envelope = ErrorEnvelope(error=error)
+    return JSONResponse(
+        status_code=status_code,
+        content=envelope.model_dump(mode="json"),
+        headers=dict(headers) if headers is not None else None,
+    )
+
 
 def error_response(
     status_code: int,
@@ -78,24 +103,21 @@ def error_response(
     :class:`~straticate.schemas.ErrorInfo`) so responses and the published
     OpenAPI contract cannot drift apart.
     """
-    envelope = ErrorEnvelope(
-        error=ErrorInfo(
+    return _envelope_response(
+        status_code,
+        ErrorInfo(
             code=code,
             message=message,
             detail=jsonable_encoder(detail) if detail is not None else {},
-        )
-    )
-    return JSONResponse(
-        status_code=status_code,
-        content=envelope.model_dump(mode="json"),
-        headers=dict(headers) if headers is not None else None,
+        ),
+        headers=headers,
     )
 
 
 async def _handle_application_error(request: Request, exc: Exception) -> JSONResponse:
     """Map :class:`ApplicationError` to its envelope and HTTP status."""
     assert isinstance(exc, ApplicationError)
-    return error_response(exc.status_code, exc.code, exc.message, exc.detail)
+    return _envelope_response(exc.status_code, exc.to_error_info())
 
 
 async def _handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
