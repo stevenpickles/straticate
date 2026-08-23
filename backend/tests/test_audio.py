@@ -1,0 +1,131 @@
+"""Tests for the /api/v1/audio endpoints (upload, fetch, delete)."""
+
+import io
+import wave
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi import FastAPI
+
+from straticate.config import Settings
+from straticate.main import create_app
+
+AUDIO_URL = "/api/v1/audio"
+
+
+def make_wav_bytes(seconds: float = 1.0, channels: int = 2, sample_rate: int = 44100) -> bytes:
+    """Generate an in-memory PCM16 WAV file of silence."""
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as writer:
+        writer.setnchannels(channels)
+        writer.setsampwidth(2)
+        writer.setframerate(sample_rate)
+        writer.writeframes(b"\x00\x00" * int(seconds * sample_rate) * channels)
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def settings(tmp_path: Path) -> Settings:
+    """Settings whose data_dir lives inside the test's tmp_path."""
+    return Settings(data_dir=tmp_path / "data")
+
+
+@pytest.fixture
+def app(settings: Settings) -> FastAPI:
+    """Override the shared app fixture with tmp_path-backed settings."""
+    return create_app(settings)
+
+
+async def upload(client: httpx.AsyncClient, filename: str, content: bytes) -> httpx.Response:
+    """POST ``content`` as a multipart upload named ``filename``."""
+    return await client.post(AUDIO_URL, files={"file": (filename, content, "audio/wav")})
+
+
+async def test_upload_returns_probed_metadata(
+    client: httpx.AsyncClient, settings: Settings
+) -> None:
+    wav = make_wav_bytes()
+    response = await upload(client, "song.wav", wav)
+    assert response.status_code == 201
+    body = response.json()
+    assert body["filename"] == "song.wav"
+    assert body["size_bytes"] == len(wav)
+    assert body["uploaded_at"].endswith("Z") or "+" in body["uploaded_at"]
+
+    metadata = body["metadata"]
+    assert metadata["duration_seconds"] == pytest.approx(1.0, abs=0.05)
+    assert metadata["channels"] == 2
+    assert metadata["sample_rate_hz"] == 44100
+    assert metadata["container"] == "wav"
+    assert metadata["codec"].startswith("pcm")
+    assert metadata["bit_depth"] == 16
+
+    stored = settings.data_dir / "audio" / body["id"] / "original.wav"
+    assert stored.is_file()
+    assert stored.stat().st_size == len(wav)
+
+
+async def test_upload_text_file_rejected(client: httpx.AsyncClient, settings: Settings) -> None:
+    response = await upload(client, "notes.txt", b"this is not audio at all\n")
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "audio_not_decodable"
+    assert (
+        not any((settings.data_dir / "audio").glob("*"))
+        or not (settings.data_dir / "audio").exists()
+    )
+
+
+async def test_upload_over_size_limit_rejected(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", max_upload_bytes=1024)
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await upload(client, "song.wav", make_wav_bytes())
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"]["code"] == "audio_too_large"
+    assert body["error"]["detail"]["max_upload_bytes"] == 1024
+    audio_root = settings.data_dir / "audio"
+    assert not audio_root.exists() or not any(audio_root.iterdir())
+
+
+async def test_get_returns_uploaded_record(client: httpx.AsyncClient) -> None:
+    uploaded = (await upload(client, "song.wav", make_wav_bytes())).json()
+    response = await client.get(f"{AUDIO_URL}/{uploaded['id']}")
+    assert response.status_code == 200
+    assert response.json() == uploaded
+
+
+async def test_get_unknown_id_404(client: httpx.AsyncClient) -> None:
+    response = await client.get(f"{AUDIO_URL}/01UNKNOWNULID0000000000000")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "audio_not_found"
+
+
+async def test_delete_unknown_id_404(client: httpx.AsyncClient) -> None:
+    response = await client.delete(f"{AUDIO_URL}/01UNKNOWNULID0000000000000")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "audio_not_found"
+
+
+async def test_delete_removes_record_and_files(
+    client: httpx.AsyncClient, settings: Settings
+) -> None:
+    uploaded = (await upload(client, "song.wav", make_wav_bytes())).json()
+    audio_dir = settings.data_dir / "audio" / uploaded["id"]
+    assert audio_dir.is_dir()
+
+    response = await client.delete(f"{AUDIO_URL}/{uploaded['id']}")
+    assert response.status_code == 204
+    assert not audio_dir.exists()
+    assert (await client.get(f"{AUDIO_URL}/{uploaded['id']}")).status_code == 404
+
+
+async def test_lying_extension_is_ignored(client: httpx.AsyncClient) -> None:
+    response = await upload(client, "song.mp3", make_wav_bytes())
+    assert response.status_code == 201
+    metadata = response.json()["metadata"]
+    assert metadata["container"] == "wav"
+    assert metadata["codec"].startswith("pcm")

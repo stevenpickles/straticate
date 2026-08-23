@@ -9,7 +9,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from straticate import __version__
-from straticate.api import system
+from straticate.api import audio, system
+from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
 from straticate.errors import register_error_handlers
 from straticate.logging import configure_logging
@@ -32,6 +33,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(settings.log_level)
 
     app = FastAPI(title="Straticate", version=__version__)
+    app.state.settings = settings
+    app.state.audio_store = AudioStore(settings.data_dir)
 
     app.add_middleware(
         CORSMiddleware,
@@ -43,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_error_handlers(app)
     app.include_router(system.router, prefix=API_PREFIX)
+    app.include_router(audio.router, prefix=API_PREFIX)
 
     return app
 
