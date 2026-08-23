@@ -3,7 +3,19 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_models_dir() -> Path:
+    """Resolve the repository's ``models/`` directory (cwd-independent).
+
+    This file lives at ``backend/src/straticate/config.py``, so the repository
+    root is three parents up. Installed non-editably (outside a checkout) the
+    directory will not exist, and ``STRATICATE_MODELS_DIR`` must point at the
+    catalog explicitly.
+    """
+    return Path(__file__).resolve().parents[3] / "models"
 
 
 class Settings(BaseSettings):
@@ -26,6 +38,14 @@ class Settings(BaseSettings):
 
     Relative paths resolve against the process working directory.
     Subdirectories are created lazily by their consumers.
+    """
+
+    models_dir: Path = Field(default_factory=_default_models_dir)
+    """Directory holding the model catalog (``catalog.json``) and its schemas.
+
+    Defaults to the repository's ``models/`` directory, resolved from this
+    module's location so the server can be started from any working directory.
+    Override with ``STRATICATE_MODELS_DIR``.
     """
 
     max_upload_bytes: int = 1024**3

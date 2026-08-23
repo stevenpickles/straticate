@@ -255,6 +255,14 @@ over catalog entries; users are never asked to choose architectures or
 inference parameters. Advanced per-model tuning may appear later behind an
 optional advanced UI.
 
+The mapping is declared in the catalog: a model's optional `quality_tier`
+(`fast` / `balanced` / `high_quality`, defaulting to `balanced`) names the tier
+it backs, and it must be unique within its `separation_mode` because the tier ID
+is what a job's `quality_id` selects. Separation modes are derived from the
+catalog at startup — stems from the models (which must agree), labels from the
+catalog file's optional `separation_modes` table or a humanized ID — so no mode,
+stem list, or tier is hardcoded in application code.
+
 ## 10. Compute device abstraction
 
 The backend exposes *logical* compute devices; raw PyTorch device objects never

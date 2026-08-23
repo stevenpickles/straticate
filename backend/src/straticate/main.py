@@ -13,11 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from straticate import __version__
 from straticate.api import audio, system
+from straticate.api import models as models_api
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
 from straticate.errors import register_error_handlers
 from straticate.jobs import JobManager
 from straticate.logging import configure_logging
+from straticate.models import ModelCatalog
 
 API_PREFIX = "/api/v1"
 
@@ -52,6 +54,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Returns:
         A fully configured :class:`FastAPI` instance with logging, CORS,
         routers, and error handlers installed.
+
+    Raises:
+        ModelCatalogError: If ``settings.models_dir`` holds no valid model
+            catalog. The application deliberately refuses to start rather than
+            serve an empty set of separation choices.
     """
     settings = settings or get_settings()
     configure_logging(settings.log_level)
@@ -59,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Straticate", version=__version__, lifespan=_lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
+    app.state.model_catalog = ModelCatalog.from_directory(settings.models_dir)
 
     app.add_middleware(
         CORSMiddleware,
@@ -71,6 +79,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(system.router, prefix=API_PREFIX)
     app.include_router(audio.router, prefix=API_PREFIX)
+    app.include_router(models_api.router, prefix=API_PREFIX)
 
     return app
 

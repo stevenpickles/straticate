@@ -33,6 +33,11 @@
       "type": "string",
       "description": "Logical mode ID this model serves, e.g. 'vocals', 'standard_stems'."
     },
+    "quality_tier": {
+      "type": "string",
+      "enum": ["fast", "balanced", "high_quality"],
+      "description": "User-facing quality tier this model backs within its separation mode. Omitted means 'balanced'. Two models in the same separation_mode must not claim the same tier: the tier ID is what a job request's quality_id selects."
+    },
     "stems": {
       "type": "array",
       "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
