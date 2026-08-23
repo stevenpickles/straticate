@@ -39,25 +39,36 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
 ## Current state (2026-08-23)
 
-Phases 0–2 are merged into `dev`, plus the job engine. Working today: the
-FastAPI backend with the shared contract layer, audio upload/probe/delete, the
-drag-drop upload UI, and the asynchronous job manager (queue, state machine,
-cancellation, typed event listeners) — 138 backend tests and 45 frontend tests,
-all CI-enforced.
+Phases 0–5 are substantially merged into `dev`: features 001–010 and 012–014,
+016, and 018. **256 backend tests and 186 frontend tests**, all CI-enforced on
+every PR.
 
-**Next up (all dependencies MERGED, safe to run in parallel):**
+Working today:
 
-- **013** WebSocket event hub — subscribes to the job manager's listener hook
-  and pushes typed events; endpoint handlers must be `async def` (see
-  `docs/features/012-job-manager.md`).
-- **014** Separator interface + FakeSeparator — adapts to the `JobExecutor`
-  protocol.
-- **009** Metadata display UI · **010** Model catalog · **016** Frontend job/WS
-  clients · **018** Compute device detection.
+- **Backend** — FastAPI app with the shared contract layer (Pydantic → OpenAPI →
+  generated TypeScript), audio upload/probe/delete, the model catalog serving
+  capability-derived separation modes, compute-device detection (CUDA via an
+  *optional* torch probe, CPU fallback; no torch dependency yet), the
+  asynchronous job manager, the WebSocket event hub, and the `Separator`
+  abstraction with a working `FakeSeparator`.
+- **Frontend** — app shell, drag-drop/file-picker upload with progress, the
+  audio metadata panel, and the typed job REST + WebSocket clients with
+  reconnect.
 
-Then **015** (job REST endpoints, needs 012 + 014), after which milestone **M1**
-is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
-**029**.
+**Next up — 015 is the critical path.** `015` (job REST endpoints) is the last
+piece joining the halves: it resolves audio + model + device, builds a
+`SeparatorJobExecutor` (feature 014), submits it to the job manager (012), and
+lets events flow out through the hub (013) to the already-built frontend
+clients (016). It depends only on MERGED work.
+
+Then, in parallel: **011** (mode/quality selection UI, consuming
+`/separation-modes`), **017** (progress UI + cancel), **019** (telemetry
+sampler — read the "what 019 must do" sections in the 013/014/018 feature
+docs), **020** (telemetry panel), and after 015: **021**/**022** (result
+serving + export) and **023**/**024** (stem player + export UI) → milestone
+**M1**.
+
+Deferred review findings from PRs #5 and #8 are tracked as feature **029**.
 
 ## Feature ledger
 
@@ -72,15 +83,15 @@ is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
 | 007 | Audio metadata extraction (ffprobe)          | MERGED  | 006        | folded into 006 | #6 |
 | 008 | Drag-drop + file picker + upload state UI    | MERGED  | 003, 005   | `008-drag-drop-ui` | #7 |
 | 009 | Metadata display UI                          | MERGED  | 008        | `009-metadata-display` | #10 |
-| 010 | Model catalog + capabilities backend         | PR OPEN | 005        | `010-model-catalog` | #11 |
+| 010 | Model catalog + capabilities backend         | MERGED  | 005        | `010-model-catalog` | #11 |
 | 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |
 | 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |
-| 013 | WebSocket event hub + typed events           | PR OPEN | 012        | `013-websocket-hub` | #13 |
+| 013 | WebSocket event hub + typed events           | MERGED  | 012        | `013-websocket-hub` | #13 |
 | 014 | Separator interface + FakeSeparator          | MERGED  | 012        | `014-fake-separator` | #15 |
 | 015 | Job REST endpoints (create/get/cancel/list)  | PLANNED | 012, 014   | | |
-| 016 | Frontend job + WebSocket clients             | PR OPEN | 003, 005*  | `016-job-ws-clients` | #14 |
+| 016 | Frontend job + WebSocket clients             | MERGED  | 003, 005*  | `016-job-ws-clients` | #14 |
 | 017 | Progress UI + cancel + error handling        | PLANNED | 011, 016   | | |
-| 018 | Compute device detection + devices API       | PR OPEN | 005        | `018-device-detection` | #12 |
+| 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
 | 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
 | 020 | Telemetry panel UI (model/GPU/processing)    | PLANNED | 016        | | |
 | 021 | Result management + stem serving             | PLANNED | 014, 015   | | |
