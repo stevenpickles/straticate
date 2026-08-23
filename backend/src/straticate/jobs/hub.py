@@ -25,22 +25,34 @@ Design constraints that shape this module:
 Backpressure / overflow policy
 ------------------------------
 
-When a client's outbound queue is full, the hub inspects the **oldest** queued
-frame:
+When a client's outbound queue is full, the hub looks for the **oldest
+droppable** frame anywhere in the buffer:
 
-- If it is a *superseded* frame — ``job_progress`` or ``runtime_metrics``, both
-  of which are periodic samples whose newer sibling carries strictly fresher
-  state — it is dropped and the new frame takes its place.
-- Otherwise the buffer is saturated with state that may not be discarded
-  (``job_created``/``job_started``/``job_stage_changed`` and the terminal
-  ``job_completed``/``job_cancelled``/``job_failed``). The client is then
-  disconnected with close code ``1013`` (*try again later*) rather than blocked
-  or silently truncated. Per ``docs/contracts/websocket-events.md`` clients
-  re-synchronise over REST on (re)connect, so a loud disconnect is recoverable
-  while a silently dropped terminal event would not be.
+- ``job_progress`` and ``runtime_metrics`` are *superseded* frames — periodic
+  samples whose newer sibling carries strictly fresher state. The oldest one
+  still buffered is dropped (wherever it sits in the queue) and the new frame
+  takes its place; the remaining frames keep their relative order.
+- Only when the buffer holds no such frame at all is it saturated with state
+  that may not be discarded (``job_created``/``job_started``/
+  ``job_stage_changed`` and the terminal ``job_completed``/``job_cancelled``/
+  ``job_failed``). The client is then disconnected with close code ``1013``
+  (*try again later*) rather than blocked or silently truncated. Per
+  ``docs/contracts/websocket-events.md`` clients re-synchronise over REST on
+  (re)connect, so a loud disconnect is recoverable while a silently dropped
+  terminal event would not be.
 
 A terminal event is consequently never dropped in silence: it is either
 delivered or the client is closed.
+
+Shutdown
+--------
+
+:meth:`EventHub.aclose` gives the sender tasks a bounded, best-effort window
+(:data:`SHUTDOWN_DRAIN_TIMEOUT_SECONDS`) to write what is still buffered before
+their sockets are closed with ``1001``. The application lifespan closes the job
+manager first, so a job cancelled by the shutdown produces its terminal event
+*before* the hub tears the connections down; without the drain that frame would
+be discarded with the sender task mid-write.
 """
 
 from __future__ import annotations
@@ -78,6 +90,14 @@ CLOSE_INTERNAL_ERROR = 1011
 CLOSE_TRY_AGAIN_LATER = 1013
 """RFC 6455 close code used when a client cannot keep up (buffer overflow)."""
 
+SHUTDOWN_DRAIN_TIMEOUT_SECONDS = 2.0
+"""How long :meth:`EventHub.aclose` waits for buffered frames to be written.
+
+Long enough for a healthy client to receive the events produced by the
+shutdown itself (notably the cancellation of a running job), short enough that
+one wedged client cannot hold up the application's shutdown.
+"""
+
 
 class EventSocket(Protocol):
     """The slice of Starlette's ``WebSocket`` the hub actually uses.
@@ -111,6 +131,47 @@ class _Client:
     queue: asyncio.Queue[_Frame]
     task: asyncio.Task[None] | None = None
     dropped: int = 0
+
+
+def _drain_buffer(queue: asyncio.Queue[_Frame]) -> list[_Frame]:
+    """Remove and return everything buffered in ``queue``, oldest first.
+
+    Each frame is marked done as it leaves, so a discarded buffer never keeps
+    :meth:`asyncio.Queue.join` (the shutdown drain) waiting; a caller that puts
+    frames back re-accounts for them.
+    """
+    frames: list[_Frame] = []
+    while True:
+        try:
+            frames.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            return frames
+        queue.task_done()
+
+
+def _evict_oldest_evictable(queue: asyncio.Queue[_Frame]) -> _Frame | None:
+    """Remove the oldest droppable frame from ``queue``, preserving order.
+
+    ``asyncio.Queue`` has no removal operation, so the buffer is emptied and
+    refilled through the non-blocking API. That costs ``O(maxsize)`` — bounded
+    by :data:`DEFAULT_CLIENT_QUEUE_SIZE` (256) list operations, no awaits, no
+    allocation per frame — and is only ever paid for a client that is already
+    saturated. The caller stays synchronous, so no other producer or consumer
+    can observe the queue mid-rebuild.
+
+    Returns:
+        The evicted frame, or ``None`` when the buffer holds nothing droppable
+        (in which case the queue is left exactly as it was found).
+    """
+    buffered = _drain_buffer(queue)
+    evicted: _Frame | None = None
+    for index, frame in enumerate(buffered):
+        if frame.event_type in EVICTABLE_EVENT_TYPES:
+            evicted = buffered.pop(index)
+            break
+    for frame in buffered:
+        queue.put_nowait(frame)
+    return evicted
 
 
 class EventHub:
@@ -187,17 +248,29 @@ class EventHub:
             return
         await self._stop_sender(client)
 
-    async def aclose(self) -> None:
-        """Disconnect every client and release resources. Idempotent.
+    async def aclose(self, *, drain_timeout: float = SHUTDOWN_DRAIN_TIMEOUT_SECONDS) -> None:
+        """Flush, disconnect every client, and release resources. Idempotent.
 
-        Each connection is closed with code ``1001`` (*going away*) so browsers
-        can distinguish an orderly server shutdown from a crash. Sockets that
-        already died are ignored. A closed hub cannot be reused — the
-        application lifespan creates a fresh one per cycle.
+        Publishing is disabled first, then every client's outbound queue is
+        given a bounded, best-effort window to reach its socket — the
+        application lifespan closes the job manager before the hub precisely so
+        that the shutdown's own terminal events (e.g. the cancellation of a
+        running job) are still delivered. Frames that do not make it within
+        ``drain_timeout`` are dropped, exactly like a client that disconnects.
+
+        Each connection is then closed with code ``1001`` (*going away*) so
+        browsers can distinguish an orderly server shutdown from a crash.
+        Sockets that already died are ignored. A closed hub cannot be reused —
+        the application lifespan creates a fresh one per cycle.
+
+        Args:
+            drain_timeout: Seconds to wait for buffered frames to be written,
+                across all clients. Zero (or less) skips the drain.
         """
         self._closed = True
         clients = list(self._clients.values())
         self._clients.clear()
+        await self._drain(clients, drain_timeout)
         for client in clients:
             await self._stop_sender(client)
             await self._close_socket(client.socket, CLOSE_GOING_AWAY)
@@ -206,6 +279,28 @@ class EventHub:
         for task in pending:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
+
+    @staticmethod
+    async def _drain(clients: list[_Client], timeout: float) -> None:
+        """Wait (at most ``timeout`` seconds, in total) for pending writes.
+
+        Best effort: a wedged client must not be able to hold up shutdown, so
+        the timeout is shared by every client and exceeding it is logged, not
+        raised.
+        """
+        draining = [client for client in clients if client.task is not None]
+        if not draining or timeout <= 0:
+            return
+        try:
+            async with asyncio.timeout(timeout):
+                await asyncio.gather(*(client.queue.join() for client in draining))
+        except TimeoutError:
+            logger.warning(
+                "Gave up after %.1fs draining buffered frames for %d WebSocket client(s) "
+                "at shutdown; the frames still buffered are dropped",
+                timeout,
+                len(draining),
+            )
 
     # -- publishing --------------------------------------------------------
 
@@ -245,25 +340,19 @@ class EventHub:
             return
         except asyncio.QueueFull:
             pass
-        # The queue is full: the oldest frame is the only one we can evict
-        # without reordering the stream.
-        try:
-            oldest = client.queue.get_nowait()
-        except asyncio.QueueEmpty:  # pragma: no cover - maxsize >= 1, just full
-            client.queue.put_nowait(frame)
-            return
-        if oldest.event_type in EVICTABLE_EVENT_TYPES:
+        evicted = _evict_oldest_evictable(client.queue)
+        if evicted is not None:
             client.dropped += 1
             logger.debug(
                 "Slow WebSocket client: dropped a %s frame (%d dropped so far)",
-                oldest.event_type,
+                evicted.event_type,
                 client.dropped,
             )
             client.queue.put_nowait(frame)
             return
         logger.warning(
-            "WebSocket client cannot keep up (oldest buffered frame is %s); disconnecting",
-            oldest.event_type,
+            "WebSocket client cannot keep up (%d buffered frames, none droppable); disconnecting",
+            self._client_queue_size,
         )
         self._clients.pop(client.socket, None)
         self._schedule(self._terminate(client, CLOSE_TRY_AGAIN_LATER))
@@ -274,17 +363,26 @@ class EventHub:
         Cancelled by :meth:`_stop_sender` at teardown. A send failure drops
         only this client: it is unregistered and its socket closed, while every
         other client keeps receiving events.
+
+        Every dequeued frame is marked done, so :meth:`aclose` can wait on the
+        queue to know when the buffered frames have actually reached the
+        socket; a client dropped here releases its whole buffer for the same
+        reason — those frames are never going anywhere.
         """
         try:
             while True:
                 frame = await client.queue.get()
-                await client.socket.send_text(frame.payload)
+                try:
+                    await client.socket.send_text(frame.payload)
+                finally:
+                    client.queue.task_done()
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.info("Dropping a WebSocket client after a send failure", exc_info=True)
             self._clients.pop(client.socket, None)
             client.task = None
+            _drain_buffer(client.queue)
             await self._close_socket(client.socket, CLOSE_INTERNAL_ERROR)
 
     async def _terminate(self, client: _Client, code: int) -> None:

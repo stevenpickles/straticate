@@ -28,18 +28,20 @@ real-time progress (017) and telemetry (019) possible.
   - `EventSocket` — the structural protocol (`send_text` / `close`) the hub
     consumes, so the hub is unit-testable with doubles and never depends on
     Starlette internals.
-  - `aclose()` closes every connection with code `1001` (*going away*).
+  - `aclose()` drains what is still buffered (bounded, best effort) and then
+    closes every connection with code `1001` (*going away*).
   - `get_event_hub(connection)` — `Depends`-style accessor reading
     `app.state.event_hub`, typed on `HTTPConnection` so both WebSocket and
     (future) HTTP endpoints can use it.
 - `backend/src/straticate/api/ws.py` — the endpoint: `@router.websocket("/ws")`
   accepts, registers, then drains inbound messages until the client
   disconnects or the server closes the socket; `finally` always unregisters.
-- `backend/src/straticate/main.py` — the lifespan creates a fresh `EventHub`
+- `backend/src/straticate/main.py` — `lifespan` creates a fresh `EventHub`
   alongside the fresh `JobManager`, registers `hub.publish` as a listener,
   stores the hub on `app.state.event_hub`, and on shutdown closes the manager
-  first (so its event queue drains into the hub) and the hub second. The `ws`
-  router is registered under `API_PREFIX`.
+  first (so its event queue drains into the hub) and the hub second — the hub
+  in a `finally`, so it is closed even if the manager's teardown raises. The
+  `ws` router is registered under `API_PREFIX`.
 - `backend/src/straticate/jobs/__init__.py` — `EventHub`, `EventSocket`,
   `get_event_hub`, `DEFAULT_CLIENT_QUEUE_SIZE`, `EVICTABLE_EVENT_TYPES` added
   to the public surface.
@@ -89,18 +91,24 @@ all clients with identical bytes; exact JSON shape for `job_progress`,
 socket is unregistered (closed `1011`) while peers keep receiving;
 `unregister` idempotent and delivery-stopping; overflow drops the oldest
 `job_progress`; overflow keeps a terminal event by evicting progress instead;
-overflow with an undroppable buffer disconnects (`1013`); a wedged client
-delays no one; `aclose` closes all connections (`1001`), is idempotent,
-disables publishing and registration, and survives a socket that raises on
-`close`; plus three integration tests driving a real `JobManager` (full event
-sequence, two clients, and a wedged client not stalling the pipeline).
+overflow behind an undroppable *head* still evicts a progress sample from
+further back and keeps the client; overflow with a wholly undroppable buffer
+disconnects (`1013`); a wedged client delays no one; `aclose` closes all
+connections (`1001`), is idempotent, disables publishing and registration,
+gives up on a wedged client after `drain_timeout`, and survives a socket that
+raises on `close`; plus three integration tests driving a real `JobManager`
+(full event sequence, two clients, and a wedged client not stalling the
+pipeline) and two lifespan tests (a socket whose write costs more than one
+event-loop hop still receives the shutdown `job_cancelled` before its close
+frame; a manager that raises from `aclose` still leaves the hub closed).
 
 `backend/tests/test_api_ws.py` (endpoint, `TestClient`; manager calls
 marshalled onto the app loop via `portal.call`): a connected client receives a
 job's full event sequence in order with the documented field values; two
 clients receive byte-identical streams; a client disconnecting mid-job breaks
 neither the job nor its peer; inbound text/JSON/bytes are ignored; hub
-shutdown closes the connection with `1001`; application shutdown leaves no
+shutdown closes the connection with `1001`; connecting *after* hub shutdown is
+closed cleanly with `1001` rather than raising; application shutdown leaves no
 registered clients; each lifespan cycle gets a fresh hub wired to its manager.
 
 ## Notes / decisions
@@ -109,17 +117,28 @@ registered clients; each lifespan cycle gets a fresh hub wired to its manager.
 
 Each client gets an outbound `asyncio.Queue` of `DEFAULT_CLIENT_QUEUE_SIZE`
 (256) frames and a dedicated sender task. `publish` only ever calls
-`put_nowait`. When the queue is full the hub inspects the **oldest** queued
-frame:
+`put_nowait`. When the queue is full the hub looks for the **oldest droppable**
+frame anywhere in the buffer:
 
-- If it is `job_progress` or `runtime_metrics` (`EVICTABLE_EVENT_TYPES`) it is
-  dropped and the new frame takes its place. Both are *periodic samples*: a
-  newer one carries strictly fresher state, so dropping the stale one loses
-  nothing a user can perceive (progress is redrawn at ≤ 4 Hz anyway).
-- Otherwise the buffer is saturated with state that cannot be reconstructed
-  from a later event — `job_created` / `job_started` / `job_stage_changed` and
-  the terminal `job_completed` / `job_cancelled` / `job_failed`. The client is
-  then **disconnected** with close code `1013` (*try again later*).
+- `job_progress` and `runtime_metrics` (`EVICTABLE_EVENT_TYPES`) are droppable.
+  The oldest one still buffered — whatever its position in the queue — is
+  dropped and the new frame takes its place; the surviving frames keep their
+  relative order. Both are *periodic samples*: a newer one carries strictly
+  fresher state, so dropping the stale one loses nothing a user can perceive
+  (progress is redrawn at ≤ 4 Hz anyway).
+- Only when the buffer holds **no** droppable frame at all is it saturated with
+  state that cannot be reconstructed from a later event — `job_created` /
+  `job_started` / `job_stage_changed` and the terminal `job_completed` /
+  `job_cancelled` / `job_failed`. The client is then **disconnected** with
+  close code `1013` (*try again later*).
+
+Inspecting only the head frame would not do: a buffer headed by `job_created`
+and otherwise full of progress samples would be misread as undroppable, killing
+a client the policy is meant to keep alive. `asyncio.Queue` offers no removal,
+so the eviction empties and refills the queue through the non-blocking API —
+`O(client_queue_size)` (≤ 256 list operations, no awaits) and only ever paid
+for an already-saturated client. `publish` stays synchronous throughout, so no
+producer or consumer can observe the queue mid-rebuild.
 
 Rationale for disconnecting rather than blocking or truncating: blocking would
 stall the manager's single ordered dispatcher and therefore the whole job
@@ -136,6 +155,39 @@ usefully connected.
 
 Close codes: `1001` server shutdown, `1011` send failure, `1013` client cannot
 keep up.
+
+### Shutdown drain
+
+The lifespan closes the manager first so that it drains its event queue —
+including the cancellation of a job that was still running — into the hub, and
+only then closes the hub. For that ordering to actually deliver anything,
+`aclose()` gives the sender tasks a bounded, best-effort window
+(`SHUTDOWN_DRAIN_TIMEOUT_SECONDS`, 2.0 s, overridable per call) to write what
+is still buffered before it cancels them and closes the sockets with `1001`.
+Publishing is disabled first, so nothing new is buffered during the drain, and
+the window is shared by all clients so one wedged client cannot hold up
+shutdown; frames that miss it are dropped and the timeout is logged.
+
+Without the drain the terminal event was lost on any socket whose write takes
+more than one event-loop hop — that is, every real WebSocket. The senders now
+mark each dequeued frame done, so the drain is an ordinary
+`asyncio.Queue.join()` and waits for frames to reach the *socket*, not merely
+to leave the queue.
+
+The job manager listener is deliberately **not** removed before
+`manager.aclose()`: the hub must still be subscribed while the manager drains,
+or the shutdown cancellation would never reach the clients. It is removed
+afterwards (and the hub is closed) in a `finally`, so a manager teardown
+failure can neither leak a sender task per client nor leave sockets open.
+
+### A connection racing shutdown
+
+`register()` raises `RuntimeError` on a closed hub. The endpoint catches that
+around the `register` call and closes the socket with `1001`, so a client that
+connects while the server is shutting down sees the same "going away" it would
+have seen a moment earlier. Letting the error escape would hand it to the
+application-wide `Exception` handler, which can only produce a `JSONResponse`
+— meaningless in a WebSocket scope.
 
 ### Broadcast to all
 
@@ -179,9 +231,10 @@ source of truth.
 
 ### Known limitations
 
-- Frames buffered for a client are discarded when it unregisters or when the
-  hub closes; there is no replay/resume. REST remains the source of truth for
-  reconnect, exactly as the contract specifies.
+- Frames buffered for a client are discarded when it unregisters, and at
+  shutdown whatever the drain window does not cover is dropped too; there is no
+  replay/resume. REST remains the source of truth for reconnect, exactly as the
+  contract specifies.
 - The `1013` disconnect path drops the frames still buffered for that client.
   This is intentional (the client resyncs over REST) but means an operator
   watching logs sees the warning, not the lost events.

@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
+from fastapi import FastAPI
 
 from straticate.jobs import EventHub, EventSocket, JobContext, JobExecutor, JobManager
 from straticate.jobs.hub import (
@@ -19,6 +20,7 @@ from straticate.jobs.hub import (
     CLOSE_INTERNAL_ERROR,
     CLOSE_TRY_AGAIN_LATER,
 )
+from straticate.main import lifespan
 from straticate.schemas.common import ErrorInfo
 from straticate.schemas.events import (
     GpuMetrics,
@@ -56,6 +58,7 @@ class FakeSocket:
     def __init__(self) -> None:
         self.sent: list[str] = []
         self.close_code: int | None = None
+        self.sent_at_close: int | None = None
         self.send_attempts = 0
         self.fail_on_send = False
         self.gate: asyncio.Event | None = None
@@ -73,6 +76,7 @@ class FakeSocket:
 
     async def close(self, code: int = 1000, reason: str | None = None) -> None:
         self.close_code = code
+        self.sent_at_close = len(self.sent)
         self._changed.set()
 
     async def wait_for(self, predicate: Callable[[], bool]) -> None:
@@ -94,6 +98,25 @@ class FakeSocket:
 
     def types(self) -> list[str]:
         return [cast(str, payload["type"]) for payload in self.payloads()]
+
+
+class SlowSocket(FakeSocket):
+    """A socket whose write costs more than one event-loop hop.
+
+    A real WebSocket write suspends several times (framing, transport buffer,
+    flush); a double that completes within a single hop hides shutdown races,
+    because a sender task cancelled "immediately" has by then already finished
+    the write. Two extra suspension points are the minimum that reproduces a
+    real socket's behaviour.
+    """
+
+    async def send_text(self, data: str) -> None:
+        self.send_attempts += 1
+        self._changed.set()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        self.sent.append(data)
+        self._changed.set()
 
 
 def as_socket(socket: FakeSocket) -> EventSocket:
@@ -213,6 +236,18 @@ def gated_executor(gate: asyncio.Event) -> JobExecutor:
         await gate.wait()
         context.report_progress(1.0, 4, 4, 10.0, 10.0)
         return make_result(job.id)
+
+    return executor
+
+
+def wedged_executor(running: asyncio.Event) -> JobExecutor:
+    """An executor that signals it is running and then never finishes."""
+
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        context.set_stage(JobState.SEPARATING)
+        running.set()
+        await asyncio.Event().wait()  # cancelled by the manager at shutdown
+        raise AssertionError("unreachable")  # pragma: no cover
 
     return executor
 
@@ -448,6 +483,39 @@ async def test_overflow_never_drops_a_terminal_event() -> None:
         await hub.aclose()
 
 
+async def test_overflow_evicts_a_droppable_frame_from_behind_an_undroppable_head() -> None:
+    """The oldest frame alone does not decide the policy.
+
+    A buffer headed by ``job_created`` but otherwise full of progress samples
+    is not "saturated with undroppable state": the hub must shed one of the
+    samples behind the head and keep the client connected.
+    """
+    hub = EventHub(client_queue_size=4)
+    try:
+        socket = await blocked_client(hub)  # parked inside its first send
+
+        hub.publish(make_created())  # undroppable head of the buffer
+        for index in range(1, 4):
+            hub.publish(make_progress(progress=index / 10))  # buffer now full
+        hub.publish(make_completed())  # sheds progress 0.1, keeps the client
+
+        assert hub.connection_count == 1
+        assert socket.close_code is None
+
+        socket.open_gate()
+        await socket.wait_for(lambda: len(socket.sent) == 5)
+        assert socket.types() == [
+            "job_created",
+            "job_created",
+            "job_progress",
+            "job_progress",
+            "job_completed",
+        ]
+        assert [p["progress"] for p in socket.payloads()[2:4]] == [0.2, 0.3]
+    finally:
+        await hub.aclose()
+
+
 async def test_overflow_disconnects_a_client_buffered_full_of_undroppable_state() -> None:
     hub = EventHub(client_queue_size=1)
     try:
@@ -508,6 +576,36 @@ async def test_aclose_closes_every_connection_and_disables_the_hub() -> None:
     assert first.sent == []
     with pytest.raises(RuntimeError, match="closed"):
         hub.register(as_socket(FakeSocket()))
+
+
+async def test_aclose_gives_up_on_a_wedged_client_after_the_drain_timeout() -> None:
+    """The drain is best effort: one wedged client cannot hold up shutdown."""
+    hub = EventHub(client_queue_size=4)
+    wedged = await blocked_client(hub)  # parked inside its first send, forever
+    hub.publish(make_completed())  # buffered behind that write
+
+    await hub.aclose(drain_timeout=0.01)
+
+    assert wedged.close_code == CLOSE_GOING_AWAY
+    assert wedged.sent == []  # the buffered frames are dropped, loudly logged
+    assert hub.connection_count == 0
+
+
+async def test_aclose_is_not_delayed_by_a_client_whose_socket_fails() -> None:
+    """A dropped client releases its buffer instead of stalling the drain."""
+    hub = EventHub(client_queue_size=4)
+    socket = FakeSocket()
+    socket.fail_on_send = True
+    hub.register(as_socket(socket))
+    hub.publish(make_created())
+    hub.publish(make_completed())
+
+    # Frames that can never be written must not hold the drain window open:
+    # a regression shows up as `aclose` blocking for the whole drain timeout.
+    await asyncio.wait_for(hub.aclose(drain_timeout=60.0), timeout=WAIT_TIMEOUT)
+
+    assert hub.is_closed
+    assert socket.sent == []
 
 
 async def test_aclose_tolerates_a_socket_that_fails_to_close() -> None:
@@ -612,3 +710,63 @@ async def test_manager_events_reach_two_hub_clients(hub: EventHub) -> None:
         assert first.sent == second.sent
     finally:
         await manager.aclose()
+
+
+# -- application lifespan ---------------------------------------------------
+
+
+async def test_lifespan_shutdown_delivers_terminal_events_before_closing() -> None:
+    """The shutdown cancellation reaches the client before the close frame.
+
+    The manager is closed first so it drains its event queue into the hub; the
+    hub must then let its senders write those frames instead of cancelling
+    them mid-flight. Exercised with a socket whose write takes more than one
+    event-loop hop, like every real WebSocket.
+    """
+    app = FastAPI()
+    socket = SlowSocket()
+    async with lifespan(app):
+        hub = cast(EventHub, app.state.event_hub)
+        manager = cast(JobManager, app.state.job_manager)
+        hub.register(as_socket(socket))
+        running = asyncio.Event()
+        job = manager.submit(make_configuration(), wedged_executor(running), model_id="model-1")
+        await asyncio.wait_for(running.wait(), timeout=WAIT_TIMEOUT)
+
+    assert socket.close_code == CLOSE_GOING_AWAY
+    assert socket.sent_at_close is not None
+    delivered = socket.types()[: socket.sent_at_close]
+    assert delivered == [
+        "job_created",
+        "job_started",
+        "job_stage_changed",
+        "job_stage_changed",
+        "job_cancelled",
+    ]
+    payloads = socket.payloads()[: socket.sent_at_close]
+    assert payloads[-1]["job_id"] == job.id
+    assert payloads[-1]["stage_at_cancellation"] == "separating"
+
+
+async def test_lifespan_closes_the_hub_even_when_the_manager_fails_to_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager teardown failure must not leak sender tasks or open sockets."""
+
+    class ExplodingManager(JobManager):
+        async def aclose(self) -> None:
+            await super().aclose()
+            raise RuntimeError("manager teardown exploded")
+
+    monkeypatch.setattr("straticate.main.JobManager", ExplodingManager)
+    app = FastAPI()
+    socket = FakeSocket()
+    with pytest.raises(RuntimeError, match="exploded"):
+        async with lifespan(app):
+            hub = cast(EventHub, app.state.event_hub)
+            hub.register(as_socket(socket))
+
+    hub = cast(EventHub, app.state.event_hub)
+    assert hub.is_closed
+    assert hub.connection_count == 0
+    assert socket.close_code == CLOSE_GOING_AWAY

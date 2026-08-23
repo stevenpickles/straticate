@@ -217,6 +217,22 @@ def test_hub_shutdown_closes_the_connection(client: TestClient) -> None:
     assert hub.connection_count == 0
 
 
+def test_connecting_after_hub_shutdown_closes_cleanly(client: TestClient) -> None:
+    """A closed hub is "going away", not an unhandled error on the socket.
+
+    The application's catch-all HTTP exception handler cannot answer a
+    WebSocket scope, so the endpoint must handle the closed hub itself.
+    """
+    hub = hub_of(client)
+    portal_of(client).call(hub.aclose)
+
+    with client.websocket_connect(WS_URL) as session:
+        message = session.receive()
+        assert message["type"] == "websocket.close"
+        assert message["code"] == CLOSE_GOING_AWAY
+    assert hub.connection_count == 0
+
+
 def test_application_shutdown_leaves_no_registered_clients() -> None:
     app = create_app()
     with TestClient(app) as test_client:

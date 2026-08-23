@@ -26,7 +26,7 @@ API_PREFIX = "/api/v1"
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Run a job manager and a WebSocket event hub for the application's lifetime.
 
     A **fresh** :class:`JobManager` and :class:`EventHub` are created per
@@ -40,7 +40,10 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     manager listener, so every job event is broadcast to connected browsers.
     Shutdown order matters: the manager is closed first so that it drains its
     event queue (including the cancellation of a job that was still running)
-    into the hub, and only then are the connections closed.
+    into the hub — the listener therefore stays registered until that drain
+    finishes — and only then are the connections closed (after the hub has
+    flushed what it buffered). The hub is torn down even if closing the manager
+    fails, so a failure there cannot leak sender tasks or leave sockets open.
     """
     manager = JobManager()
     hub = EventHub()
@@ -51,9 +54,11 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None]:
     try:
         yield
     finally:
-        await manager.aclose()
-        manager.remove_listener(hub.publish)
-        await hub.aclose()
+        try:
+            await manager.aclose()
+        finally:
+            manager.remove_listener(hub.publish)
+            await hub.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -79,7 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level)
 
-    app = FastAPI(title="Straticate", version=__version__, lifespan=_lifespan)
+    app = FastAPI(title="Straticate", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
     app.state.model_catalog = ModelCatalog.from_directory(settings.models_dir)
