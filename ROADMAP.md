@@ -37,6 +37,28 @@ model download, real chunk progress, real telemetry. Features 025–026.
 Fast + HQ vocal models, 4-stem model, capability-driven mode selection,
 production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
+## Current state (2026-08-23)
+
+Phases 0–2 are merged into `dev`, plus the job engine. Working today: the
+FastAPI backend with the shared contract layer, audio upload/probe/delete, the
+drag-drop upload UI, and the asynchronous job manager (queue, state machine,
+cancellation, typed event listeners) — 138 backend tests and 45 frontend tests,
+all CI-enforced.
+
+**Next up (all dependencies MERGED, safe to run in parallel):**
+
+- **013** WebSocket event hub — subscribes to the job manager's listener hook
+  and pushes typed events; endpoint handlers must be `async def` (see
+  `docs/features/012-job-manager.md`).
+- **014** Separator interface + FakeSeparator — adapts to the `JobExecutor`
+  protocol.
+- **009** Metadata display UI · **010** Model catalog · **016** Frontend job/WS
+  clients · **018** Compute device detection.
+
+Then **015** (job REST endpoints, needs 012 + 014), after which milestone **M1**
+is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
+**029**.
+
 ## Feature ledger
 
 | #   | Feature                                      | Status  | Depends on | Branch | PR |
@@ -48,11 +70,11 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 | 005 | API contracts v1 (schemas, OpenAPI → TS)     | MERGED  | 002        | `005-api-contracts` | #5 |
 | 006 | Audio upload + validation + temp storage     | MERGED  | 005        | `006-audio-upload` | #6 |
 | 007 | Audio metadata extraction (ffprobe)          | MERGED  | 006        | folded into 006 | #6 |
-| 008 | Drag-drop + file picker + upload state UI    | PR OPEN | 003, 005   | `008-drag-drop-ui` | #7 |
+| 008 | Drag-drop + file picker + upload state UI    | MERGED  | 003, 005   | `008-drag-drop-ui` | #7 |
 | 009 | Metadata display UI                          | PLANNED | 008        | | |
 | 010 | Model catalog + capabilities backend         | PLANNED | 005        | | |
 | 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |
-| 012 | Job manager (queue, states, cancellation)    | PR OPEN | 005        | `012-job-manager` | #8 |
+| 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |
 | 013 | WebSocket event hub + typed events           | PLANNED | 012        | | |
 | 014 | Separator interface + FakeSeparator          | PLANNED | 012        | | |
 | 015 | Job REST endpoints (create/get/cancel/list)  | PLANNED | 012, 014   | | |
