@@ -41,10 +41,10 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
 | #   | Feature                                      | Status  | Depends on | Branch | PR |
 |-----|----------------------------------------------|---------|------------|--------|----|
-| 001 | Repository bootstrap (docs, contracts, plan) | PR OPEN | —          | `001-repository-bootstrap` | — |
-| 002 | Backend skeleton (FastAPI, tooling, health)  | READY   | 001        | | |
-| 003 | Frontend skeleton (Vite/React/TS, shell)     | READY   | 001        | | |
-| 004 | CI pipeline (backend + frontend checks)      | PLANNED | 002, 003   | | |
+| 001 | Repository bootstrap (docs, contracts, plan) | PR OPEN | —          | `001-repository-bootstrap` | #1 |
+| 002 | Backend skeleton (FastAPI, tooling, health)  | PR OPEN | 001        | `002-backend-skeleton` | #2 |
+| 003 | Frontend skeleton (Vite/React/TS, shell)     | PR OPEN | 001        | `003-frontend-skeleton` | #3 |
+| 004 | CI pipeline (backend + frontend checks)      | PR OPEN | 002, 003   | `004-ci-pipeline` | #4 (draft; merges last) |
 | 005 | API contracts v1 (schemas, OpenAPI → TS)     | PLANNED | 002        | | |
 | 006 | Audio upload + validation + temp storage     | PLANNED | 005        | | |
 | 007 | Audio metadata extraction (ffprobe)          | PLANNED | 006        | | |
