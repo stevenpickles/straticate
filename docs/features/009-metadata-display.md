@@ -3,7 +3,7 @@
 Branch: `009-metadata-display`
 Status: PR OPEN
 Dependencies: 008
-PR: #…
+PR: #10
 
 ## Objective
 
