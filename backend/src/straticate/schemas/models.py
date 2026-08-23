@@ -5,7 +5,23 @@ fields that are part of the API surface. ``SeparationMode`` is what the frontend
 renders — derived from model capabilities, never hardcoded client-side.
 """
 
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
+
+
+class QualityTier(StrEnum):
+    """User-facing quality tiers a model may back within its separation mode.
+
+    Users choose a tier, never an architecture or inference parameters
+    (ARCHITECTURE.md §9). **Declaration order is presentation order** — cheapest
+    and fastest first — and is what orders
+    :attr:`SeparationMode.quality_options`.
+    """
+
+    FAST = "fast"
+    BALANCED = "balanced"
+    HIGH_QUALITY = "high_quality"
 
 
 class ModelRequirements(BaseModel):
@@ -32,6 +48,13 @@ class Model(BaseModel):
     architecture: str = Field(description="Implementation family (open set).")
     version: str = Field(description="Model version string.")
     separation_mode: str = Field(description='Logical mode ID this model serves, e.g. "vocals".')
+    quality_tier: QualityTier | None = Field(
+        default=None,
+        description=(
+            "User-facing quality tier this model backs within its separation mode; "
+            'null means "balanced". Unique per separation mode.'
+        ),
+    )
     stems: list[str] = Field(min_length=2, description="Stem names this model produces.")
     sample_rate: int = Field(ge=8000, description="Native sample rate in Hz.")
     requirements: ModelRequirements = Field(
@@ -43,7 +66,11 @@ class Model(BaseModel):
 
 
 class QualityOption(BaseModel):
-    """A user-facing quality tier mapping to a concrete model."""
+    """A user-facing quality tier mapping to a concrete model.
+
+    ``id`` carries a :class:`QualityTier` value; it is what a job request's
+    ``quality_id`` names, and it identifies exactly one model within a mode.
+    """
 
     id: str = Field(description='Quality tier ID, e.g. "fast", "high_quality".')
     display_name: str = Field(description="Human-readable tier name.")

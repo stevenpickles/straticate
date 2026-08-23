@@ -1,5 +1,9 @@
 {
   "catalog_version": 1,
+  "separation_modes": {
+    "vocals": { "display_name": "Vocal Isolation" },
+    "standard_stems": { "display_name": "Standard Stems" }
+  },
   "models": [
     {
       "schema_version": 1,
