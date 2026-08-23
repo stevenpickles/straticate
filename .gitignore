@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Node
+node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Generated API artifacts (regenerate; do not commit unless a feature decides otherwise)
+backend/openapi.json
+
+# Runtime data
+data/
+*.log
+
+# Model weights are never committed
+models/**/*.ckpt
+models/**/*.pt
+models/**/*.pth
+models/**/*.onnx
+models/**/*.safetensors
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
+.env.*
