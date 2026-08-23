@@ -111,6 +111,18 @@ describe('appReducer upload slice', () => {
     state = appReducer(state, { type: 'upload/reset' })
     expect(state.upload).toEqual({ status: 'idle' })
   })
+
+  it('upload/reset discards an uploaded file and returns to select', () => {
+    let state = appReducer(initialAppState, {
+      type: 'upload/succeeded',
+      file: sampleAudioFile,
+    })
+    expect(state.phase).toBe('configure')
+
+    state = appReducer(state, { type: 'upload/reset' })
+    expect(state.upload).toEqual({ status: 'idle' })
+    expect(state.phase).toBe('select')
+  })
 })
 
 describe('useAppState / useAppDispatch', () => {

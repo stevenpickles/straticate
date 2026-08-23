@@ -184,6 +184,83 @@ body {
   color: var(--color-danger);
 }
 
+.audio-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1rem;
+  width: min(28rem, 100%);
+  margin-top: 1.5rem;
+  padding: 1.5rem;
+  text-align: left;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+}
+
+.audio-summary-filename {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.audio-summary-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.audio-summary-field {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.audio-summary-label {
+  color: var(--color-text-muted);
+}
+
+.audio-summary-value {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.audio-summary-change {
+  align-self: flex-start;
+  padding: 0.4rem 1rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.audio-summary-change:hover,
+.audio-summary-change:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+  background-color: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.separation-options-placeholder {
+  width: min(28rem, 100%);
+  margin-top: 1rem;
+  padding: 1.25rem;
+  border: 1px dashed var(--color-border);
+  border-radius: 0.75rem;
+}
+
 .upload-progress {
   display: flex;
   flex-direction: column;
