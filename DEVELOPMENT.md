@@ -76,12 +76,16 @@ Frontend types are generated from the backend's OpenAPI document — never
 hand-written. After changing backend schemas:
 
 ```bash
-cd backend && uv run python -m straticate.scripts.export_openapi   # writes openapi.json
+cd backend && uv run python -m straticate.scripts.export_openapi   # writes backend/openapi.json
 cd frontend && npm run generate:api                                # openapi-typescript
 ```
 
-(Introduced with feature 005; script names are authoritative once that feature
-merges.)
+`backend/openapi.json` is gitignored (regenerate on demand). The generated
+`frontend/src/api/generated/api.d.ts` **is committed** so frontend CI and
+frontend-only development never need the backend — regenerate and commit it in
+the same PR whenever backend schemas change. App code imports contract types
+from `frontend/src/api/types.ts` (friendly aliases), never from the generated
+file directly.
 
 ## Test strategy
 

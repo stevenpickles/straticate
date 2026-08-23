@@ -44,8 +44,8 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 | 001 | Repository bootstrap (docs, contracts, plan) | MERGED  | —          | `001-repository-bootstrap` | #1 |
 | 002 | Backend skeleton (FastAPI, tooling, health)  | MERGED  | 001        | `002-backend-skeleton` | #2 |
 | 003 | Frontend skeleton (Vite/React/TS, shell)     | MERGED  | 001        | `003-frontend-skeleton` | #3 |
-| 004 | CI pipeline (backend + frontend checks)      | PR OPEN | 002, 003   | `004-ci-pipeline` | #4 |
-| 005 | API contracts v1 (schemas, OpenAPI → TS)     | PLANNED | 002        | | |
+| 004 | CI pipeline (backend + frontend checks)      | MERGED  | 002, 003   | `004-ci-pipeline` | #4 |
+| 005 | API contracts v1 (schemas, OpenAPI → TS)     | PR OPEN | 002        | `005-api-contracts` | #5 |
 | 006 | Audio upload + validation + temp storage     | PLANNED | 005        | | |
 | 007 | Audio metadata extraction (ffprobe)          | PLANNED | 006        | | |
 | 008 | Drag-drop + file picker + upload state UI    | PLANNED | 003, 005   | | |
@@ -69,6 +69,7 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
+| 029 | Skeleton hardening (deferred #5 review finds)| PLANNED | 004, 005   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,

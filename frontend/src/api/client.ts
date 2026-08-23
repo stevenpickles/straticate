@@ -1,10 +1,12 @@
 /**
  * Minimal typed HTTP client for the Straticate backend.
  *
- * All commands go over REST under the `/api` prefix (proxied to the
+ * All commands go over REST under the `/api/v1` prefix (proxied to the
  * FastAPI backend in development); progress/telemetry will use
  * WebSockets in later features.
  */
+
+import type { HealthStatus, VersionInfo } from './types'
 
 /** Payload of the backend error envelope: `{"error": {code, message, detail}}`. */
 export interface ApiErrorBody {
@@ -31,7 +33,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE = '/api'
+const API_BASE = '/api/v1'
 
 async function parseErrorBody(response: Response): Promise<ApiErrorBody> {
   try {
@@ -67,6 +69,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     throw new ApiError(response.status, await parseErrorBody(response))
   }
+  if (response.status === 204) {
+    return undefined as T
+  }
   return (await response.json()) as T
 }
 
@@ -84,22 +89,12 @@ export function post<T>(path: string, body?: unknown): Promise<T> {
   })
 }
 
-/** Response of `GET /api/health`. */
-export interface HealthResponse {
-  status: string
-}
-
-/** Response of `GET /api/version`. */
-export interface VersionResponse {
-  version: string
-}
-
 /** Fetch the backend health status. */
-export function getHealth(): Promise<HealthResponse> {
-  return get<HealthResponse>('/health')
+export function getHealth(): Promise<HealthStatus> {
+  return get<HealthStatus>('/health')
 }
 
 /** Fetch the backend version. */
-export function getVersion(): Promise<VersionResponse> {
-  return get<VersionResponse>('/version')
+export function getVersion(): Promise<VersionInfo> {
+  return get<VersionInfo>('/version')
 }

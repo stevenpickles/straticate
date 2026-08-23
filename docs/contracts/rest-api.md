@@ -1,8 +1,10 @@
-# REST API Contract (v1 proposal)
+# REST API Contract (v1)
 
-Status: **proposal** — becomes authoritative when feature 005 merges the
-corresponding Pydantic schemas; from then on, the generated OpenAPI document is
-the source of truth and this file describes intent and conventions.
+Status: **authoritative** — the Pydantic schemas in
+`backend/src/straticate/schemas/` and the OpenAPI document exported from them
+(feature 005) are the source of truth; this file describes intent and
+conventions. Export with
+`uv run python -m straticate.scripts.export_openapi` (from `backend/`).
 
 All routes are prefixed `/api/v1`. JSON everywhere except uploads (multipart)
 and stem streaming (audio bytes). IDs are ULIDs.
@@ -128,7 +130,7 @@ Create request (`SeparationConfiguration`):
 {
   "id": "01JOB...",
   "audio_id": "01ABC...",
-  "configuration": { "mode_id": "vocals", "quality_id": "high_quality", "device_id": "cuda:0" },
+  "configuration": { "audio_id": "01ABC...", "mode_id": "vocals", "quality_id": "high_quality", "device_id": "cuda:0" },
   "model_id": "vocals-hq-001",
   "state": "separating",
   "progress": 0.65,
