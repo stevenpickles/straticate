@@ -3,7 +3,7 @@
 Branch: `012-job-manager`
 Status: PR OPEN
 Dependencies: 005
-PR: #…
+PR: #8
 
 ## Objective
 

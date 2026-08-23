@@ -52,7 +52,7 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 | 009 | Metadata display UI                          | PLANNED | 008        | | |
 | 010 | Model catalog + capabilities backend         | PLANNED | 005        | | |
 | 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |
-| 012 | Job manager (queue, states, cancellation)    | PLANNED | 005        | | |
+| 012 | Job manager (queue, states, cancellation)    | PR OPEN | 005        | `012-job-manager` | #8 |
 | 013 | WebSocket event hub + typed events           | PLANNED | 012        | | |
 | 014 | Separator interface + FakeSeparator          | PLANNED | 012        | | |
 | 015 | Job REST endpoints (create/get/cancel/list)  | PLANNED | 012, 014   | | |
