@@ -22,7 +22,14 @@ class Settings(BaseSettings):
     """Port the server listens on."""
 
     data_dir: Path = Path("data")
-    """Directory for application data (models, job artifacts, etc.)."""
+    """Directory for application data (uploads, models, job artifacts, etc.).
+
+    Relative paths resolve against the process working directory.
+    Subdirectories are created lazily by their consumers.
+    """
+
+    max_upload_bytes: int = 1024**3
+    """Maximum accepted audio upload size in bytes (default 1 GiB)."""
 
     log_level: str = "INFO"
     """Root log level name (e.g. ``DEBUG``, ``INFO``, ``WARNING``)."""
