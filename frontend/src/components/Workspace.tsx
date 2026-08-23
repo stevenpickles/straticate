@@ -1,4 +1,5 @@
 import { useAppState, type WorkflowPhase } from '../state/appState'
+import { DropZone } from './DropZone'
 
 const PHASE_LABELS: Record<WorkflowPhase, string> = {
   select: 'Select',
@@ -9,18 +10,30 @@ const PHASE_LABELS: Record<WorkflowPhase, string> = {
 }
 
 /**
- * Main workspace area: renders the current workflow phase. For now a
- * placeholder — the file drop zone arrives with feature 008.
+ * Main workspace area: renders the current workflow phase. The `select`
+ * phase shows the file drop zone; `configure` currently shows a minimal
+ * confirmation of the uploaded file (the metadata panel is feature 009).
  */
 export function Workspace() {
-  const { phase } = useAppState()
+  const { phase, upload } = useAppState()
 
   return (
     <main className="workspace">
       <p className="workspace-phase">{PHASE_LABELS[phase]}</p>
-      <p className="workspace-hint">
-        Select an audio file to begin separating stems.
-      </p>
+      {phase === 'select' && (
+        <>
+          <p className="workspace-hint">
+            Select an audio file to begin separating stems.
+          </p>
+          <DropZone />
+        </>
+      )}
+      {phase === 'configure' && upload.status === 'uploaded' && (
+        <p className="workspace-hint">
+          Uploaded <strong>{upload.file.filename}</strong>. Configuration
+          options are coming soon.
+        </p>
+      )}
     </main>
   )
 }
