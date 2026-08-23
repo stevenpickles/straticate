@@ -71,7 +71,7 @@ is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
 | 006 | Audio upload + validation + temp storage     | MERGED  | 005        | `006-audio-upload` | #6 |
 | 007 | Audio metadata extraction (ffprobe)          | MERGED  | 006        | folded into 006 | #6 |
 | 008 | Drag-drop + file picker + upload state UI    | MERGED  | 003, 005   | `008-drag-drop-ui` | #7 |
-| 009 | Metadata display UI                          | PLANNED | 008        | | |
+| 009 | Metadata display UI                          | PR OPEN | 008        | `009-metadata-display` | #10 |
 | 010 | Model catalog + capabilities backend         | PLANNED | 005        | | |
 | 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |
 | 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |

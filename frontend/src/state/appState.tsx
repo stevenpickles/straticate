@@ -79,7 +79,11 @@ export type AppAction =
       readonly message: string
     }
   | {
-      /** Dismiss an upload error (or abort) and return the drop zone to idle. */
+      /**
+       * Clear the upload — dismissing an error, an abort, or discarding an
+       * already-uploaded file — returning the drop zone to idle and the
+       * workflow to the `select` phase.
+       */
       readonly type: 'upload/reset'
     }
 
@@ -116,7 +120,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         upload: { status: 'error', code: action.code, message: action.message },
       }
     case 'upload/reset':
-      return { ...state, upload: { status: 'idle' } }
+      return { ...state, upload: { status: 'idle' }, phase: 'select' }
   }
 }
 
