@@ -78,7 +78,7 @@ is within reach. Deferred review findings from PRs #5/#8 are tracked as feature
 | 013 | WebSocket event hub + typed events           | PLANNED | 012        | | |
 | 014 | Separator interface + FakeSeparator          | PLANNED | 012        | | |
 | 015 | Job REST endpoints (create/get/cancel/list)  | PLANNED | 012, 014   | | |
-| 016 | Frontend job + WebSocket clients             | PLANNED | 003, 005*  | | |
+| 016 | Frontend job + WebSocket clients             | PR OPEN | 003, 005*  | `016-job-ws-clients` | #14 |
 | 017 | Progress UI + cancel + error handling        | PLANNED | 011, 016   | | |
 | 018 | Compute device detection + devices API       | PR OPEN | 005        | `018-device-detection` | #12 |
 | 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
