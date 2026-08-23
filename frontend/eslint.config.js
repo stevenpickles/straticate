@@ -6,7 +6,9 @@ import tseslint from 'typescript-eslint'
 import prettier from 'eslint-config-prettier'
 
 export default tseslint.config(
-  { ignores: ['dist', 'coverage'] },
+  // src/api/generated is machine-generated (openapi-typescript); it is
+  // excluded from linting and formatting alike (see .prettierignore).
+  { ignores: ['dist', 'coverage', 'src/api/generated'] },
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

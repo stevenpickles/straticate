@@ -18,7 +18,7 @@ describe('api client', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(getHealth()).resolves.toEqual({ status: 'ok' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/health', undefined)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/health', undefined)
   })
 
   it('getVersion() parses a success response', async () => {
@@ -28,7 +28,7 @@ describe('api client', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(getVersion()).resolves.toEqual({ version: '0.1.0' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/version', undefined)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/version', undefined)
   })
 
   it('turns the backend error envelope into a typed ApiError', async () => {
@@ -78,10 +78,19 @@ describe('api client', () => {
     await expect(post('/jobs', { model: 'demo' })).resolves.toEqual({
       ok: true,
     })
-    expect(fetchMock).toHaveBeenCalledWith('/api/jobs', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/jobs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'demo' }),
     })
+  })
+
+  it('resolves undefined for a 204 response instead of parsing a body', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(null, { status: 204 })),
+    )
+
+    await expect(get('/audio/abc')).resolves.toBeUndefined()
   })
 })
