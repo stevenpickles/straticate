@@ -1,7 +1,7 @@
 /**
  * Minimal typed HTTP client for the Straticate backend.
  *
- * All commands go over REST under the `/api` prefix (proxied to the
+ * All commands go over REST under the `/api/v1` prefix (proxied to the
  * FastAPI backend in development); progress/telemetry will use
  * WebSockets in later features.
  */
@@ -33,7 +33,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_BASE = '/api'
+const API_BASE = '/api/v1'
 
 async function parseErrorBody(response: Response): Promise<ApiErrorBody> {
   try {
@@ -68,6 +68,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, init)
   if (!response.ok) {
     throw new ApiError(response.status, await parseErrorBody(response))
+  }
+  if (response.status === 204) {
+    return undefined as T
   }
   return (await response.json()) as T
 }

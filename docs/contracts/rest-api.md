@@ -130,7 +130,7 @@ Create request (`SeparationConfiguration`):
 {
   "id": "01JOB...",
   "audio_id": "01ABC...",
-  "configuration": { "mode_id": "vocals", "quality_id": "high_quality", "device_id": "cuda:0" },
+  "configuration": { "audio_id": "01ABC...", "mode_id": "vocals", "quality_id": "high_quality", "device_id": "cuda:0" },
   "model_id": "vocals-hq-001",
   "state": "separating",
   "progress": 0.65,

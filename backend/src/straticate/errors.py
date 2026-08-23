@@ -7,6 +7,8 @@ Every error response from the API uses the shape defined by
 """
 
 import logging
+from collections.abc import Mapping
+from http import HTTPStatus
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -19,10 +21,18 @@ from straticate.schemas import ErrorEnvelope, ErrorInfo
 
 logger = logging.getLogger(__name__)
 
-_HTTP_ERROR_CODES = {
-    404: "not_found",
-    405: "method_not_allowed",
-}
+
+def _http_error_code(status_code: int) -> str:
+    """Derive a stable snake_case error code from an HTTP status.
+
+    Examples: 404 -> ``"not_found"``, 405 -> ``"method_not_allowed"``,
+    429 -> ``"too_many_requests"``. Unknown statuses fall back to
+    ``"http_error"``.
+    """
+    try:
+        return HTTPStatus(status_code).name.lower()
+    except ValueError:
+        return "http_error"
 
 
 class ApplicationError(Exception):
@@ -58,6 +68,8 @@ def error_response(
     code: str,
     message: str,
     detail: Any = None,
+    *,
+    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     """Build a :class:`JSONResponse` carrying the standard error envelope.
 
@@ -73,7 +85,11 @@ def error_response(
             detail=jsonable_encoder(detail) if detail is not None else {},
         )
     )
-    return JSONResponse(status_code=status_code, content=envelope.model_dump(mode="json"))
+    return JSONResponse(
+        status_code=status_code,
+        content=envelope.model_dump(mode="json"),
+        headers=dict(headers) if headers is not None else None,
+    )
 
 
 async def _handle_application_error(request: Request, exc: Exception) -> JSONResponse:
@@ -83,10 +99,27 @@ async def _handle_application_error(request: Request, exc: Exception) -> JSONRes
 
 
 async def _handle_http_exception(request: Request, exc: Exception) -> JSONResponse:
-    """Map Starlette/FastAPI ``HTTPException`` (e.g. 404) to the envelope."""
+    """Map Starlette/FastAPI ``HTTPException`` (e.g. 404) to the envelope.
+
+    Response headers attached to the exception (``Allow``, ``Retry-After``,
+    ``WWW-Authenticate``, …) are preserved. A string ``detail`` becomes the
+    envelope message; a structured ``detail`` is carried in ``detail`` with a
+    generic status-phrase message.
+    """
     assert isinstance(exc, StarletteHTTPException)
-    code = _HTTP_ERROR_CODES.get(exc.status_code, "http_error")
-    return error_response(exc.status_code, code, str(exc.detail))
+    code = _http_error_code(exc.status_code)
+    # FastAPI's HTTPException accepts Any as detail even though Starlette
+    # annotates it as str.
+    raw_detail: Any = exc.detail
+    if isinstance(raw_detail, str):
+        message, detail = raw_detail, None
+    else:
+        try:
+            message = HTTPStatus(exc.status_code).phrase
+        except ValueError:
+            message = f"HTTP {exc.status_code}"
+        detail = exc.detail
+    return error_response(exc.status_code, code, message, detail, headers=exc.headers)
 
 
 async def _handle_validation_error(request: Request, exc: Exception) -> JSONResponse:

@@ -69,6 +69,7 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
+| 029 | Skeleton hardening (deferred #5 review finds)| PLANNED | 004, 005   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
