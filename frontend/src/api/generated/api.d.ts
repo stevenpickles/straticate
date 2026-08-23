@@ -44,32 +44,120 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/audio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Audio
+         * @description Accept a multipart audio upload; validate, store, probe, register.
+         *
+         *     Returns 201 with the registered :class:`AudioFile`. Errors:
+         *     ``audio_too_large`` (413) when the body exceeds
+         *     ``Settings.max_upload_bytes``; ``audio_not_decodable`` (422) when
+         *     ffprobe cannot decode the bytes as audio (the extension is never
+         *     trusted).
+         */
+        post: operations["upload_audio_api_v1_audio_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/audio/{audio_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Audio
+         * @description Fetch one uploaded audio record; 404 ``audio_not_found`` if unknown.
+         */
+        get: operations["get_audio_api_v1_audio__audio_id__get"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete Audio
+         * @description Delete an uploaded audio record and its files; 404 if unknown.
+         */
+        delete: operations["delete_audio_api_v1_audio__audio_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Models
+         * @description List every logical model in the catalog, in catalog order.
+         */
+        get: operations["list_models_api_v1_models_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Model
+         * @description Fetch one model; 404 ``model_not_found`` if the ID is unknown.
+         */
+        get: operations["get_model_api_v1_models__model_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/separation-modes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Separation Modes
+         * @description List the separation modes derived from the catalog's model capabilities.
+         */
+        get: operations["list_separation_modes_api_v1_separation_modes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /**
-         * HealthStatus
-         * @description Response of ``GET /api/v1/health``.
-         */
-        HealthStatus: {
-            /**
-             * Status
-             * @description Service liveness indicator; "ok" when healthy.
-             */
-            status: string;
-        };
-        /**
-         * VersionInfo
-         * @description Response of ``GET /api/v1/version``.
-         */
-        VersionInfo: {
-            /**
-             * Version
-             * @description Version of the running backend application.
-             */
-            version: string;
-        };
         /**
          * AudioFile
          * @description An uploaded audio file registered with the backend.
@@ -142,6 +230,184 @@ export interface components {
              * @description Bit rate in bits per second; null when unknown.
              */
             bit_rate_bps: number | null;
+        };
+        /** Body_upload_audio_api_v1_audio_post */
+        Body_upload_audio_api_v1_audio_post: {
+            /** File */
+            file: string;
+        };
+        /** HTTPValidationError */
+        HTTPValidationError: {
+            /** Detail */
+            detail?: components["schemas"]["ValidationError"][];
+        };
+        /**
+         * HealthStatus
+         * @description Response of ``GET /api/v1/health``.
+         */
+        HealthStatus: {
+            /**
+             * Status
+             * @description Service liveness indicator; "ok" when healthy.
+             */
+            status: string;
+        };
+        /**
+         * Model
+         * @description A logical separation model from the catalog.
+         *
+         *     ``architecture`` is an open set (e.g. ``mel_band_roformer``, ``mdx``,
+         *     ``mdxc``, ``demucs``, ``fake``); application code never branches on it
+         *     outside the inference package.
+         */
+        Model: {
+            /**
+             * Id
+             * @description Stable logical model ID, e.g. "vocals-hq-001".
+             */
+            id: string;
+            /**
+             * Display Name
+             * @description Human-readable model name.
+             */
+            display_name: string;
+            /**
+             * Architecture
+             * @description Implementation family (open set).
+             */
+            architecture: string;
+            /**
+             * Version
+             * @description Model version string.
+             */
+            version: string;
+            /**
+             * Separation Mode
+             * @description Logical mode ID this model serves, e.g. "vocals".
+             */
+            separation_mode: string;
+            /** @description User-facing quality tier this model backs within its separation mode; null means "balanced". Unique per separation mode. */
+            quality_tier?: components["schemas"]["QualityTier"] | null;
+            /**
+             * Stems
+             * @description Stem names this model produces.
+             */
+            stems: string[];
+            /**
+             * Sample Rate
+             * @description Native sample rate in Hz.
+             */
+            sample_rate: number;
+            /** @description Resource requirements. */
+            requirements?: components["schemas"]["ModelRequirements"];
+            /**
+             * Capabilities
+             * @description Compute backends this model supports (open set of backend IDs).
+             */
+            capabilities: {
+                [key: string]: boolean;
+            };
+        };
+        /**
+         * ModelRequirements
+         * @description Resource requirements advertised by a model manifest.
+         */
+        ModelRequirements: {
+            /**
+             * Recommended Vram Mb
+             * @description Recommended GPU VRAM in MiB; null when not specified.
+             */
+            recommended_vram_mb?: number | null;
+            /**
+             * Minimum Ram Mb
+             * @description Minimum system RAM in MiB; null when not specified.
+             */
+            minimum_ram_mb?: number | null;
+        };
+        /**
+         * QualityOption
+         * @description A user-facing quality tier mapping to a concrete model.
+         *
+         *     ``id`` carries a :class:`QualityTier` value; it is what a job request's
+         *     ``quality_id`` names, and it identifies exactly one model within a mode.
+         */
+        QualityOption: {
+            /**
+             * Id
+             * @description Quality tier ID, e.g. "fast", "high_quality".
+             */
+            id: string;
+            /**
+             * Display Name
+             * @description Human-readable tier name.
+             */
+            display_name: string;
+            /**
+             * Model Id
+             * @description ID of the model backing this tier.
+             */
+            model_id: string;
+        };
+        /**
+         * QualityTier
+         * @description User-facing quality tiers a model may back within its separation mode.
+         *
+         *     Users choose a tier, never an architecture or inference parameters
+         *     (ARCHITECTURE.md §9). **Declaration order is presentation order** — cheapest
+         *     and fastest first — and is what orders
+         *     :attr:`SeparationMode.quality_options`.
+         * @enum {string}
+         */
+        QualityTier: "fast" | "balanced" | "high_quality";
+        /**
+         * SeparationMode
+         * @description A user-facing separation mode derived from model capabilities.
+         */
+        SeparationMode: {
+            /**
+             * Id
+             * @description Mode ID, e.g. "vocals", "standard_stems".
+             */
+            id: string;
+            /**
+             * Display Name
+             * @description Human-readable mode name.
+             */
+            display_name: string;
+            /**
+             * Stems
+             * @description Stem names produced in this mode.
+             */
+            stems: string[];
+            /**
+             * Quality Options
+             * @description Available quality tiers.
+             */
+            quality_options: components["schemas"]["QualityOption"][];
+        };
+        /** ValidationError */
+        ValidationError: {
+            /** Location */
+            loc: (string | number)[];
+            /** Message */
+            msg: string;
+            /** Error Type */
+            type: string;
+            /** Input */
+            input?: unknown;
+            /** Context */
+            ctx?: Record<string, never>;
+        };
+        /**
+         * VersionInfo
+         * @description Response of ``GET /api/v1/version``.
+         */
+        VersionInfo: {
+            /**
+             * Version
+             * @description Version of the running backend application.
+             */
+            version: string;
         };
         /**
          * ComputeDevice
@@ -483,60 +749,6 @@ export interface components {
          */
         JobState: "queued" | "preparing" | "decoding" | "loading_model" | "separating" | "post_processing" | "encoding" | "completed" | "cancelled" | "failed";
         /**
-         * Model
-         * @description A logical separation model from the catalog.
-         *
-         *     ``architecture`` is an open set (e.g. ``mel_band_roformer``, ``mdx``,
-         *     ``mdxc``, ``demucs``, ``fake``); application code never branches on it
-         *     outside the inference package.
-         */
-        Model: {
-            /**
-             * Id
-             * @description Stable logical model ID, e.g. "vocals-hq-001".
-             */
-            id: string;
-            /**
-             * Display Name
-             * @description Human-readable model name.
-             */
-            display_name: string;
-            /**
-             * Architecture
-             * @description Implementation family (open set).
-             */
-            architecture: string;
-            /**
-             * Version
-             * @description Model version string.
-             */
-            version: string;
-            /**
-             * Separation Mode
-             * @description Logical mode ID this model serves, e.g. "vocals".
-             */
-            separation_mode: string;
-            /**
-             * Stems
-             * @description Stem names this model produces.
-             */
-            stems: string[];
-            /**
-             * Sample Rate
-             * @description Native sample rate in Hz.
-             */
-            sample_rate: number;
-            /** @description Resource requirements. */
-            requirements?: components["schemas"]["ModelRequirements"];
-            /**
-             * Capabilities
-             * @description Compute backends this model supports (open set of backend IDs).
-             */
-            capabilities: {
-                [key: string]: boolean;
-            };
-        };
-        /**
          * ModelInfo
          * @description Summary of the model in use, embedded in runtime metrics.
          */
@@ -573,24 +785,6 @@ export interface components {
             stem_count: number;
         };
         /**
-         * ModelRequirements
-         * @description Resource requirements advertised by a model manifest.
-         */
-        ModelRequirements: {
-            /**
-             * Recommended Vram Mb
-             * @description Recommended GPU VRAM in MiB; null when not specified.
-             * @default null
-             */
-            recommended_vram_mb: number | null;
-            /**
-             * Minimum Ram Mb
-             * @description Minimum system RAM in MiB; null when not specified.
-             * @default null
-             */
-            minimum_ram_mb: number | null;
-        };
-        /**
          * ProcessingMetrics
          * @description Processing statistics sampled while a job runs.
          */
@@ -622,27 +816,6 @@ export interface components {
              * @description RTF = audio duration / processing duration.
              */
             realtime_factor: number;
-        };
-        /**
-         * QualityOption
-         * @description A user-facing quality tier mapping to a concrete model.
-         */
-        QualityOption: {
-            /**
-             * Id
-             * @description Quality tier ID, e.g. "fast", "high_quality".
-             */
-            id: string;
-            /**
-             * Display Name
-             * @description Human-readable tier name.
-             */
-            display_name: string;
-            /**
-             * Model Id
-             * @description ID of the model backing this tier.
-             */
-            model_id: string;
         };
         /**
          * RuntimeMetricsEvent
@@ -692,32 +865,6 @@ export interface components {
              * @default null
              */
             device_id: string | null;
-        };
-        /**
-         * SeparationMode
-         * @description A user-facing separation mode derived from model capabilities.
-         */
-        SeparationMode: {
-            /**
-             * Id
-             * @description Mode ID, e.g. "vocals", "standard_stems".
-             */
-            id: string;
-            /**
-             * Display Name
-             * @description Human-readable mode name.
-             */
-            display_name: string;
-            /**
-             * Stems
-             * @description Stem names produced in this mode.
-             */
-            stems: string[];
-            /**
-             * Quality Options
-             * @description Available quality tiers.
-             */
-            quality_options: components["schemas"]["QualityOption"][];
         };
         /**
          * SeparationResult
@@ -830,6 +977,170 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionInfo"];
+                };
+            };
+        };
+    };
+    upload_audio_api_v1_audio_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_audio_api_v1_audio_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioFile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_audio_api_v1_audio__audio_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                audio_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AudioFile"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_audio_api_v1_audio__audio_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                audio_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_models_api_v1_models_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"][];
+                };
+            };
+        };
+    };
+    get_model_api_v1_models__model_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_separation_modes_api_v1_separation_modes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeparationMode"][];
                 };
             };
         };

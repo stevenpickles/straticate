@@ -32,7 +32,13 @@ from straticate.schemas.jobs import (
     SeparationResultMetrics,
     Stem,
 )
-from straticate.schemas.models import Model, ModelRequirements, QualityOption, SeparationMode
+from straticate.schemas.models import (
+    Model,
+    ModelRequirements,
+    QualityOption,
+    QualityTier,
+    SeparationMode,
+)
 
 __all__ = [
     "AudioFile",
@@ -56,6 +62,7 @@ __all__ = [
     "ModelRequirements",
     "ProcessingMetrics",
     "QualityOption",
+    "QualityTier",
     "RuntimeMetricsEvent",
     "SeparationConfiguration",
     "SeparationMode",

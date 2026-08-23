@@ -94,6 +94,36 @@ extension. `bit_depth`/`bit_rate_bps` are nullable (lossy formats).
 | GET | `/models/{model_id}` | One `Model` |
 | GET | `/separation-modes` | `SeparationMode[]` derived from model capabilities |
 
+Unknown model ID → `404` with code `model_not_found`.
+
+`Model` is the API-facing projection of a catalog manifest
+(`models/schemas/model-manifest.schema.json`):
+
+```json
+{
+  "id": "fake-vocals-001",
+  "display_name": "Fake Vocals (development)",
+  "architecture": "fake",
+  "version": "1.0",
+  "separation_mode": "vocals",
+  "quality_tier": null,
+  "stems": ["vocals", "instrumental"],
+  "sample_rate": 44100,
+  "requirements": { "recommended_vram_mb": 0, "minimum_ram_mb": null },
+  "capabilities": { "cuda": true, "cpu": true }
+}
+```
+
+Manifest fields that are *not* user-facing — `artifact`, `licensing`,
+`default_inference_parameters` — are deliberately absent from `Model` and never
+appear in any response: users choose modes and quality tiers, never
+architectures or inference parameters (ARCHITECTURE.md §1, §9).
+
+`quality_tier` is `fast | balanced | high_quality | null` (feature 010; `null`
+means `balanced`). It is the tier this model backs inside its separation mode,
+and it is unique per mode — the tier ID is what `SeparationConfiguration.quality_id`
+selects.
+
 `SeparationMode` (what the frontend renders — never hardcoded client-side):
 
 ```json
@@ -107,6 +137,13 @@ extension. `bit_depth`/`bit_rate_bps` are nullable (lossy formats).
   ]
 }
 ```
+
+Modes are derived, not stored: models are grouped by `separation_mode`, `stems`
+come from the models (which must agree), and each model contributes one
+`QualityOption` for its tier, ordered `fast → balanced → high_quality`. A mode
+served by a single model still exposes one option. Mode labels come from the
+catalog file's optional `separation_modes` table, falling back to a humanized
+mode ID; tier labels are humanized tier IDs.
 
 ## Jobs
 
