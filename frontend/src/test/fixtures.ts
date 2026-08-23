@@ -1,5 +1,11 @@
 /** Shared contract-shaped fixtures for tests. */
-import type { AudioFile } from '../api/types'
+import type {
+  AudioFile,
+  Job,
+  RuntimeMetricsEvent,
+  SeparationConfiguration,
+  SeparationResult,
+} from '../api/types'
 
 /** A representative backend-registered audio file. */
 export const sampleAudioFile: AudioFile = {
@@ -15,5 +21,84 @@ export const sampleAudioFile: AudioFile = {
     sample_rate_hz: 44100,
     bit_depth: 24,
     bit_rate_bps: 1411000,
+  },
+}
+
+/** ULID of the job used by the job fixtures below. */
+export const sampleJobId = '01SAMPLEJOBULID00000000000'
+
+/** A representative create-job request body. */
+export const sampleConfiguration: SeparationConfiguration = {
+  audio_id: sampleAudioFile.id,
+  mode_id: 'vocals',
+  quality_id: 'high_quality',
+  device_id: 'cuda:0',
+}
+
+/** A representative queued job, as returned by `POST /jobs`. */
+export const sampleJob: Job = {
+  id: sampleJobId,
+  audio_id: sampleAudioFile.id,
+  configuration: sampleConfiguration,
+  model_id: 'vocals-hq-001',
+  state: 'queued',
+  progress: 0,
+  created_at: '2026-08-23T12:00:00Z',
+  started_at: null,
+  finished_at: null,
+  error: null,
+  result: null,
+}
+
+/** A representative separation result for a completed job. */
+export const sampleResult: SeparationResult = {
+  job_id: sampleJobId,
+  model_id: 'vocals-hq-001',
+  stems: [
+    {
+      name: 'vocals',
+      duration_seconds: 227.4,
+      sample_rate_hz: 44100,
+      channels: 2,
+    },
+    {
+      name: 'instrumental',
+      duration_seconds: 227.4,
+      sample_rate_hz: 44100,
+      channels: 2,
+    },
+  ],
+  metrics: { processing_seconds: 28.8, realtime_factor: 7.9 },
+}
+
+/** A representative `runtime_metrics` payload (GPU present, NVML available). */
+export const sampleRuntimeMetrics: RuntimeMetricsEvent = {
+  type: 'runtime_metrics',
+  job_id: sampleJobId,
+  model: {
+    id: 'vocals-hq-001',
+    display_name: 'Vocals — High Quality',
+    architecture: 'mel_band_roformer',
+    version: '1.0',
+    separation_mode: 'vocals',
+    stem_count: 2,
+  },
+  gpu: {
+    device_id: 'cuda:0',
+    name: 'NVIDIA GeForce RTX 5090',
+    backend: 'cuda',
+    memory_allocated_bytes: 9234179686,
+    memory_peak_bytes: 10133099161,
+    memory_total_bytes: 34359738368,
+    utilization: 0.91,
+    temperature_celsius: 63,
+  },
+  processing: {
+    stage: 'separating',
+    chunks_completed: 31,
+    chunks_total: 48,
+    elapsed_seconds: 18.2,
+    audio_processed_seconds: 148.0,
+    realtime_factor: 7.9,
   },
 }
