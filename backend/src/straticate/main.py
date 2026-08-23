@@ -20,6 +20,7 @@ from straticate.errors import register_error_handlers
 from straticate.jobs import JobManager
 from straticate.logging import configure_logging
 from straticate.models import ModelCatalog
+from straticate.system import DeviceDetector
 
 API_PREFIX = "/api/v1"
 
@@ -55,6 +56,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         A fully configured :class:`FastAPI` instance with logging, CORS,
         routers, and error handlers installed.
 
+    Compute devices are detected here rather than in the lifespan: they cannot
+    change during a run, and detection never raises (a failing probe only logs
+    a warning), so it cannot break startup.
+
     Raises:
         ModelCatalogError: If ``settings.models_dir`` holds no valid model
             catalog. The application deliberately refuses to start rather than
@@ -67,6 +72,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
     app.state.model_catalog = ModelCatalog.from_directory(settings.models_dir)
+
+    device_detector = DeviceDetector()
+    device_detector.refresh()
+    app.state.device_detector = device_detector
 
     app.add_middleware(
         CORSMiddleware,
