@@ -369,12 +369,19 @@ Job error codes:
 | `model_device_unsupported` | 409 | the resolved model's `capabilities` do not include the resolved device's `backend`. `detail` carries `model_id`, `device_id`, `device_backend` and `supported_backends` |
 | `model_weights_missing` | 409 | the resolved model is catalogued but its weights are not installed. `detail` carries `model_id` |
 | `separator_unavailable` | 501 | no separator implementation exists for the resolved model's architecture |
+| `model_weights_invalid` | 500 | the installed weights do not load into this build's architecture |
+| `model_parameters_invalid` | 500 | the resolved model's catalog entry carries inference parameters this build cannot use |
 | `job_not_found` | 404 | unknown `job_id` (get/cancel) |
 | `service_unavailable` | 503 | the job manager is shutting down (create/cancel) |
 
 A malformed create body is the standard `validation_error` (422). References are
 resolved in the order audio → mode → quality → device → separator, so the first
 unresolvable one is what the client is told about.
+
+The last two are **deployment faults, not client mistakes**: a corrupted install,
+or a catalog entry that does not match its checkpoint. They are `500`s because
+there is nothing a client can do about either, and they surface here — rather
+than mid-job — because creating a job is where a separator is first built.
 
 ### Device selection and model capabilities
 
@@ -614,10 +621,9 @@ event), not as the status of the request that created the job:
 | `separation_mode_mismatch` | the separator was handed a configuration for a mode it does not serve — a wiring bug, reported rather than silently producing the wrong stems |
 | `compute_device_unavailable` | the device the job resolved to is no longer usable by this process (for example a CUDA runtime that has gone away since detection) |
 | `model_weights_missing` | the weights disappeared between job creation and the run |
-| `model_weights_invalid` | the installed weights do not load into this build's architecture |
-| `model_parameters_invalid` | the model's catalog entry carries inference parameters this build cannot use |
 
-The last three are deployment faults rather than client mistakes, and
-`model_weights_invalid` / `model_parameters_invalid` carry a `500`-shaped status
-if they ever surface on a request (they normally surface at job creation, when
-the separator is first built).
+`model_weights_invalid` and `model_parameters_invalid` are **not** in this table:
+a separator is built when a job is *created*, so those two are answers to
+`POST /jobs` (both `500`) and are listed with the other job-creation errors
+above. They reach a job's `error.code` only if a build somehow first succeeds and
+a later one does not.

@@ -110,7 +110,9 @@ async def create_job(
     ``separation_mode_not_found`` (404), ``quality_option_not_found`` (404),
     ``device_not_found`` (404), ``model_device_unsupported`` (409),
     ``model_weights_missing`` (409), ``separator_unavailable`` (501),
-    ``service_unavailable`` (503).
+    ``service_unavailable`` (503) — and, because building the separator happens
+    here, the two deployment faults that build can report:
+    ``model_weights_invalid`` (500) and ``model_parameters_invalid`` (500).
     """
     _record, input_path = resolve_audio(store, configuration.audio_id)
     model = resolve_model(catalog, configuration.mode_id, configuration.quality_id)

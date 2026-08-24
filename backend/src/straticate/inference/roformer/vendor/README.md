@@ -55,8 +55,8 @@ progress, honour a cancellation token and run inside a worker thread.
 
 ## Straticate's modifications
 
-Kept to the minimum that lets the code run inside this application. Every one is
-marked with a `Straticate modification:` comment at the site.
+Kept to the minimum that lets the code run inside this application, and listed
+here in full.
 
 1. **`mel_band_roformer.py` — `librosa` replaced by `mel_filters.py`.**
    Upstream calls `librosa.filters.mel(...)` exactly once, at construction, to
@@ -81,9 +81,19 @@ marked with a `Straticate modification:` comment at the site.
 3. **`attend.py` — `print_once` → `logging`.** Upstream printed its backend
    choice to stdout. A server process logs.
 
-4. **Docstring headers** in both files gained a `VENDORED CODE` banner pointing
+4. **`mel_band_roformer.py` — an explicit window on the STFT bin-count probe.**
+   The constructor runs one throwaway `torch.stft` purely to read `.shape[1]`,
+   the number of frequency bins. torch warns when `window` is omitted, and the
+   backend suite treats a warning as a finding, so the probe passes the
+   rectangular window torch's own warning text recommends for exactly this case.
+   No window can change a bin count, so the value read is identical.
+
+5. **Docstring headers** in both files gained a `VENDORED CODE` banner pointing
    here.
 
-Nothing else was touched: no reformatting, no renaming, no type annotations, no
-lint fixes. `backend/pyproject.toml` therefore excludes this directory from Ruff
+Items 1–4 each carry a `Straticate modification:` comment at the site, and there
+are exactly four such comments in this directory — `grep -rn 'Straticate
+modification' .` is meant to return this list and nothing else. (Item 5 is the
+banner at the top of each file, which says so itself.) Nothing else was touched:
+no reformatting, no renaming, no type annotations, no lint fixes. `backend/pyproject.toml` therefore excludes this directory from Ruff
 and from Pyright, so the copy stays diffable against upstream.

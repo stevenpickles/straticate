@@ -181,7 +181,7 @@ separation library was rejected outright: they ship their own model registries
 and downloaders, duplicating features 010 and 025.
 
 `vendor/README.md` lists exactly what was copied and every modification. In
-summary, four changes, each marked at its site:
+summary, five changes, each marked at its site:
 
 1. **`librosa` replaced by `mel_filters.py`.** Upstream calls
    `librosa.filters.mel(...)` once, at construction. Depending on librosa for one
@@ -203,6 +203,9 @@ summary, four changes, each marked at its site:
    bin-count probe, which torch warns about otherwise. The probe reads only
    `.shape[1]`, which no window can change.
 
+5. **Docstring headers** in both files gained a `VENDORED CODE` banner pointing
+   at `vendor/README.md`.
+
 The vendored `attend.py` and `mel_band_roformer.py` are excluded from Ruff and
 Pyright (`backend/pyproject.toml`) so the copy stays diffable against upstream.
 `mel_filters.py` is Straticate's code and is **not** excluded.
@@ -223,12 +226,32 @@ windows, and run inside `asyncio.to_thread`. Each window is one forward pass
 through a 228-million-parameter network, so `chunks_completed / chunks_total` is
 a statement about work done.
 
-**The second stem is a residual.** The checkpoint has `num_stems: 1` and emits
-vocals; `instrumental` is `mixture - vocals`, computed in the float domain before
-either stem is quantized, so the two reconstruct the mixture to within one LSB
-(there is a test). Which stem is a residual is *derived*, not configured: the
-catalog already states `stems` and (through the hyperparameters) `num_stems`, and
-a third place to say the same thing is a third place for them to disagree.
+**The second stem is a residual, and the catalog says which one.** The
+checkpoint has `num_stems: 1` and emits vocals; `instrumental` is
+`mixture - vocals`, computed in the float domain before either stem is quantized,
+so the two reconstruct the mixture to within one LSB (there is a test).
+
+The first version of this *derived* which stem was the residual — "it is the last
+one advertised" — on the grounds that the catalog already states `stems` and
+`num_stems` and a third statement is a third thing to disagree. **Review found
+that reasoning wrong, and it was the most dangerous defect in the feature.**
+`stems` has no ordering constraint in the manifest schema, and this architecture's
+whole promise is that another checkpoint is a pure data edit; an entry written
+`"stems": ["instrumental", "vocals"]` would have had the network's vocals written
+to `instrumental.wav` and the residual to `vocals.wav`, with nothing anywhere
+reporting a problem. Silently wrong audio is the worst thing this module can
+produce.
+
+So the residual is **named**, in
+`default_inference_parameters.output.residual_stem`, and every other shape is
+refused at construction with `model_parameters_invalid`: a residual implied but
+not named, a residual named that the model does not advertise, and a residual
+named for a network that emits every stem itself. The remaining stems map to the
+network's outputs in advertised order — fully determined for a one-output model,
+and for a multi-output one the same ordering contract the `advertised ==
+produced` case already carries. A test separates the same audio under both stem
+orders and asserts `vocals.wav` comes out byte-identical either way; it fails
+against the derived version.
 
 **A mono source gets mono stems.** The checkpoint is stereo-only, so a mono input
 is duplicated for the network and folded back afterwards. The application never
@@ -253,14 +276,56 @@ is a model running with the wrong hyperparameters.
 **Adding a second Mel-Band RoFormer checkpoint is a pure data edit** — a new
 entry with its own `artifact` and `default_inference_parameters`, no code.
 
+### Telemetry: two defects review found on the unrun CUDA path
+
+Both were exactly where the "written and type-checked but unrun" caveat said to
+look, and both are now covered by tests that run on a CPU-only host, through a
+single seam (`cuda_namespace()`) that a double replaces.
+
+**The peak memory figure was a previous job's.**
+`torch.cuda.max_memory_allocated` is a per-device high-water mark that only an
+explicit reset clears, and the reset sat in `_place_on_device`, which
+early-returns when the network is already on the device it wants. So the first
+CUDA job reset it and every later one inherited whatever the largest job before
+it had reached: a ten-second track after a six-minute one would have reported the
+six-minute track's peak as its own, under a docstring promising that every number
+is measured. The reset is now per **run**, immediately before the chunk loop; it
+resets to the *current* allocation, so the resident network still counts.
+
+**NVML was initialised and shut down on every sample, on the event loop.**
+`runtime_stats()` is polled directly on the loop by
+`straticate.telemetry.sampler`, deliberately, because `inference/base.py`
+promises "a cheap, non-blocking snapshot". An `nvmlInit()`/`nvmlShutdown()` pair
+is tens of milliseconds of driver setup and teardown — once a second, for the
+length of a job, in front of every WebSocket frame, job event and HTTP request
+the loop owes somebody. `NvmlProbe` now loads and initialises the binding once,
+caches the device handles, and leaves shutdown to `atexit`, which is how a
+long-running NVML consumer is meant to behave; what remains per sample is two
+driver queries. An absent binding costs one failed import per process rather than
+one per sample, and a driver error mid-job empties the two optional fields
+without touching anything else. NVML is still never a dependency.
+
 ### The two items feature 029 deferred to here
 
 **Separator construction no longer runs on the event loop.**
-`SeparatorRegistry.aget()` runs the builder in `asyncio.to_thread` and takes a
-**per-model** lock, re-checking the cache inside it: two submissions racing for
-one model load it once and share the instance, which for a 228-million-parameter
-network is a gigabyte rather than a millisecond. Different models still load in
-parallel. `get()` stays for synchronous callers and is documented as blocking.
+`SeparatorRegistry.aget()` runs the builder in `asyncio.to_thread`, and the
+build takes a **per-model** lock and re-checks the cache inside it: two
+submissions racing for one model load it once and share the instance, which for a
+228-million-parameter network is a gigabyte rather than a millisecond. Different
+models still load in parallel. `get()` stays for synchronous callers, is
+documented as blocking, and shares the same build-once path.
+
+That lock is a `threading.Lock`, not an `asyncio.Lock` — review's finding. An
+`asyncio.Lock` binds to whichever loop first *contends* for it and then stays in
+the registry, so a build that fails leaves it bound with nothing cached, and the
+next contended attempt from another loop (a synchronous `TestClient` block after
+an async client on the same app, a second `asyncio.run`, the next test's
+function-scoped loop) raised `RuntimeError: ... is bound to a different event
+loop` instead of building. A thread lock is also what actually guards the build,
+since the build already runs in a thread, and nothing is held across an `await`.
+The regression test needs two racing callers per loop, because an *uncontended*
+`asyncio.Lock` acquire returns on a fast path that never looks at the loop at
+all — which is precisely why the defect survived the first round.
 
 The `await` in `create_job` sits *before* `submit`, deliberately. What feature
 019 needs to stay atomic is `submit` → sampler registration — the job ID does not
@@ -353,14 +418,23 @@ This host is **CPU-only**: `GET /api/v1/system/devices` returns one device,
 
 **Not validated — stated plainly:**
 
-- **The CUDA path was never executed.** No GPU was present. `torch.autocast`,
-  the CUDA memory figures in `runtime_stats()`, `reset_peak_memory_stats`, the
-  `cuda:N` device mapping and the flash-attention backend selection are written
-  and type-checked but **unrun**. `test_cuda_runtime_stats_report_real_memory`
-  exists, carries `@pytest.mark.gpu`, and skipped. No GPU telemetry number in
-  this document or anywhere else is measured; none has been fabricated.
-- **NVML** (`utilization`, `temperature_celsius`) was likewise never exercised;
-  the binding is not installed and never becomes a dependency.
+- **The CUDA path was never executed on real hardware.** No GPU was present.
+  `torch.autocast`, the flash-attention backend selection, and the actual
+  behaviour of the CUDA allocator are written and type-checked but **unrun**.
+  `test_cuda_runtime_stats_report_real_memory` exists, carries
+  `@pytest.mark.gpu`, and skipped. No GPU telemetry number in this document or
+  anywhere else is measured; none has been fabricated.
+
+  Review's two findings landed on exactly this path, which is the argument for
+  saying so. What *can* be checked without a GPU now is: `device_stats()` against
+  a `torch.cuda` double (device ID, name, allocated/peak/total, and `None` on
+  CPU), the peak reset happening once per run, and the NVML lifecycle. Those are
+  real tests in normal CI; they do not make the claim "it works on CUDA", and
+  nothing here should be read as making it.
+- **NVML** (`utilization`, `temperature_celsius`) was never exercised against a
+  real driver; the binding is not installed and never becomes a dependency. Its
+  *lifecycle* — initialised once, handles cached, never shut down mid-job,
+  absent-binding and driver-failure paths — is tested against a double.
 - **A real music file** was never separated — nothing copyrighted was
   downloaded. The quality figures above come from a synthesised voice over a
   generated backing, which is a real measurement of a real model but is not the
@@ -392,9 +466,12 @@ file moved.
   half-precision or `channels_last` tuning, no batching of windows, and no
   `torch.compile`. All of those are performance work with a real GPU to measure
   on.
-- **`model_weights_invalid` and `model_parameters_invalid` are `500`s.** They are
-  deployment faults — a corrupted install, or a catalog entry that does not match
-  its checkpoint — and there is nothing a client can do about either.
+- **`model_weights_invalid` and `model_parameters_invalid` are `500`s**, and
+  because a separator is built inside `POST /jobs`, they are answers to *that*
+  request rather than job-failure codes. They are deployment faults — a corrupted
+  install, or a catalog entry that does not match its checkpoint — and there is
+  nothing a client can do about either. Both are in the create-job error table in
+  `docs/contracts/rest-api.md`, and both have an API-level test.
 - **Installed weights are never re-verified** on load (feature 025's documented
   limitation); the integration tier is the only thing that re-hashes them.
 - **No frontend affordance** for installing a model, so the high-quality tier is
