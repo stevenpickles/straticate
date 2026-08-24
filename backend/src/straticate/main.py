@@ -17,6 +17,11 @@ record onto ``logging.lastResort`` — WARNING and above only, bare message, no
 timestamp, no logger name, and ``STRATICATE_LOG_LEVEL=DEBUG`` silently doing
 nothing.
 
+**Everything that logs at startup therefore runs after that**, the compute
+device probe included: it is warmed in the lifespan rather than in
+:func:`create_app`, whose module-level call runs at import — earlier than
+either entry path configures anything.
+
 Neither path changes what the application *is*: :func:`create_app` builds the
 same object either way, and **building** it has no process-global side effects
 — configuration happens at startup, once per running application, not once per
@@ -118,6 +123,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     :func:`serve` still configures logging authoritatively before the server
     starts, and this call then finds the work already done.
 
+    **Compute devices are probed immediately afterwards**, and the order is the
+    whole point. :meth:`~straticate.system.DeviceDetector.refresh` is where
+    "PyTorch is not installed" (DEBUG) and "Could not determine total system
+    memory" (WARNING, with a traceback) are emitted, and probing from
+    :func:`create_app` meant those records were written at *import* — before
+    either entry path had configured anything, so they fell through to
+    ``logging.lastResort``: the debug line dropped even under
+    ``STRATICATE_LOG_LEVEL=DEBUG``, the warning printed bare with no timestamp,
+    level or logger name. Startup is the earliest point that runs once per
+    running application *after* logging exists, so it is where the probe
+    belongs; devices still cannot change during a run, and detection still
+    never raises (a failing probe only logs a warning), so this cannot break
+    startup either. The detector object itself is still built in
+    :func:`create_app`, so a test can substitute its probes before startup
+    warms it.
+
     A **fresh** :class:`JobManager`, :class:`EventHub` and
     :class:`TelemetrySampler` are created per lifespan cycle (none can be
     restarted once closed, and an app object may go through several lifespans,
@@ -162,6 +183,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings = cast(Settings | None, getattr(app.state, "settings", None))
     if settings is not None:
         ensure_logging_configured(settings.log_level)
+    detector = cast(DeviceDetector | None, getattr(app.state, "device_detector", None))
+    if detector is not None:
+        detector.refresh()
     installer = cast(ModelInstaller | None, getattr(app.state, "model_installer", None))
     manager = JobManager()
     hub = EventHub()
@@ -210,10 +234,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     Logging is configured once per *running* application, in :func:`lifespan`,
     which covers both entry paths without firing on import.
 
-    Compute devices are detected here rather than in the lifespan: they cannot
-    change during a run, and detection never raises (a failing probe only logs
-    a warning), so it cannot break startup. The separator registry is built
-    here for the same reason — it holds no per-run state, only the
+    The compute :class:`~straticate.system.DeviceDetector` is *constructed*
+    here and **warmed in the lifespan**: probing writes log records, and
+    ``create_app`` runs at import, before either entry path has configured
+    logging (see :func:`lifespan`). Building the object here keeps
+    ``app.state.device_detector`` available to substitute before startup. The
+    separator registry is built here because it is silent — it holds no
+    per-run state, only the
     architecture → builder map and the separator instances it lazily creates.
     It is built **from these settings**, so ``ffmpeg_timeout_seconds`` governs
     the separator's decode subprocesses on a per-application basis rather than
@@ -236,9 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.model_catalog = catalog
     app.state.model_installer = ModelInstaller(catalog, settings.models_dir)
 
-    device_detector = DeviceDetector()
-    device_detector.refresh()
-    app.state.device_detector = device_detector
+    app.state.device_detector = DeviceDetector()
 
     app.state.separator_registry = SeparatorRegistry(
         default_separator_builders(ffmpeg_timeout_seconds=settings.ffmpeg_timeout_seconds)
@@ -280,8 +305,8 @@ app = create_app()
 day-to-day development all name ``straticate.main:app``, and ``--factory``
 would be a documented-interface change for no gain: now that
 :func:`create_app` has no process-global side effects, building it at import
-time costs a catalog read and a device probe and changes nothing outside the
-returned object. Tests that want an isolated instance call
+time costs a catalog read, writes no log record, and changes nothing outside
+the returned object. Tests that want an isolated instance call
 :func:`create_app` themselves (see ``tests/conftest.py``).
 """
 

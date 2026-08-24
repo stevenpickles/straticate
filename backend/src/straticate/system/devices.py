@@ -290,9 +290,10 @@ def cpu_device() -> ComputeDevice:
 class DeviceDetector:
     """Detects and caches the logical compute devices this machine offers.
 
-    Devices do not change during a run, so detection happens once (at startup
-    via :func:`straticate.main.create_app`) and the result is cached; call
-    :meth:`refresh` to re-probe.
+    Devices do not change during a run, so detection happens once — at
+    startup, in :func:`straticate.main.lifespan`, which is the first point at
+    which logging is configured on every entry path — and the result is
+    cached; call :meth:`refresh` to re-probe.
 
     Args:
         probes: Accelerator probes, highest priority first. Defaults to
@@ -373,9 +374,9 @@ class DeviceDetector:
 def get_device_detector(request: Request) -> DeviceDetector:
     """FastAPI dependency: the application's :class:`DeviceDetector`.
 
-    The instance is created and warmed by
-    :func:`straticate.main.create_app` and stored on
-    ``app.state.device_detector``.
+    The instance is created by :func:`straticate.main.create_app`, stored on
+    ``app.state.device_detector`` and warmed at startup by
+    :func:`straticate.main.lifespan`.
     """
     return cast(DeviceDetector, request.app.state.device_detector)
 
