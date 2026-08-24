@@ -3,6 +3,7 @@ import { ApiError } from '../api/client'
 import { cancelJob } from '../api/jobs'
 import type { JobState } from '../api/types'
 import { formatDuration } from '../format'
+import { useAppDispatch } from '../state/appState'
 import {
   isTerminalJobState,
   useJobDispatch,
@@ -83,12 +84,19 @@ function Field({ label, value }: { label: string; value: string }) {
  * "cancelling" affordance and the authoritative transition is the
  * `job_cancelled` event (`docs/contracts/rest-api.md`).
  *
- * Must be rendered under a `JobStateProvider`; the socket itself is opened
- * once per session by `JobEventBridge` (see `src/ws/JobEventBridge.tsx`).
+ * A completed job offers "View results", which advances the workflow to the
+ * `inspect` phase and the stem player; every terminal job offers "Start
+ * another separation", which stops tracking it and returns to `configure`
+ * with the same uploaded file (both added by feature 023).
+ *
+ * Must be rendered under an `AppStateProvider` and a `JobStateProvider`; the
+ * socket itself is opened once per session by `JobEventBridge` (see
+ * `src/ws/JobEventBridge.tsx`).
  */
 export function SeparationProgress() {
   const { job, progress, cancelledAtStage, connection, cancel } = useJobState()
   const dispatch = useJobDispatch()
+  const appDispatch = useAppDispatch()
   const cancellingRef = useRef(false)
 
   // Read at settlement time, not from the closure: the user may have started
@@ -127,6 +135,21 @@ export function SeparationProgress() {
       .finally(() => {
         cancellingRef.current = false
       })
+  }
+
+  /** Advance the workflow to the stem player (feature 023). */
+  const viewResults = () => {
+    appDispatch({ type: 'results/inspect' })
+  }
+
+  /**
+   * Start over with the same uploaded file: stop tracking the finished job
+   * and return to `configure`. Claimed here by feature 023 — 011 and 017
+   * both flagged the missing path back as unowned.
+   */
+  const startAnother = () => {
+    dispatch({ type: 'job/clear' })
+    appDispatch({ type: 'results/startAnother' })
   }
 
   if (job === null) {
@@ -191,12 +214,20 @@ export function SeparationProgress() {
       )}
 
       {state === 'completed' && (
-        <p className="workspace-hint">
-          {stemCount === 1
-            ? 'Separation complete — 1 stem is ready.'
-            : `Separation complete — ${String(stemCount)} stems are ready.`}{' '}
-          Playback and export arrive with the results UI.
-        </p>
+        <>
+          <p className="workspace-hint">
+            {stemCount === 1
+              ? 'Separation complete — 1 stem is ready.'
+              : `Separation complete — ${String(stemCount)} stems are ready.`}
+          </p>
+          <button
+            type="button"
+            className="separation-progress-view"
+            onClick={viewResults}
+          >
+            View results
+          </button>
+        </>
       )}
 
       {state === 'cancelled' && (
@@ -237,6 +268,16 @@ export function SeparationProgress() {
             </p>
           )}
         </>
+      )}
+
+      {terminal && (
+        <button
+          type="button"
+          className="separation-progress-restart"
+          onClick={startAnother}
+        >
+          Start another separation
+        </button>
       )}
 
       {cancel.status === 'error' && (

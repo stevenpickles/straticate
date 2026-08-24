@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { Workspace } from './Workspace'
 import {
   AppStateProvider,
@@ -14,9 +15,11 @@ import {
 import {
   sampleAudioFile,
   sampleJob,
+  sampleResult,
   sampleRuntimeMetrics,
   sampleSeparationModes,
 } from '../test/fixtures'
+import { FakeAudioContext } from '../test/fakeAudioContext'
 
 function stubModesFetch() {
   vi.stubGlobal(
@@ -96,5 +99,91 @@ describe('Workspace', () => {
     expect(
       screen.queryByRole('region', { name: 'Runtime telemetry' }),
     ).not.toBeInTheDocument()
+  })
+
+  it('makes the whole round trip: complete, inspect, start another', async () => {
+    // The gap the PR #26 review caught: `SeparationProgress` is mounted for
+    // `separate` alone, so once the user opens the results the only control
+    // that dispatches `results/startAnother` disappears with it. This walks
+    // the real components through the real reducers to prove it does not.
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(
+              String(url).endsWith('/result')
+                ? sampleResult
+                : sampleSeparationModes,
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        ),
+      ),
+    )
+    const completed = {
+      ...sampleJob,
+      state: 'completed' as const,
+      progress: 1,
+      result: sampleResult,
+    }
+    renderWorkspace(
+      {
+        phase: 'separate',
+        upload: { status: 'uploaded', file: sampleAudioFile },
+      },
+      { job: completed },
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: 'View results' }))
+    expect(screen.getByText('Inspect')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: 'Mute vocals' }),
+    ).toBeInTheDocument()
+
+    // The escape hatch survived the phase change.
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+
+    expect(screen.getByText('Configure')).toBeInTheDocument()
+    expect(
+      screen.getByRole('region', { name: 'Separation options' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('region', { name: 'Stem player' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('mounts the stem player and the export panel in the inspect phase', async () => {
+    // jsdom has no Web Audio API; the stem player's default engine builds an
+    // AudioContext once the result loads.
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(sampleResult), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      ),
+    )
+    renderWorkspace(
+      { phase: 'inspect' },
+      { job: { ...sampleJob, state: 'completed', result: sampleResult } },
+    )
+
+    expect(screen.getByText('Inspect')).toBeInTheDocument()
+    // Feature 023 owns StemPlayer; feature 024 owns ExportPanel.
+    expect(
+      screen.getByRole('region', { name: 'Stem player' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Export' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: 'Mute vocals' }),
+    ).toBeInTheDocument()
   })
 })
