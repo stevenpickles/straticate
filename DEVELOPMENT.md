@@ -109,7 +109,7 @@ file directly.
 | Backend API | pytest + httpx `ASGITransport` against the app | always | nothing external |
 | Audio tests | pytest, tiny generated fixtures in `testdata/` | always | FFmpeg |
 | Frontend unit/component | `frontend/` (Vitest + Testing Library) | always | nothing external |
-| E2E (fake separator) | Playwright, added around M1 | always | FFmpeg |
+| E2E (fake separator) | Playwright — feature 030, not yet written | *(will be)* always | FFmpeg |
 | GPU/model integration | separate suite, manually triggered | on demand | CUDA GPU, model downloads |
 
 Principles:
@@ -140,9 +140,18 @@ Frontend job (Ubuntu):
 npm ci → format:check → lint → typecheck → vitest run → vite build
 ```
 
-Both jobs install FFmpeg via apt. A later `integration-gpu` workflow (manual
-`workflow_dispatch`, self-hosted or skipped by default) covers real-model
-validation. CI must not download ML models.
+**The backend job installs FFmpeg via apt; the frontend job does not** — and
+that matches who actually uses it. The backend suite runs FFmpeg and ffprobe
+for real (generated audio fixtures, upload probing, export transcoding, and
+ffprobe verification of what a transcode produced), while the frontend suite is
+Vitest against mocked API responses and touches no media tooling. The frontend
+job needs FFmpeg only once the Playwright E2E tier exists (feature 030), which
+is when the install should be added — not before, where it would be a minute of
+CI spent on nothing.
+
+A later `integration-gpu` workflow (manual `workflow_dispatch`, self-hosted or
+skipped by default) covers real-model validation. CI must not download ML
+models.
 
 ## Conventions
 
