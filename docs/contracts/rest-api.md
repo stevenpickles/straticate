@@ -226,11 +226,11 @@ unresolvable one is what the client is told about.
 
 ## Results, stems, export
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/jobs/{job_id}/result` | `SeparationResult` |
-| GET | `/jobs/{job_id}/stems/{stem_name}` | Stream stem audio for preview (supports `Range`) |
-| GET | `/jobs/{job_id}/export?format=wav_pcm24&stems=vocals,instrumental` | Download stems in the requested format (zip when multiple), plus `separation.json` |
+| Method | Path | Purpose | Status |
+| --- | --- | --- | --- |
+| GET | `/jobs/{job_id}/result` | `SeparationResult` of a completed job | `200` |
+| GET | `/jobs/{job_id}/stems/{stem_name}` | Stream stem audio for preview (supports `Range`) | `200` / `206` |
+| GET | `/jobs/{job_id}/export?format=wav_pcm24&stems=vocals,instrumental` | Download stems in the requested format (zip when multiple), plus `separation.json` | *(feature 022 — not implemented)* |
 
 `SeparationResult`:
 
@@ -245,5 +245,59 @@ unresolvable one is what the client is told about.
   "metrics": { "processing_seconds": 29.0, "realtime_factor": 7.83 }
 }
 ```
+
+**A result exists only for a `completed` job.** Both routes read the same
+record: any other state — still processing, `cancelled` or `failed` — is a
+`409` `result_not_available` carrying the job's current `state` in `detail`,
+so a client can say *why* there is nothing to play without a second error code
+to branch on. `GET /jobs/{job_id}` remains the place to read the full record,
+including a failed job's `error`.
+
+**The result's `stems` list is the authority on which stem names exist.**
+`stem_name` is validated against `SeparationResult.stems` — never against a
+directory listing and never against a hardcoded set — so two-stem and
+four-stem jobs behave identically and a file that appears in a job's output
+directory without being in the result is not servable.
+
+### Stem streaming and `Range`
+
+Stems are served from the job's output directory
+(`{data_dir}/jobs/{job_id}/stems/{stem}.wav`; see
+[docs/features/014-fake-separator.md](../features/014-fake-separator.md)). The
+`Content-Type` follows the file's suffix — `audio/wav` for the 16-bit WAV the
+separator writes today, `audio/flac` when feature 022's formats land.
+`Content-Disposition` is `inline` (the export route is where downloads live).
+
+Byte ranges are fully supported, so an `<audio>` element or a Web Audio fetch
+can seek without downloading the whole stem:
+
+| Request | Response |
+| --- | --- |
+| no `Range` | `200`, whole file, `Accept-Ranges: bytes`, `Content-Length`, `ETag`, `Last-Modified` |
+| `Range: bytes=0-99` | `206`, exactly those 100 bytes, `Content-Range: bytes 0-99/{size}` |
+| `Range: bytes=N-` | `206`, bytes `N` … `size-1`, `Content-Range: bytes N-{size-1}/{size}` |
+| `Range: bytes=-N` | `206`, the final `N` bytes |
+| `Range` at or past `size` | `416`, `Content-Range: bytes */{size}` |
+| unparsable `Range` | `400` |
+| `If-Range` matching the `ETag`/`Last-Modified` | the range is honoured; otherwise the whole file |
+
+`416` and `400` are the only responses on these routes that are **not** the
+JSON error envelope: they come from the byte-range layer as plain text, which
+is what a media client reading `Content-Range` expects (RFC 9110). Every
+application error below uses the envelope.
+
+### Error codes
+
+| code | status | when |
+| --- | --- | --- |
+| `job_not_found` | 404 | unknown `job_id` |
+| `result_not_available` | 409 | the job exists but is not `completed`; `detail` carries `job_id` and the current `state` |
+| `stem_not_found` | 404 | the job's result lists no stem with that name; `detail` carries `available_stems` |
+| `stem_file_missing` | 404 | the result lists the stem but its file is gone from disk (an orphaned job directory from a previous process — job records are in-memory only) |
+
+A stem name that could not be a stem name at all (path traversal, an absolute
+path, a URL-encoded separator) is simply not in the result's stem list, so it
+comes back as a clean `stem_not_found` 404 — never a 500 and never a file from
+outside the job's stem directory.
 
 Export formats: `wav_pcm24` (default), `wav_float32`, `flac`.
