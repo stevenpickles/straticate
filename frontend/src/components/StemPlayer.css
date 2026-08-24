@@ -1,0 +1,141 @@
+/* Styles for StemPlayer.tsx, imported by that module (feature 023). */
+
+.stem-player {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+  width: min(32rem, 100%);
+  margin-top: 1rem;
+  padding: 1.25rem;
+  text-align: left;
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+}
+
+.stem-player-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.stem-player-stems {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.stem-player-stem {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+}
+
+.stem-player-stem-name {
+  font-weight: 500;
+  text-transform: capitalize;
+  overflow-wrap: anywhere;
+}
+
+.stem-player-stem-detail {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+}
+
+.stem-player-toggle {
+  min-width: 3.5rem;
+  padding: 0.2rem 0.6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.4rem;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.stem-player-toggle:hover:enabled,
+.stem-player-toggle:focus-visible:enabled {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+.stem-player-toggle[aria-pressed='true'] {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+  background-color: color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+
+.stem-player-toggle:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.stem-player-transport {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.stem-player-play {
+  min-width: 4.5rem;
+  padding: 0.4rem 1rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  background-color: transparent;
+  border: 1px solid var(--color-accent);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.stem-player-play:hover:enabled,
+.stem-player-play:focus-visible:enabled {
+  background-color: color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+
+.stem-player-play:disabled {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  cursor: default;
+}
+
+.stem-player-seek {
+  width: 100%;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.stem-player-seek:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.stem-player-time {
+  margin: 0;
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.stem-player-error {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-danger);
+}

@@ -14,9 +14,11 @@ import {
 import {
   sampleAudioFile,
   sampleJob,
+  sampleResult,
   sampleRuntimeMetrics,
   sampleSeparationModes,
 } from '../test/fixtures'
+import { FakeAudioContext } from '../test/fakeAudioContext'
 
 function stubModesFetch() {
   vi.stubGlobal(
@@ -96,5 +98,36 @@ describe('Workspace', () => {
     expect(
       screen.queryByRole('region', { name: 'Runtime telemetry' }),
     ).not.toBeInTheDocument()
+  })
+
+  it('mounts the stem player and the export panel in the inspect phase', async () => {
+    // jsdom has no Web Audio API; the stem player's default engine builds an
+    // AudioContext once the result loads.
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify(sampleResult), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        ),
+      ),
+    )
+    renderWorkspace(
+      { phase: 'inspect' },
+      { job: { ...sampleJob, state: 'completed', result: sampleResult } },
+    )
+
+    expect(screen.getByText('Inspect')).toBeInTheDocument()
+    // Feature 023 owns StemPlayer; feature 024 owns ExportPanel.
+    expect(
+      screen.getByRole('region', { name: 'Stem player' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Export' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: 'Mute vocals' }),
+    ).toBeInTheDocument()
   })
 })

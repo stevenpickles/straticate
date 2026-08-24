@@ -305,6 +305,75 @@ describe('appReducer create-job request state', () => {
   })
 })
 
+describe('appReducer results slice', () => {
+  /** The workflow as it stands with a job running on an uploaded file. */
+  const separating: AppState = {
+    ...initialAppState,
+    phase: 'separate',
+    upload: { status: 'uploaded', file: sampleAudioFile },
+  }
+
+  it('results/inspect advances from separate to inspect', () => {
+    const state = appReducer(separating, { type: 'results/inspect' })
+    expect(state.phase).toBe<WorkflowPhase>('inspect')
+    expect(state.upload).toBe(separating.upload)
+  })
+
+  it('results/inspect is idempotent', () => {
+    const once = appReducer(separating, { type: 'results/inspect' })
+    expect(appReducer(once, { type: 'results/inspect' }).phase).toBe('inspect')
+  })
+
+  it.each<WorkflowPhase>(['select', 'configure', 'export'])(
+    'results/inspect is ignored from the %s phase',
+    (phase) => {
+      const state = { ...separating, phase }
+      expect(appReducer(state, { type: 'results/inspect' })).toBe(state)
+    },
+  )
+
+  it('results/startAnother returns to configure with the file intact', () => {
+    const inspecting = appReducer(separating, { type: 'results/inspect' })
+    const state = appReducer(inspecting, { type: 'results/startAnother' })
+    expect(state.phase).toBe<WorkflowPhase>('configure')
+    expect(state.upload).toEqual({
+      status: 'uploaded',
+      file: sampleAudioFile,
+    })
+  })
+
+  it('results/startAnother keeps the loaded catalog and selection', () => {
+    const loaded = appReducer(
+      { ...separating, phase: 'configure' },
+      { type: 'configure/modesLoaded', modes: sampleSeparationModes },
+    )
+    const state = appReducer(
+      { ...loaded, phase: 'separate' },
+      { type: 'results/startAnother' },
+    )
+    expect(state.configure.modes).toEqual({
+      status: 'loaded',
+      modes: sampleSeparationModes,
+    })
+    expect(state.configure.modeId).toBe(sampleSeparationModes[0]?.id)
+  })
+
+  it('results/startAnother clears a stale create failure', () => {
+    const failed = appReducer(separating, {
+      type: 'configure/createFailed',
+      code: 'service_unavailable',
+      message: 'The server is shutting down.',
+    })
+    const state = appReducer(failed, { type: 'results/startAnother' })
+    expect(state.configure.create).toEqual({ status: 'idle' })
+  })
+
+  it('results/startAnother is ignored when no file is uploaded', () => {
+    const state = { ...initialAppState, phase: 'separate' as const }
+    expect(appReducer(state, { type: 'results/startAnother' })).toBe(state)
+  })
+})
+
 describe('useAppState / useAppDispatch', () => {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <AppStateProvider>{children}</AppStateProvider>

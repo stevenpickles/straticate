@@ -192,6 +192,26 @@ export type AppAction =
       readonly code: string
       readonly message: string
     }
+  | {
+      /**
+       * The user asked to listen to a completed job's stems: advances the
+       * workflow from `separate` to `inspect`. Ignored from any other phase
+       * (there is nothing to inspect before a job has run).
+       */
+      readonly type: 'results/inspect'
+    }
+  | {
+      /**
+       * The user asked to separate the same file again: returns the workflow
+       * to `configure` with the upload and the loaded catalog intact, and
+       * clears any stale create-request error. Ignored when no file is
+       * uploaded, since `configure` has nothing to configure without one.
+       *
+       * The tracked job is a separate store: whoever dispatches this also
+       * dispatches `job/clear` (see `state/jobState.tsx`).
+       */
+      readonly type: 'results/startAnother'
+    }
 
 /** Initial state of the configure slice: nothing loaded, nothing selected. */
 export const initialConfigureState: ConfigureState = {
@@ -344,6 +364,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           },
         },
       }
+    case 'results/inspect':
+      return state.phase === 'separate' || state.phase === 'inspect'
+        ? { ...state, phase: 'inspect' }
+        : state
+    case 'results/startAnother':
+      return state.upload.status !== 'uploaded'
+        ? state
+        : {
+            ...state,
+            phase: 'configure',
+            configure: { ...state.configure, create: { status: 'idle' } },
+          }
   }
 }
 
