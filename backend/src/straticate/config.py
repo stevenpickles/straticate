@@ -6,6 +6,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
+
 
 def _default_models_dir() -> Path:
     """Resolve the repository's ``models/`` directory (cwd-independent).
@@ -77,16 +79,20 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 1024**3
     """Maximum accepted audio upload size in bytes (default 1 GiB)."""
 
-    ffmpeg_timeout_seconds: float = Field(default=600.0, gt=0)
+    ffmpeg_timeout_seconds: float = Field(default=DEFAULT_FFMPEG_TIMEOUT_SECONDS, gt=0)
     """Wall-clock ceiling for a single FFmpeg or ffprobe invocation.
 
     Every subprocess this application starts runs in a worker thread of
     asyncio's shared default executor, so a wedged FFmpeg does not merely stall
     one request: it holds a thread that audio probing, decoding and exporting
     all draw from. The bound turns "hangs forever" into a documented,
-    per-surface timeout error (see
-    :mod:`straticate.audio.ffmpeg`). Ten minutes is generous for a full-length
-    track on a slow disk and still finite.
+    per-surface timeout error (see :mod:`straticate.audio.ffmpeg`).
+
+    It reaches the subprocess by being **passed down** from the application
+    that was built with these settings — the upload route and the export route
+    take it from ``app.state.settings``, and the separator is constructed with
+    it — so ``create_app(Settings(ffmpeg_timeout_seconds=30))`` really governs
+    the bound, not only the environment variable.
     """
 
     log_level: str = "INFO"

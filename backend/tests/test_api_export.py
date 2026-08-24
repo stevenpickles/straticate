@@ -17,6 +17,7 @@ trusted.
 import asyncio
 import io
 import json
+import subprocess
 import threading
 import zipfile
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Sequence
@@ -37,6 +38,7 @@ from straticate.api.export import (
     ExportFormat,
     artifact_name,
 )
+from straticate.audio import ffmpeg as ffmpeg_module
 from straticate.audio import probe_audio
 from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.config import Settings
@@ -275,9 +277,9 @@ def gated_registry(
     return SeparatorRegistry({FAKE_ARCHITECTURE: build})
 
 
-def build_app(data_dir: Path) -> FastAPI:
+def build_app(data_dir: Path, **overrides: Any) -> FastAPI:
     """An application isolated to ``data_dir``, with deterministic devices."""
-    app = create_app(Settings(data_dir=data_dir))
+    app = create_app(Settings(data_dir=data_dir, **overrides))
     app.state.device_detector = DeviceDetector(probes=[StaticProbe()])
     app.state.separator_registry = fast_registry()
     return app
@@ -434,7 +436,7 @@ async def assert_audio(
     """
     path = tmp_path / name
     path.write_bytes(payload)
-    metadata = await probe_audio(path)
+    metadata = await probe_audio(path, timeout_seconds=30.0)
     assert metadata.codec == codec
     assert metadata.bit_depth == bit_depth
     assert metadata.sample_rate_hz == SOURCE_SAMPLE_RATE
@@ -873,6 +875,42 @@ async def test_an_ffmpeg_timeout_is_export_timed_out(
     assert not exports_dir.exists() or not any(exports_dir.iterdir())
 
 
+async def test_the_apps_settings_govern_the_export_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``create_app(Settings(...))`` must reach FFmpeg, not just the environment.
+
+    Every other setting arrives through ``app.state.settings``, and
+    ``create_app(settings)`` is a documented path every test fixture uses — so
+    reading the process-global settings inside the runner would silently ignore
+    the bound this application was built with. Here the real
+    ``subprocess.run`` is stubbed (no waiting) and records the bound it was
+    handed.
+    """
+    recorded: list[float] = []
+
+    def record_and_wedge(command: Sequence[str], **kwargs: Any) -> NoReturn:
+        recorded.append(cast(float, kwargs["timeout"]))
+        raise subprocess.TimeoutExpired(list(command), cast(float, kwargs["timeout"]))
+
+    app = build_app(tmp_path, ffmpeg_timeout_seconds=1.5)
+    async with app.router.lifespan_context(app):
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            listener = EventRecorder()
+            manager = cast(JobManager, app.state.job_manager)
+            manager.add_listener(listener)
+            try:
+                # The job itself runs real FFmpeg; only the export is stubbed.
+                job_id = await run_to_completion(client, listener, register_audio(app))
+                monkeypatch.setattr(ffmpeg_module.subprocess, "run", record_and_wedge)
+                assert_envelope(await export(client, job_id), "export_timed_out", 504)
+            finally:
+                manager.remove_listener(listener)
+
+    assert recorded == [1.5], "the export must use the application's own bound"
+
+
 async def test_a_real_ffmpeg_failure_is_export_failed(
     export_client: httpx2.AsyncClient,
     export_app: FastAPI,
@@ -1264,7 +1302,12 @@ async def test_a_build_does_not_clobber_an_artifact_that_is_being_served(
 
     with artifact.open("rb") as streaming:  # what FileResponse holds
         await export_module.build_artifact(
-            artifact, sources, result, ExportFormat.WAV_PCM24, archive=False
+            artifact,
+            sources,
+            result,
+            ExportFormat.WAV_PCM24,
+            archive=False,
+            timeout_seconds=30.0,
         )
         assert streaming.read() == original
 

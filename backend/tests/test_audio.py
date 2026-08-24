@@ -1,15 +1,17 @@
 """Tests for the /api/v1/audio endpoints (upload, fetch, delete)."""
 
 import io
+import subprocess
 import wave
 from collections.abc import Sequence
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn, cast
 
 import httpx2
 import pytest
 from fastapi import FastAPI
 
+from straticate.audio import ffmpeg as ffmpeg_module
 from straticate.audio import probe as probe_module
 from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.config import Settings
@@ -119,6 +121,36 @@ async def test_probe_timeout_is_its_own_error_not_not_decodable(
     # The rejected upload leaves nothing behind, exactly like the other paths.
     audio_root = settings.data_dir / "audio"
     assert not audio_root.exists() or not any(audio_root.iterdir())
+
+
+async def test_the_apps_settings_govern_the_probe_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``create_app(Settings(...))`` must reach ffprobe, not just the environment.
+
+    Every other setting arrives through ``app.state.settings``, and
+    ``create_app(settings)`` is a documented path every test fixture uses — so
+    a runner that read the process-global settings instead would silently
+    ignore the bound this application was built with. The real
+    ``subprocess.run`` is stubbed here, so nothing waits.
+    """
+    recorded: list[float] = []
+
+    def record_and_wedge(command: Sequence[str], **kwargs: Any) -> NoReturn:
+        timeout = cast(float, kwargs["timeout"])
+        recorded.append(timeout)
+        raise subprocess.TimeoutExpired(list(command), timeout)
+
+    monkeypatch.setattr(ffmpeg_module.subprocess, "run", record_and_wedge)
+
+    app = create_app(Settings(data_dir=tmp_path / "data", ffmpeg_timeout_seconds=1.5))
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await upload(client, "song.wav", make_wav_bytes())
+
+    assert response.status_code == 504
+    assert response.json()["error"]["detail"] == {"timeout_seconds": 1.5}
+    assert recorded == [1.5], "the upload must probe with the application's own bound"
 
 
 async def test_get_returns_uploaded_record(client: httpx2.AsyncClient) -> None:

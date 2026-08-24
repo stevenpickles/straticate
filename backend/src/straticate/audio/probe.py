@@ -23,21 +23,27 @@ class AudioProbeError(Exception):
     """The file could not be decoded as audio by ffprobe."""
 
 
-async def probe_audio(path: Path) -> AudioMetadata:
+async def probe_audio(path: Path, *, timeout_seconds: float) -> AudioMetadata:
     """Probe ``path`` with ffprobe and return its technical metadata.
 
     Runs the ffprobe subprocess in a worker thread so the event loop is
     never blocked.
 
+    Args:
+        path: Media file to probe.
+        timeout_seconds: Bound for the ffprobe invocation, from the caller's
+            ``Settings.ffmpeg_timeout_seconds``. Required, so no caller can
+            silently probe without a bound (see :mod:`straticate.audio.ffmpeg`).
+
     Raises:
         AudioProbeError: The file is not decodable audio (ffprobe failed,
             produced no audio stream, or reported unusable fields).
-        FFmpegTimeout: ffprobe exceeded ``Settings.ffmpeg_timeout_seconds``.
+        FFmpegTimeout: ffprobe exceeded ``timeout_seconds``.
     """
-    return await asyncio.to_thread(_probe_sync, path)
+    return await asyncio.to_thread(_probe_sync, path, timeout_seconds)
 
 
-def _probe_sync(path: Path) -> AudioMetadata:
+def _probe_sync(path: Path, timeout_seconds: float) -> AudioMetadata:
     """Blocking implementation of :func:`probe_audio`."""
     command = [
         "ffprobe",
@@ -49,7 +55,7 @@ def _probe_sync(path: Path) -> AudioMetadata:
         "-show_streams",
         str(path),
     ]
-    result = run_ffmpeg(command)
+    result = run_ffmpeg(command, timeout_seconds=timeout_seconds)
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", "replace").strip()
         raise AudioProbeError(f"ffprobe could not decode the file: {message}")

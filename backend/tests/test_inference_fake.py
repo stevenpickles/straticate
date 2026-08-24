@@ -10,15 +10,18 @@ rather than from a timer, so nothing depends on wall-clock timing.
 import asyncio
 import hashlib
 import json
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 import pytest
 
+from straticate.audio import ffmpeg as ffmpeg_module
 from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.errors import ApplicationError
 from straticate.inference import (
+    FAKE_ARCHITECTURE,
     FAKE_SEPARATOR_INFOS,
     FAKE_STANDARD_INFO,
     FAKE_VOCALS_INFO,
@@ -27,6 +30,7 @@ from straticate.inference import (
     SeparationProgress,
     Separator,
     SeparatorInfo,
+    default_separator_builders,
     fake_separator_info,
     fake_separator_info_for_mode,
     job_output_dir,
@@ -36,6 +40,7 @@ from straticate.inference import (
 from straticate.inference import pcm as pcm_module
 from straticate.inference.pcm import AudioDecodeError, decode_to_pcm
 from straticate.jobs import CancellationToken, JobCancelled
+from straticate.schemas import Model
 from straticate.schemas.jobs import JobState, SeparationConfiguration
 from tests.audio_fixtures import peak_amplitude, read_wav, write_tone_wav
 
@@ -107,6 +112,13 @@ def test_separator_info_rejects_invalid_stem_lists(stems: tuple[str, ...]) -> No
             stems=stems,
             sample_rate=44100,
         )
+
+
+def _catalog_model() -> Model:
+    """The first ``fake``-architecture entry of the repository catalog."""
+    catalog: dict[str, Any] = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    entry = next(item for item in catalog["models"] if item["architecture"] == "fake")
+    return Model.model_validate(entry)
 
 
 def test_fake_infos_match_the_model_catalog() -> None:
@@ -583,6 +595,44 @@ async def test_a_decode_timeout_is_its_own_error_code(
     assert not (tmp_path / "stems").exists()
 
 
+async def test_the_separators_configured_bound_governs_its_subprocesses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound reaches FFmpeg from construction, not from a global read.
+
+    ``create_app`` builds the registry with ``Settings.ffmpeg_timeout_seconds``
+    (see ``default_separator_builders``), so an application built with explicit
+    settings really governs its decode subprocesses. The real
+    ``subprocess.run`` is stubbed and records what it was handed; nothing here
+    waits.
+    """
+    source = write_tone_wav(tmp_path / "source.wav", seconds=0.2)
+    builder = default_separator_builders(ffmpeg_timeout_seconds=1.5)[FAKE_ARCHITECTURE]
+    separator = builder(_catalog_model())
+    recorded: list[float] = []
+
+    def record_and_wedge(command: Sequence[str], **kwargs: Any) -> NoReturn:
+        timeout = cast(float, kwargs["timeout"])
+        recorded.append(timeout)
+        raise subprocess.TimeoutExpired(list(command), timeout)
+
+    monkeypatch.setattr(ffmpeg_module.subprocess, "run", record_and_wedge)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        await separator.separate(
+            source,
+            make_configuration(),
+            ProgressRecorder(),
+            CancellationToken(),
+            job_id=JOB_ID,
+            output_dir=tmp_path / "stems",
+        )
+
+    assert excinfo.value.code == "audio_decode_timed_out"
+    assert excinfo.value.detail == {"timeout_seconds": 1.5}
+    assert recorded == [1.5], "ffprobe must be bounded by the configured value"
+
+
 async def test_a_separator_runs_one_separation_at_a_time(tmp_path: Path) -> None:
     source = write_tone_wav(tmp_path / "source.wav", seconds=0.3)
     separator = make_separator(chunk_seconds=0.1)
@@ -623,11 +673,11 @@ async def test_decode_to_pcm_rejects_a_non_audio_file(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"
     path.write_bytes(b"nope")
     with pytest.raises(AudioDecodeError):
-        await decode_to_pcm(path, sample_rate=44100)
+        await decode_to_pcm(path, sample_rate=44100, timeout_seconds=30.0)
 
 
 async def test_decode_to_pcm_downmixes_wide_layouts(tmp_path: Path) -> None:
     source = write_tone_wav(tmp_path / "quad.wav", seconds=0.2, channels=4)
-    audio = await decode_to_pcm(source, sample_rate=44100)
+    audio = await decode_to_pcm(source, sample_rate=44100, timeout_seconds=30.0)
     assert audio.channel_count == 2
     assert audio.duration_seconds == pytest.approx(0.2, abs=0.01)

@@ -1,9 +1,10 @@
-"""The shared FFmpeg runner: every invocation is bounded.
+"""The shared FFmpeg runner: every invocation is bounded, by the caller's value.
 
 Nothing here waits for a real timeout — ``subprocess.run`` is stubbed, so the
 expiry path is exercised in microseconds.
 """
 
+import inspect
 import subprocess
 from collections.abc import Sequence
 from typing import Any, NoReturn
@@ -11,22 +12,17 @@ from typing import Any, NoReturn
 import pytest
 
 from straticate.audio import ffmpeg as ffmpeg_module
-from straticate.audio.ffmpeg import FFmpegTimeout, run_ffmpeg
-from straticate.config import get_settings
+from straticate.audio.ffmpeg import (
+    DEFAULT_FFMPEG_TIMEOUT_SECONDS,
+    FFmpegTimeout,
+    run_ffmpeg,
+)
+from straticate.config import Settings
 
 
-@pytest.fixture(autouse=True)
-def fresh_settings() -> Any:
-    """The runner reads process-wide settings; keep the cache honest."""
-    get_settings.cache_clear()
-    yield
-    get_settings.cache_clear()
-
-
-def test_the_settings_timeout_is_passed_to_every_invocation(
+def test_the_callers_timeout_is_passed_to_the_subprocess(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("STRATICATE_FFMPEG_TIMEOUT_SECONDS", "17.5")
     seen: dict[str, Any] = {}
 
     def fake_run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -36,7 +32,7 @@ def test_the_settings_timeout_is_passed_to_every_invocation(
 
     monkeypatch.setattr(ffmpeg_module.subprocess, "run", fake_run)
 
-    result = run_ffmpeg(["ffprobe", "-version"])
+    result = run_ffmpeg(["ffprobe", "-version"], timeout_seconds=17.5)
 
     assert result.stdout == b"out"
     assert seen["timeout"] == 17.5
@@ -44,18 +40,22 @@ def test_the_settings_timeout_is_passed_to_every_invocation(
     assert seen["check"] is False
 
 
-def test_an_explicit_timeout_overrides_the_setting(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict[str, Any] = {}
+def test_the_timeout_is_required() -> None:
+    """No global fallback: a call site must name the bound it is using.
 
-    def fake_run(command: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
-        seen.update(kwargs)
-        return subprocess.CompletedProcess(list(command), 0, b"", b"")
+    The runner deliberately does not read ``get_settings()``. Doing so would
+    ignore the ``Settings`` an application was built with — and
+    ``create_app(settings)`` is a documented path — so an omitted argument has
+    to be a type error, not a silent 600 seconds.
+    """
+    parameter = inspect.signature(run_ffmpeg).parameters["timeout_seconds"]
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
-    monkeypatch.setattr(ffmpeg_module.subprocess, "run", fake_run)
 
-    run_ffmpeg(["ffmpeg", "-version"], timeout_seconds=0.5)
-
-    assert seen["timeout"] == 0.5
+def test_the_default_bound_has_one_definition() -> None:
+    """``Settings`` takes its default from the runner module, not a second literal."""
+    assert Settings().ffmpeg_timeout_seconds == DEFAULT_FFMPEG_TIMEOUT_SECONDS
 
 
 def test_expiry_raises_ffmpeg_timeout_naming_the_tool(monkeypatch: pytest.MonkeyPatch) -> None:

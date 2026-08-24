@@ -1,22 +1,31 @@
 """Application factory and ASGI entry points.
 
-Two ways in, and they differ in exactly one respect — who owns logging:
+Two ways in, and they differ in who owns the *bind address*:
 
 - ``uv run uvicorn straticate.main:app --reload --port 8000`` (development)
-  serves the module-level :data:`app`. Uvicorn owns the log configuration and
-  the bind address; ``Settings.host``/``Settings.port`` are not consulted,
-  because the flags on the command line are.
-- ``uv run python -m straticate`` (or :func:`serve`) reads ``host``, ``port``
-  and ``log_level`` from :class:`~straticate.config.Settings`, so
-  ``STRATICATE_PORT=9000 uv run python -m straticate`` really does what the
-  settings docstring promises.
+  serves the module-level :data:`app`. The command line owns host and port, so
+  ``Settings.host``/``Settings.port`` are not consulted.
+- ``uv run python -m straticate`` (or :func:`serve`) takes host and port from
+  :class:`~straticate.config.Settings`, so ``STRATICATE_PORT=9000 uv run python
+  -m straticate`` really does what the settings docstring promises.
+
+**Application logging is configured on both paths**, in the lifespan (see
+:func:`lifespan`). Uvicorn's ``LOGGING_CONFIG`` declares handlers only for its
+own ``uvicorn``/``uvicorn.error``/``uvicorn.access`` loggers and never touches
+the root logger, so leaving it to uvicorn would drop every ``straticate.*``
+record onto ``logging.lastResort`` — WARNING and above only, bare message, no
+timestamp, no logger name, and ``STRATICATE_LOG_LEVEL=DEBUG`` silently doing
+nothing.
 
 Neither path changes what the application *is*: :func:`create_app` builds the
-same object either way, and building it has no process-global side effects.
+same object either way, and **building** it has no process-global side effects
+— configuration happens at startup, once per running application, not once per
+import.
 """
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import cast
 
 import uvicorn
 from fastapi import FastAPI
@@ -28,14 +37,17 @@ from straticate.api import models as models_api
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
 from straticate.errors import ErrorEnvelopeMiddleware, register_error_handlers
-from straticate.inference import SeparatorRegistry
+from straticate.inference import SeparatorRegistry, default_separator_builders
 from straticate.jobs import EventHub, JobManager
-from straticate.logging import configure_logging
+from straticate.logging import configure_logging, ensure_logging_configured
 from straticate.models import ModelCatalog
 from straticate.system import DeviceDetector
 from straticate.telemetry import TelemetrySampler
 
 API_PREFIX = "/api/v1"
+
+CORS_WILDCARD = "*"
+"""``allow_origins`` value meaning "any origin" (Starlette's own spelling)."""
 
 CORS_EXPOSED_HEADERS = [
     "Accept-Ranges",
@@ -61,9 +73,50 @@ dev proxy.
 """
 
 
+def allows_credentials(origins: list[str]) -> bool:
+    """Whether credentialed cross-origin requests may be allowed for ``origins``.
+
+    ``False`` exactly when the allowlist contains :data:`CORS_WILDCARD`, and the
+    reason is the interaction of two Starlette behaviours. ``"*"`` means
+    allow-all; and with ``allow_credentials=True`` Starlette stops sending the
+    literal ``Access-Control-Allow-Origin: *`` and instead **echoes the caller's
+    own ``Origin``** alongside ``Access-Control-Allow-Credentials: true``. The
+    combination is the one CORS explicitly forbids for good reason: every origin
+    on the internet could read credentialed responses, which the previously
+    hardcoded two-entry allowlist made impossible.
+
+    Now that the list is configurable — and documented as taking a JSON array,
+    which invites ``'["*"]'`` — the credential flag follows from it rather than
+    staying hardcoded. A wildcard therefore degrades to the safe, standard
+    behaviour (``Access-Control-Allow-Origin: *``, no credentials) instead of
+    silently becoming allow-any-origin-with-credentials. Naming origins
+    explicitly keeps credentials enabled.
+
+    There is no authentication in Straticate today (ARCHITECTURE.md §14), so
+    nothing rides on cookies yet; this is about not leaving a trap for the
+    feature that introduces one.
+    """
+    return CORS_WILDCARD not in origins
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    """Run the job manager, event hub and telemetry sampler for the app's lifetime.
+    """Configure logging, then run the job manager, hub and sampler for the app's lifetime.
+
+    **Logging is configured here**, at startup, because this is the earliest
+    point that runs once per *running application* on every entry path —
+    including ``uvicorn straticate.main:app``, which DEVELOPMENT.md documents
+    as the primary way to run the backend and which configures only uvicorn's
+    own loggers, never the root one. Doing it in :func:`create_app` instead
+    would fire on every import and every test fixture, which is the global side
+    effect this arrangement exists to avoid.
+
+    The call is :func:`~straticate.logging.ensure_logging_configured`, which is
+    deliberately **non-destructive**: it configures the root logger only when
+    nothing else has, so an embedding process (or pytest, whose ``caplog``
+    handler is attached to the root logger) keeps the configuration it chose.
+    :func:`serve` still configures logging authoritatively before the server
+    starts, and this call then finds the work already done.
 
     A **fresh** :class:`JobManager`, :class:`EventHub` and
     :class:`TelemetrySampler` are created per lifespan cycle (none can be
@@ -95,6 +148,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
       released, its sockets shut) even if closing the sampler or the manager
       raises.
     """
+    # ``settings`` is absent only when a bare ``FastAPI()`` drives this
+    # lifespan directly, which is how the job/hub/sampler wiring tests isolate
+    # it. Nothing built by :func:`create_app` can reach here without it, so the
+    # entry paths that matter always configure logging — and no global read is
+    # smuggled in as a fallback.
+    settings = cast(Settings | None, getattr(app.state, "settings", None))
+    if settings is not None:
+        ensure_logging_configured(settings.log_level)
     manager = JobManager()
     hub = EventHub()
     sampler = TelemetrySampler(hub)
@@ -135,14 +196,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     handlers for the whole interpreter; doing that here meant every
     ``create_app()`` — one per test using the ``app`` fixture — tore down
     whatever the caller had installed, including pytest's ``caplog`` handler.
-    Log configuration belongs to whoever owns the process, so it lives in
-    :func:`serve` (and is uvicorn's business on the uvicorn command line).
+    Logging is configured once per *running* application, in :func:`lifespan`,
+    which covers both entry paths without firing on import.
 
     Compute devices are detected here rather than in the lifespan: they cannot
     change during a run, and detection never raises (a failing probe only logs
     a warning), so it cannot break startup. The separator registry is built
     here for the same reason — it holds no per-run state, only the
     architecture → builder map and the separator instances it lazily creates.
+    It is built **from these settings**, so ``ffmpeg_timeout_seconds`` governs
+    the separator's decode subprocesses on a per-application basis rather than
+    being re-read from the environment deep in the call stack.
 
     Raises:
         ModelCatalogError: If ``settings.models_dir`` holds no valid model
@@ -160,7 +224,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     device_detector.refresh()
     app.state.device_detector = device_detector
 
-    app.state.separator_registry = SeparatorRegistry()
+    app.state.separator_registry = SeparatorRegistry(
+        default_separator_builders(ffmpeg_timeout_seconds=settings.ffmpeg_timeout_seconds)
+    )
 
     # Middleware order matters and reads backwards: ``add_middleware``
     # *prepends*, so the LAST one added is the OUTERMOST layer. CORS must be
@@ -173,7 +239,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_credentials=True,
+        allow_credentials=allows_credentials(settings.cors_origins),
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=CORS_EXPOSED_HEADERS,

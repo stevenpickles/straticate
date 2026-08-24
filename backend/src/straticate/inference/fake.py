@@ -70,7 +70,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
-from straticate.audio.ffmpeg import FFmpegTimeout
+from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS, FFmpegTimeout
 from straticate.errors import ApplicationError
 from straticate.inference.base import (
     DeviceStats,
@@ -272,6 +272,13 @@ class FakeSeparator:
             the ``post_processing`` stage.
         device: The pretend device reported by :meth:`runtime_stats`; ``None``
             reports no device block at all (i.e. "running on CPU").
+        ffmpeg_timeout_seconds: Bound for the FFmpeg/ffprobe subprocesses this
+            separator's decode runs. A construction option rather than a
+            ``separate()`` argument because the ``Separator`` protocol
+            (ARCHITECTURE.md §7) is deliberately free of tool-specific
+            parameters: *how* a separator gets PCM is its own business. The
+            application passes ``Settings.ffmpeg_timeout_seconds`` in through
+            :func:`~straticate.inference.registry.default_separator_builders`.
     """
 
     def __init__(
@@ -283,19 +290,33 @@ class FakeSeparator:
         model_load_seconds: float = DEFAULT_MODEL_LOAD_SECONDS,
         fade_seconds: float = DEFAULT_FADE_SECONDS,
         device: FakeDeviceProfile | None = DEFAULT_FAKE_DEVICE,
+        ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
     ) -> None:
         if chunk_seconds <= 0:
             raise ValueError("chunk_seconds must be positive")
         if chunk_delay_seconds < 0 or model_load_seconds < 0 or fade_seconds < 0:
             raise ValueError("delays and fade lengths must not be negative")
+        if ffmpeg_timeout_seconds <= 0:
+            raise ValueError("ffmpeg_timeout_seconds must be positive")
         self._info = info
         self._chunk_seconds = chunk_seconds
         self._chunk_delay_seconds = chunk_delay_seconds
         self._model_load_seconds = model_load_seconds
         self._fade_seconds = fade_seconds
         self._device = device
+        self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         self._active = False
         self._run: _RunState | None = None
+
+    @property
+    def ffmpeg_timeout_seconds(self) -> float:
+        """The bound this separator applies to its decode subprocesses.
+
+        Exposed so the wiring is assertable: an application built with explicit
+        settings must really govern its subprocesses, and a test should not
+        have to read a private attribute to prove it.
+        """
+        return self._ffmpeg_timeout_seconds
 
     # -- Separator protocol -------------------------------------------------
 
@@ -464,7 +485,11 @@ class FakeSeparator:
     async def _decode(self, input_path: Path) -> PcmAudio:
         """Decode the source to the model's native sample rate."""
         try:
-            return await decode_to_pcm(input_path, sample_rate=self._info.sample_rate)
+            return await decode_to_pcm(
+                input_path,
+                sample_rate=self._info.sample_rate,
+                timeout_seconds=self._ffmpeg_timeout_seconds,
+            )
         except AudioDecodeError as exc:
             raise ApplicationError(
                 "audio_decode_failed",

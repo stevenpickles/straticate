@@ -406,18 +406,27 @@ def download_name(
     return f"{job_id}-{export_format.value}-{stems[0]}{_FORMAT_SPECS[export_format].suffix}"
 
 
-def transcode_sync(source: Path, destination: Path, spec: _FormatSpec) -> None:
+def transcode_sync(
+    source: Path, destination: Path, spec: _FormatSpec, timeout_seconds: float
+) -> None:
     """Blocking FFmpeg transcode of one stem (runs in a worker thread).
 
     Sample rate and channel count are not passed, so FFmpeg preserves the
     source's. ``-map 0:a:0`` selects the single audio stream, so nothing but
     audio is ever carried into the output.
 
+    Args:
+        source: The stem file to read.
+        destination: The ``.part`` file to write.
+        spec: Container/encoder pair for the requested format.
+        timeout_seconds: Bound for the FFmpeg invocation, taken from the
+            request's ``Settings.ffmpeg_timeout_seconds``.
+
     Raises:
         ExportError: FFmpeg exited non-zero. Its stderr names absolute server
             paths, so it is logged here and the exception carries only
             :data:`TRANSCODE_FAILED`.
-        FFmpegTimeout: FFmpeg exceeded ``Settings.ffmpeg_timeout_seconds``.
+        FFmpegTimeout: FFmpeg exceeded ``timeout_seconds``.
             Propagated as itself, not folded into :data:`TRANSCODE_FAILED`: a
             wedged encoder is an operational fault with its own status code
             (``export_timed_out``), not a failed encode.
@@ -438,7 +447,7 @@ def transcode_sync(source: Path, destination: Path, spec: _FormatSpec) -> None:
         spec.codec,
         str(destination),
     ]
-    result = run_ffmpeg(command)
+    result = run_ffmpeg(command, timeout_seconds=timeout_seconds)
     if result.returncode != 0:
         logger.error(
             "ffmpeg exited %d encoding %s as %s: %s",
@@ -483,6 +492,7 @@ async def build_artifact(
     export_format: ExportFormat,
     *,
     archive: bool,
+    timeout_seconds: float,
 ) -> None:
     """Transcode (and optionally zip) into ``artifact``, atomically.
 
@@ -522,12 +532,12 @@ async def build_artifact(
                 members: list[tuple[str, Path]] = []
                 for name, source in sources:
                     encoded = Path(staging) / f"{name}{spec.suffix}"
-                    await asyncio.to_thread(transcode_sync, source, encoded, spec)
+                    await asyncio.to_thread(transcode_sync, source, encoded, spec, timeout_seconds)
                     members.append((encoded.name, encoded))
                 manifest = _build_manifest(result, export_format, [name for name, _ in sources])
                 await asyncio.to_thread(_write_archive_sync, part, members, manifest)
         else:
-            await asyncio.to_thread(transcode_sync, sources[0][1], part, spec)
+            await asyncio.to_thread(transcode_sync, sources[0][1], part, spec, timeout_seconds)
         if not artifact.is_file():
             await asyncio.to_thread(os.replace, part, artifact)
     except OSError as exc:
@@ -557,6 +567,7 @@ async def _build_cached(
     export_format: ExportFormat,
     *,
     archive: bool,
+    timeout_seconds: float,
 ) -> None:
     """Build ``artifact`` unless another request is already building it.
 
@@ -571,7 +582,14 @@ async def _build_cached(
     async with locks.acquire(artifact):
         if artifact.is_file():
             return
-        await build_artifact(artifact, sources, result, export_format, archive=archive)
+        await build_artifact(
+            artifact,
+            sources,
+            result,
+            export_format,
+            archive=archive,
+            timeout_seconds=timeout_seconds,
+        )
 
 
 async def _shielded(work: Coroutine[Any, Any, None]) -> None:
@@ -652,7 +670,15 @@ async def export_job_stems(
     if not artifact.is_file():
         try:
             await _shielded(
-                _build_cached(locks, artifact, sources, result, export_format, archive=archive)
+                _build_cached(
+                    locks,
+                    artifact,
+                    sources,
+                    result,
+                    export_format,
+                    archive=archive,
+                    timeout_seconds=settings.ffmpeg_timeout_seconds,
+                )
             )
         except FFmpegTimeout as exc:
             raise _export_timed_out(job.id, export_format) from exc

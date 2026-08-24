@@ -777,6 +777,47 @@ async def test_a_stem_deleted_between_check_and_send_returns_404(
     assert error["detail"] == {"job_id": job_id, "stem": "vocals"}
 
 
+def test_only_body_carrying_requests_pre_open_the_stem() -> None:
+    """The TOCTOU pre-open is skipped where the response never reads the file.
+
+    ``FileResponse`` sends headers only for ``HEAD``, and hands the path to the
+    server when ``http.response.pathsend`` is offered. Pre-opening in those
+    cases would buy nothing and would cost a dispatch into the *shared* default
+    ``ThreadPoolExecutor`` — the scarce resource this feature's FFmpeg bound
+    exists to protect — on a path the stem player hits once per seek.
+    """
+    assert results_module.streams_a_body({"type": "http", "method": "GET"})
+    assert results_module.streams_a_body({"type": "http", "method": "GET", "extensions": {}})
+    assert not results_module.streams_a_body({"type": "http", "method": "HEAD"})
+    assert not results_module.streams_a_body({"type": "http", "method": "head"})
+    assert not results_module.streams_a_body(
+        {"type": "http", "method": "GET", "extensions": {"http.response.pathsend": {}}}
+    )
+
+
+async def test_a_range_request_still_gets_the_404_guarantee(
+    results_client: httpx2.AsyncClient,
+    recorder: EventRecorder,
+    audio_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Narrowing the pre-open must not weaken it where a body is streamed."""
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    real_lookup = results_module.stem_source
+
+    def vanishing_lookup(
+        data_dir: Path, job: str, stem: str, available: list[str]
+    ) -> tuple[Path, Any]:
+        path, info = real_lookup(data_dir, job, stem, available)
+        path.unlink()
+        return path, info
+
+    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+
+    response = await results_client.get(stem_url(job_id, "vocals"), headers={"Range": "bytes=0-99"})
+    assert_envelope(response, "stem_file_missing", 404)
+
+
 # -- path safety ------------------------------------------------------------
 
 SECRET = b"not-a-stem-you-may-have"

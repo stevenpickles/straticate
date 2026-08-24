@@ -299,6 +299,12 @@ outside the "simple" set, which would leave a page that talks to `:8000`
 directly able to receive a range and unable to see which range it got. Allowed
 origins come from `STRATICATE_CORS_ORIGINS` (default: the Vite dev server).
 
+Setting `STRATICATE_CORS_ORIGINS='["*"]'` allows any origin and **disables
+credentialed CORS** (no `Access-Control-Allow-Credentials`), because `"*"` plus
+credentials would make Starlette echo each caller's own `Origin` back and let
+every origin read credentialed responses. Name origins explicitly to keep
+credentials enabled.
+
 ### Export
 
 `GET /jobs/{job_id}/export` transcodes a completed job's stems and returns them
@@ -409,7 +415,9 @@ The remedies differ, so the codes do.
 ## Timeouts
 
 Every FFmpeg and ffprobe invocation runs with a wall-clock bound —
-`STRATICATE_FFMPEG_TIMEOUT_SECONDS`, default 600. The subprocesses run in
+`STRATICATE_FFMPEG_TIMEOUT_SECONDS`, default 600, or whatever `Settings` the
+running application was built with; the bound is passed down to each call site
+rather than re-read from the environment. The subprocesses run in
 worker threads drawn from one shared pool, so an unbounded one is not a slow
 request but a thread held forever, and enough of them would starve probing and
 separation as well as the export that started them.

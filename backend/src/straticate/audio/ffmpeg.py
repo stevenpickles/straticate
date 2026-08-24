@@ -14,6 +14,15 @@ So there is exactly one runner, and it always passes a timeout:
 maps onto **its own** documented error code — a timeout on an upload is not the
 same event as a timeout on an export, and neither of them means "not
 decodable".
+
+``timeout_seconds`` is a **required** argument, and this module reads no
+settings of its own. Reaching for the process-global
+:func:`~straticate.config.get_settings` here would quietly ignore the
+``Settings`` an application was actually built with — and ``create_app(settings)``
+is a documented path that every test fixture uses — so the bound travels the
+same way every other setting does: from ``app.state.settings`` down through the
+caller. Making the argument required is what stops a future call site from
+silently falling back to a default nobody chose.
 """
 
 from __future__ import annotations
@@ -22,9 +31,17 @@ import logging
 import subprocess
 from collections.abc import Sequence
 
-from straticate.config import get_settings
-
 logger = logging.getLogger(__name__)
+
+DEFAULT_FFMPEG_TIMEOUT_SECONDS = 600.0
+"""Default bound for one FFmpeg/ffprobe invocation, in seconds.
+
+The single definition of the default: :attr:`Settings.ffmpeg_timeout_seconds
+<straticate.config.Settings.ffmpeg_timeout_seconds>` takes it from here, and so
+does :class:`~straticate.inference.fake.FakeSeparator`, so there is no second
+number to keep in step. Ten minutes is generous for a full-length track on a
+slow disk and still finite.
+"""
 
 
 class FFmpegTimeout(Exception):
@@ -47,7 +64,7 @@ class FFmpegTimeout(Exception):
 
 
 def run_ffmpeg(
-    command: Sequence[str], *, timeout_seconds: float | None = None
+    command: Sequence[str], *, timeout_seconds: float
 ) -> subprocess.CompletedProcess[bytes]:
     """Run an FFmpeg-family command to completion, bounded by a timeout.
 
@@ -61,8 +78,9 @@ def run_ffmpeg(
 
     Args:
         command: The full argument vector, ``command[0]`` being the tool.
-        timeout_seconds: Override the bound; defaults to
-            ``Settings.ffmpeg_timeout_seconds``.
+        timeout_seconds: The bound for this invocation. Required; it comes from
+            the caller's ``Settings.ffmpeg_timeout_seconds``, never from a
+            global read here.
 
     Returns:
         The completed process, whatever its return code — a non-zero exit is
@@ -73,13 +91,14 @@ def run_ffmpeg(
             this is raised (``subprocess.run`` does that on expiry), so no
             orphan survives the failure.
     """
-    limit = get_settings().ffmpeg_timeout_seconds if timeout_seconds is None else timeout_seconds
     try:
-        return subprocess.run(list(command), capture_output=True, check=False, timeout=limit)
+        return subprocess.run(
+            list(command), capture_output=True, check=False, timeout=timeout_seconds
+        )
     except subprocess.TimeoutExpired as exc:
         tool = command[0] if command else "ffmpeg"
-        logger.error("%s exceeded its %gs timeout and was killed", tool, limit)
-        raise FFmpegTimeout(tool, limit) from exc
+        logger.error("%s exceeded its %gs timeout and was killed", tool, timeout_seconds)
+        raise FFmpegTimeout(tool, timeout_seconds) from exc
 
 
-__all__ = ["FFmpegTimeout", "run_ffmpeg"]
+__all__ = ["DEFAULT_FFMPEG_TIMEOUT_SECONDS", "FFmpegTimeout", "run_ffmpeg"]

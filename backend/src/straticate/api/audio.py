@@ -91,7 +91,10 @@ async def upload_audio(file: UploadFile, store: StoreDep, settings: SettingsDep)
     audio_id = store.new_id()
     try:
         size = await _save_upload(file, store, audio_id, settings.max_upload_bytes)
-        metadata = await probe_audio(store.original_path(audio_id, file.filename or ""))
+        metadata = await probe_audio(
+            store.original_path(audio_id, file.filename or ""),
+            timeout_seconds=settings.ffmpeg_timeout_seconds,
+        )
     except AudioProbeError as exc:
         store.remove_files(audio_id)
         raise ApplicationError(

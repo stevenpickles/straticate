@@ -41,19 +41,36 @@ Eleven items, each its own commit, in the order they appear below.
    keep. DEVELOPMENT.md documents both ways to start the server and how they
    differ.
 
-3. **Building an application configures nothing process-global.**
-   `configure_logging()` calls `logging.basicConfig(force=True)`, which
-   replaces the root logger's handlers for the whole interpreter; calling it
-   from `create_app` meant every instantiation — one per test using the `app`
-   fixture — tore down pytest's `caplog` handler. Only `serve()` configures
-   logging now, and it passes `log_config=None` so uvicorn's own dictConfig
-   does not replace it either.
+3. **Building an application configures nothing process-global — but running
+   one still configures logging.** `configure_logging()` calls
+   `logging.basicConfig(force=True)`, which replaces the root logger's handlers
+   for the whole interpreter; calling it from `create_app` meant every
+   instantiation — one per test using the `app` fixture — tore down pytest's
+   `caplog` handler.
+
+   Logging now happens **at startup, in the lifespan**: once per running
+   application, on every entry path, never on import. That distinction matters
+   because uvicorn's `LOGGING_CONFIG` declares handlers only for
+   `uvicorn`/`uvicorn.error`/`uvicorn.access` and never touches the root
+   logger — so under the documented `uvicorn straticate.main:app` command,
+   leaving logging to uvicorn would drop every `straticate.*` record onto
+   `logging.lastResort` (WARNING and above only, bare message, no timestamp, no
+   logger name) and make `STRATICATE_LOG_LEVEL=DEBUG` do nothing at all. The
+   lifespan calls the new `ensure_logging_configured()`, which is
+   non-destructive (`basicConfig` without `force`), so an embedding process —
+   or pytest, whose `caplog` handler lives on the root logger — keeps whatever
+   it configured. `serve()` still configures logging authoritatively, with
+   `force`, and passes `log_config=None` so uvicorn's dictConfig does not
+   replace it.
+
    **The module-level `app = create_app()` stays**, deliberately and now
    documented as such: `uvicorn straticate.main:app` is what DEVELOPMENT.md,
    CI and hand-testing use, and with the global side effect gone there is
    nothing left for `--factory` to fix. `tests/test_main.py` proves `caplog`
-   still captures after `create_app()`, and that `create_app` never calls
-   `configure_logging` while `serve()` does.
+   still captures after `create_app()`, that `create_app` never configures
+   logging while `serve()` does, that the uvicorn entry path *does* produce a
+   formatted application logger honouring `log_level`, and that startup never
+   overrides an existing configuration.
 
 ### B. The error contract
 
@@ -70,6 +87,14 @@ Eleven items, each its own commit, in the order they appear below.
    **both** the envelope body and the `access-control-allow-origin` response
    header; removing the middleware makes it fail (verified).
 
+   Two settings that reach their consumers by being **passed down**, not
+   re-read: `cors_origins` also decides `allow_credentials` (see item 5), and
+   `ffmpeg_timeout_seconds` travels from `app.state.settings` into the upload
+   route, the export route and the separator (see item 9). Reading the
+   process-global `get_settings()` deep in the call stack would have made
+   `create_app(Settings(...))` — the documented path every test fixture uses —
+   silently ineffective.
+
 5. **The documented response headers are readable cross-origin.**
    `Accept-Ranges`, `Content-Disposition`, `Content-Range`, `ETag` and
    `Last-Modified` are all part of the stem/export contract and none was in
@@ -77,6 +102,16 @@ Eleven items, each its own commit, in the order they appear below.
    range and not see which range it got. All five are exposed now, asserted on
    a real `206` stem response carrying an `Origin`, and written into
    `docs/contracts/rest-api.md`.
+
+   `allow_credentials` is no longer hardcoded to `True`. Now that the origin
+   list is configurable and documented as a JSON array — which invites a
+   `"*"` entry — a wildcard would have made Starlette echo each caller's own
+   `Origin` back beside `Access-Control-Allow-Credentials: true`, i.e.
+   allow-any-origin-with-credentials, which the previously hardcoded two-entry
+   list made impossible. `allows_credentials()` derives the flag from the list:
+   a wildcard degrades to the safe standard behaviour
+   (`Access-Control-Allow-Origin: *`, no credentials), and naming origins
+   explicitly keeps credentials enabled. Documented in the REST contract.
 
 ### C. Stem names — one fix, two findings
 
@@ -116,6 +151,14 @@ Eleven items, each its own commit, in the order they appear below.
    still choosable — and maps `OSError`/`RuntimeError` onto the documented
    `stem_file_missing`. Tested deterministically by patching the lookup to
    delete the file exactly in the window: no timing, no `sleep`.
+   The pre-open is **narrowed to requests that actually stream a body**: a
+   `HEAD` or a server offering `http.response.pathsend` never reads the file,
+   so opening it would buy nothing and would cost a dispatch into the same
+   shared default `ThreadPoolExecutor` that item 9 identifies as the scarce
+   resource — on a path the stem player hits once per seek. A range request
+   still streams a body and keeps the full 404 guarantee, which has its own
+   test.
+
    Two cases remain and are documented rather than papered over: the
    microseconds between our open and Starlette's, and a file lost mid-stream,
    when the status line is already on the wire.
@@ -127,9 +170,16 @@ Eleven items, each its own commit, in the order they appear below.
    dispatch onto asyncio's shared default `ThreadPoolExecutor`, so a wedged
    subprocess is a thread held forever and enough of them starve probing and
    separation, not just exports. There is now one runner —
-   `straticate.audio.ffmpeg.run_ffmpeg` — which always passes
-   `Settings.ffmpeg_timeout_seconds` (default 600) and raises `FFmpegTimeout`
-   on expiry, after `subprocess.run` has killed the process.
+   `straticate.audio.ffmpeg.run_ffmpeg` — which raises `FFmpegTimeout` on
+   expiry, after `subprocess.run` has killed the process. Its
+   `timeout_seconds` is a **required** argument and the module reads no
+   settings of its own: the bound travels from `app.state.settings` down
+   through the caller (the upload route, the export route, and the separator,
+   which is constructed with it via `default_separator_builders`), so
+   `create_app(Settings(ffmpeg_timeout_seconds=30))` really governs FFmpeg
+   rather than only the environment variable doing so. The one definition of
+   the default lives in `DEFAULT_FFMPEG_TIMEOUT_SECONDS`, which `Settings`
+   takes its field default from.
    Each call site maps it onto **its own** code, because a timeout is not "not
    decodable" and the three surfaces are not interchangeable:
 
@@ -206,7 +256,8 @@ Playwright work (030). No PyTorch, real models or downloads (025/026).
 
 - `backend/src/straticate/`: `__init__.py`, `__main__.py` (new), `main.py`,
   `config.py`, `errors.py`, `logging.py`, `api/{audio,export,job_outputs,results}.py`,
-  `audio/{__init__,ffmpeg (new),probe,storage}.py`, `inference/{base,fake,pcm}.py`,
+  `audio/{__init__,ffmpeg (new),probe,storage}.py`,
+  `inference/{base,fake,pcm,registry}.py`,
   `jobs/resolution.py`, `schemas/{__init__,jobs,models,stems (new)}.py`
 - `backend/pyproject.toml`, `backend/uv.lock`
 - `backend/tests/`: `test_version.py`, `test_main.py`, `test_ffmpeg_runner.py`
@@ -247,8 +298,16 @@ test and the same for a handled `ApplicationError`; `expose_headers` on a real
 `create_app` refusing to start); `Stem.name` rejecting bad names and `Model`
 rejecting duplicates; a read-only lookup creating no directory and
 `original_path`/`prepare_original_path` differing; the deterministic TOCTOU
-404; and a timeout path for each of the three FFmpeg call sites plus the runner
-itself. Conventions unchanged: `ASGITransport`/`TestClient`,
+404 (whole-file and range); the pre-open skipped where no body is streamed; and
+a timeout path for each of the three FFmpeg call sites plus the runner itself.
+
+Review follow-ups carry their own regression tests, each verified to fail
+against the code as it stood: the uvicorn entry path producing a configured
+application logger; an injected `Settings.ffmpeg_timeout_seconds` governing
+each of the three call sites; and `serve()` leaving the test session's root
+logging untouched (via a `quiet_serve` fixture, since stubbing only
+`uvicorn.run` re-ran `basicConfig(force=True)` mid-session and stripped every
+root handler — the very side effect this feature removes). Conventions unchanged: `ASGITransport`/`TestClient`,
 `asyncio.Event`-gated coordination, generated audio fixtures, and **no
 `sleep()` as synchronization** — every timeout test stubs the runner rather
 than waiting.
@@ -261,6 +320,13 @@ than waiting.
   catalog load, a second device probe) and discarding the first. Reload-style
   supervision is therefore not offered by `serve()`; that is `uvicorn --reload`
   on the command line, which DEVELOPMENT.md documents.
+- **Logging belongs to startup, not to import and not to the factory.** The
+  three candidates were `create_app` (fires per import and per test fixture —
+  the original bug), `serve()` alone (leaves the documented uvicorn command
+  with no application logging at all), and the lifespan (once per running
+  application, on both paths). The lifespan wins, and it uses the
+  non-destructive form so it can never clobber a caller who configured logging
+  first.
 - **Middleware order is load-bearing.** `add_middleware` prepends, so the last
   one added is the outermost layer. `ErrorEnvelopeMiddleware` is added first
   and `CORSMiddleware` second, precisely so the envelope travels back out
@@ -270,6 +336,12 @@ than waiting.
   across three unrelated API surfaces, and reusing `audio_not_decodable` would
   have told users their file was broken on the strength of a subprocess that
   never reached a verdict.
+- **Settings reach consumers by being passed, never by a global read.**
+  `run_ffmpeg`'s `timeout_seconds` is required rather than defaulted precisely
+  so a future call site cannot quietly fall back to a value nobody chose. The
+  separator takes the bound as a construction option, which keeps the
+  `Separator` protocol (ARCHITECTURE.md §7) free of tool-specific parameters:
+  *how* a separator obtains PCM is its own business.
 - **`export_timed_out` is a code, not an `export_failed` reason.**
   `export_failed` means the encode was attempted and failed — a statement about
   the audio or the disk. A timeout is a statement about the server, with a
