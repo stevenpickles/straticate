@@ -270,11 +270,18 @@ Later fields: download URL, artifact size, SHA-256, code/weights licenses,
 redistribution and commercial-use permissions, attribution, minimum RAM,
 default inference parameters.
 
-**Model manager** (later phase): discover → download → verify → install →
-update → remove. Download flow: temporary artifact → SHA-256 verification →
-atomic rename into the models directory. An incomplete or hash-mismatched
-artifact is never loaded or executed. Weights are never shipped in the
-repository.
+**Model manager**: discover → download → verify → install → remove. Download
+flow: temporary artifact → SHA-256 verification → atomic rename into the models
+directory. An incomplete or hash-mismatched artifact is never loaded or
+executed. Weights are never shipped in the repository.
+
+Implemented by feature 025. Installed weights live at
+`{models_dir}/weights/{model_id}/weights.bin`, with the in-flight download as a
+`.part` sibling so publishing is a same-filesystem `os.replace`; the model ID is
+validated against the manifest's own pattern before it becomes a path. A model
+whose manifest declares no `artifact` — every built-in separator — is *installed*
+by definition and is never offered as a download. `update` (as distinct from
+remove-then-install) and resumable transfers remain future work.
 
 **User-facing quality tiers** (Fast / Balanced / High Quality) are a mapping
 over catalog entries; users are never asked to choose architectures or

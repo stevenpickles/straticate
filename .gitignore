@@ -19,7 +19,10 @@ backend/openapi.json
 data/
 *.log
 
-# Model weights are never committed
+# Model weights are never committed (ARCHITECTURE.md §9). The installer writes
+# under models/weights/ (backend/src/straticate/models/layout.py); the suffix
+# rules below cover weights installed anywhere else by hand.
+models/weights/
 models/**/*.ckpt
 models/**/*.pt
 models/**/*.pth

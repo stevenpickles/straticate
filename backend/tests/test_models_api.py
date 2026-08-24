@@ -26,6 +26,16 @@ MODEL_KEYS = {
     "sample_rate",
     "requirements",
     "capabilities",
+    "licensing",
+    "installation",
+}
+INSTALLATION_KEYS = {
+    "state",
+    "requires_download",
+    "total_bytes",
+    "downloaded_bytes",
+    "progress",
+    "error",
 }
 MODE_KEYS = {"id", "display_name", "stems", "quality_options"}
 QUALITY_OPTION_KEYS = {"id", "display_name", "model_id"}

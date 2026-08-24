@@ -40,7 +40,7 @@ from straticate.errors import ErrorEnvelopeMiddleware, register_error_handlers
 from straticate.inference import SeparatorRegistry, default_separator_builders
 from straticate.jobs import EventHub, JobManager
 from straticate.logging import configure_logging, ensure_logging_configured
-from straticate.models import ModelCatalog
+from straticate.models import ModelCatalog, ModelInstaller
 from straticate.system import DeviceDetector
 from straticate.telemetry import TelemetrySampler
 
@@ -137,7 +137,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     hub before the sampler is asked to stop, so nothing can be interleaved
     between them.
 
-    Shutdown order is **sampler → manager → hub**:
+    The :class:`~straticate.models.ModelInstaller` is built in
+    :func:`create_app` (it holds no per-run state beyond the installs currently
+    running) but **closed here**, last of all: a download in flight at shutdown
+    is cancelled and unlinks its own ``.part``, so a restart never finds a
+    half-written weights file.
+
+    Shutdown order is **sampler → manager → hub → installer**:
 
     - the sampler first, so no telemetry sample can be published into a hub
       that is about to tear its connections down;
@@ -156,6 +162,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     settings = cast(Settings | None, getattr(app.state, "settings", None))
     if settings is not None:
         ensure_logging_configured(settings.log_level)
+    installer = cast(ModelInstaller | None, getattr(app.state, "model_installer", None))
     manager = JobManager()
     hub = EventHub()
     sampler = TelemetrySampler(hub)
@@ -176,7 +183,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         finally:
             manager.remove_listener(sampler.on_job_event)
             manager.remove_listener(hub.publish)
-            await hub.aclose()
+            try:
+                await hub.aclose()
+            finally:
+                if installer is not None:
+                    await installer.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -206,7 +217,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     architecture → builder map and the separator instances it lazily creates.
     It is built **from these settings**, so ``ffmpeg_timeout_seconds`` governs
     the separator's decode subprocesses on a per-application basis rather than
-    being re-read from the environment deep in the call stack.
+    being re-read from the environment deep in the call stack. The model
+    installer is built here too, over the same catalog and ``models_dir``, and
+    is closed in the lifespan so an install running at shutdown is cancelled
+    rather than orphaned.
 
     Raises:
         ModelCatalogError: If ``settings.models_dir`` holds no valid model
@@ -218,7 +232,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Straticate", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
-    app.state.model_catalog = ModelCatalog.from_directory(settings.models_dir)
+    catalog = ModelCatalog.from_directory(settings.models_dir)
+    app.state.model_catalog = catalog
+    app.state.model_installer = ModelInstaller(catalog, settings.models_dir)
 
     device_detector = DeviceDetector()
     device_detector.refresh()
