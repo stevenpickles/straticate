@@ -268,6 +268,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/result": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Job Result
+         * @description Fetch the :class:`SeparationResult` of a completed job.
+         *
+         *     Errors (see ``docs/contracts/rest-api.md``): ``job_not_found`` (404),
+         *     ``result_not_available`` (409, with the job's current ``state`` in
+         *     ``detail``).
+         */
+        get: operations["get_job_result_api_v1_jobs__job_id__result_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/stems/{stem_name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Job Stem
+         * @description Stream one stem of a completed job, with byte ``Range`` support.
+         *
+         *     The response advertises ``Accept-Ranges: bytes`` and carries an ``ETag``
+         *     and ``Last-Modified``, so an ``<audio>`` element or a Web Audio fetch can
+         *     seek by requesting ``Range: bytes=start-end`` and receive ``206`` with the
+         *     exact slice. ``Content-Disposition`` is ``inline`` so browsers play the
+         *     stem rather than downloading it; downloading is feature 022's export.
+         *
+         *     Errors: ``job_not_found`` (404), ``result_not_available`` (409),
+         *     ``stem_not_found`` (404) when the job's result lists no such stem, and
+         *     ``stem_file_missing`` (404) when the listed stem's file is gone from disk.
+         */
+        get: operations["get_job_stem_api_v1_jobs__job_id__stems__stem_name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1381,6 +1435,84 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Job"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_result_api_v1_jobs__job_id__result_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeparationResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_stem_api_v1_jobs__job_id__stems__stem_name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+                stem_name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stem audio (whole file, or the requested byte range). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/wav": string;
+                    "audio/flac": string;
+                };
+            };
+            /** @description Partial content: the requested `Range` of the stem. */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The requested `Range` is not satisfiable. */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
