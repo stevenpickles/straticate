@@ -109,6 +109,33 @@ where they stop being theoretical:
   023's Web Audio path would hit it the moment it talked to `:8000` directly.
   Note this alongside the existing CORS item above.
 
+### Deferred from PR #25 (feature 022, stem export)
+
+- **`subprocess.run` has no `timeout`, on the shared default executor.** A
+  wedged FFmpeg pins a thread from asyncio's default `ThreadPoolExecutor`
+  forever and the request never returns. That executor is shared with
+  `audio/probe.py` and `inference/pcm.py`, so enough stuck subprocesses starve
+  audio probing and separation, not just exports. `probe.py` and `pcm.py` have
+  the same omission, which is why this was *not* fixed inside 022 — patching
+  only the newest call site would leave the codebase inconsistent. Fix all
+  three together with a bounded timeout (and a documented error on expiry),
+  since export is the first endpoint where a caller can start an unbounded
+  number of subprocesses on demand.
+
+### Test-tooling debt (noticed 2026-08-24, not from a review)
+
+- **`starlette.testclient` with `httpx` is deprecated.** The backend suite
+  emits `StarletteDeprecationWarning: Using httpx with starlette.testclient is
+  deprecated; install httpx2 instead` from `backend/tests/test_api_jobs.py`.
+  Harmless today, but it becomes a hard failure whenever Starlette drops the
+  shim, and it is the only warning in an otherwise clean run.
+- **The Playwright E2E tier is still unwritten.** `DEVELOPMENT.md`'s test
+  strategy schedules it "around M1"; M1 is now met and the workflow it would
+  cover is stable, so the tier is both overdue and finally worth pinning down.
+  It would have caught at least two defects this milestone that unit tests did
+  not: a stale REST snapshot stranding the progress UI, and the `inspect` phase
+  having no route out.
+
 ## Out of scope
 
 New endpoints or schema changes.
