@@ -13,6 +13,9 @@ lives here:
   cancellation, fake GPU statistics and real playable placeholder stems.
 - :class:`SeparatorJobExecutor` — the thin adapter that makes any separator a
   :class:`straticate.jobs.JobExecutor`.
+- :class:`SeparatorRegistry` — the architecture-keyed seam that turns a catalog
+  :class:`~straticate.schemas.Model` into a separator (feature 015 resolves a
+  job's model through it; feature 026 registers a real builder in it).
 - :mod:`straticate.inference.layout` — where a job's stems are written.
 
 Nothing in this package leaks PyTorch, tensors, or architecture-specific
@@ -43,6 +46,13 @@ from straticate.inference.fake import (
 )
 from straticate.inference.layout import job_output_dir, job_stems_dir, stem_path
 from straticate.inference.pcm import AudioDecodeError, PcmAudio, decode_to_pcm, write_wav
+from straticate.inference.registry import (
+    SeparatorBuilder,
+    SeparatorRegistry,
+    default_separator_builders,
+    fake_separator_builder,
+    separator_info_from_model,
+)
 
 __all__ = [
     "FAKE_ARCHITECTURE",
@@ -59,15 +69,20 @@ __all__ = [
     "ProgressCallback",
     "SeparationProgress",
     "Separator",
+    "SeparatorBuilder",
     "SeparatorInfo",
     "SeparatorJobExecutor",
+    "SeparatorRegistry",
     "SeparatorRuntimeStats",
     "StageCallback",
     "decode_to_pcm",
+    "default_separator_builders",
+    "fake_separator_builder",
     "fake_separator_info",
     "fake_separator_info_for_mode",
     "job_output_dir",
     "job_stems_dir",
+    "separator_info_from_model",
     "stem_path",
     "write_wav",
 ]

@@ -44,6 +44,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Devices
+         * @description List the logical compute devices available for separation jobs.
+         *
+         *     Detected once at startup and cached — devices do not change during a run.
+         *     NVIDIA CUDA devices come first (when a CUDA-capable PyTorch installation
+         *     is present); the CPU device is always last and always present, so the list
+         *     is never empty. ``memory_total_bytes`` is ``0`` when the host does not
+         *     report a total (CPU only, on exotic platforms).
+         */
+        get: operations["list_devices_api_v1_system_devices_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audio": {
         parameters: {
             query?: never;
@@ -154,6 +180,94 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Jobs
+         * @description List every known job in **submission order** (oldest first).
+         *
+         *     Job records are in-memory only, so the list is empty after a restart.
+         */
+        get: operations["list_jobs_api_v1_jobs_get"];
+        put?: never;
+        /**
+         * Create Job
+         * @description Create a separation job and return it immediately in state ``queued``.
+         *
+         *     References are resolved in the order audio → model → device → separator, so
+         *     the first thing that cannot be resolved is what the client is told about.
+         *     The configuration recorded on the job is a copy with ``device_id`` set to
+         *     the **resolved** device, so ``Job.configuration.device_id`` is always
+         *     populated — in responses and in every event — even when the request omitted
+         *     it.
+         *
+         *     Errors (see ``docs/contracts/rest-api.md``): ``audio_not_found`` (404),
+         *     ``separation_mode_not_found`` (404), ``quality_option_not_found`` (404),
+         *     ``device_not_found`` (404), ``separator_unavailable`` (501),
+         *     ``service_unavailable`` (503).
+         */
+        post: operations["create_job_api_v1_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Job
+         * @description Fetch one job — the source of truth for reconnect and refresh.
+         *
+         *     Errors: ``job_not_found`` (404).
+         */
+        get: operations["get_job_api_v1_jobs__job_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Job
+         * @description Request cooperative cancellation of a job; returns the job snapshot.
+         *
+         *     Cancellation is a *request*, not a stop: a ``queued`` job is cancelled
+         *     immediately, while a running one is asked to stop at its next cooperative
+         *     checkpoint — so the returned job may still be in a processing state and the
+         *     authoritative transition arrives as a ``job_cancelled`` event. Cancelling a
+         *     job that already reached a terminal state is a no-op and still returns 200.
+         *
+         *     Errors: ``job_not_found`` (404), ``service_unavailable`` (503).
+         */
+        post: operations["cancel_job_api_v1_jobs__job_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -236,6 +350,58 @@ export interface components {
             /** File */
             file: string;
         };
+        /**
+         * ComputeDevice
+         * @description A logical compute device usable for separation jobs.
+         *
+         *     ``backend`` is an open set — ``cuda`` and ``cpu`` initially; later
+         *     accelerators (``mps``, ``directml``, …) are added without API changes.
+         */
+        ComputeDevice: {
+            /**
+             * Id
+             * @description Logical device ID, e.g. "cuda:0", "cpu".
+             */
+            id: string;
+            /**
+             * Backend
+             * @description Compute backend identifier (open set).
+             */
+            backend: string;
+            /**
+             * Name
+             * @description Human-readable device name.
+             */
+            name: string;
+            /**
+             * Memory Total Bytes
+             * @description Total device memory in bytes.
+             */
+            memory_total_bytes: number;
+        };
+        /**
+         * ErrorInfo
+         * @description Machine-readable error information carried by every error response.
+         */
+        ErrorInfo: {
+            /**
+             * Code
+             * @description Stable machine-readable error code (snake_case).
+             */
+            code: string;
+            /**
+             * Message
+             * @description Human-readable description of the failure.
+             */
+            message: string;
+            /**
+             * Detail
+             * @description Optional structured context for the error (empty object when absent).
+             */
+            detail?: {
+                [key: string]: unknown;
+            };
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -252,6 +418,74 @@ export interface components {
              */
             status: string;
         };
+        /**
+         * Job
+         * @description A separation job record.
+         *
+         *     ``result`` is populated on ``completed``; ``error`` on ``failed``.
+         *     ``started_at``/``finished_at`` are null until the job reaches the
+         *     corresponding point of its lifecycle.
+         */
+        Job: {
+            /**
+             * Id
+             * @description ULID identifying the job.
+             */
+            id: string;
+            /**
+             * Audio Id
+             * @description ULID of the input audio.
+             */
+            audio_id: string;
+            /** @description Requested configuration. */
+            configuration: components["schemas"]["SeparationConfiguration"];
+            /**
+             * Model Id
+             * @description ID of the model selected for this job.
+             */
+            model_id: string;
+            /** @description Current state in the job state machine. */
+            state: components["schemas"]["JobState"];
+            /**
+             * Progress
+             * @description Overall progress in [0, 1] (real work: completed_chunks / total_chunks).
+             */
+            progress: number;
+            /**
+             * Created At
+             * Format: date-time
+             * @description Creation timestamp (timezone-aware).
+             */
+            created_at: string;
+            /**
+             * Started At
+             * @description Processing start; null while queued.
+             */
+            started_at: string | null;
+            /**
+             * Finished At
+             * @description Terminal timestamp; null until then.
+             */
+            finished_at: string | null;
+            /** @description Failure information; null unless failed. */
+            error: components["schemas"]["ErrorInfo"] | null;
+            /** @description Separation result; null until completed. */
+            result: components["schemas"]["SeparationResult"] | null;
+        };
+        /**
+         * JobState
+         * @description States of the job state machine.
+         *
+         *     Processing order::
+         *
+         *         queued → preparing → decoding → loading_model → separating
+         *                → post_processing → encoding → completed
+         *
+         *     Any non-terminal state may transition to ``cancelled`` (user cancellation)
+         *     or ``failed`` (error).
+         * @enum {string}
+         */
+        JobState: "queued" | "preparing" | "decoding" | "loading_model" | "separating" | "post_processing" | "encoding" | "completed" | "cancelled" | "failed";
         /**
          * Model
          * @description A logical separation model from the catalog.
@@ -360,6 +594,32 @@ export interface components {
          */
         QualityTier: "fast" | "balanced" | "high_quality";
         /**
+         * SeparationConfiguration
+         * @description User-facing configuration of a separation job (the create-job request).
+         */
+        SeparationConfiguration: {
+            /**
+             * Audio Id
+             * @description ULID of the uploaded audio to separate.
+             */
+            audio_id: string;
+            /**
+             * Mode Id
+             * @description Separation mode ID, e.g. "vocals".
+             */
+            mode_id: string;
+            /**
+             * Quality Id
+             * @description Quality tier ID, e.g. "high_quality".
+             */
+            quality_id: string;
+            /**
+             * Device Id
+             * @description Compute device to use; null lets the backend pick the best device.
+             */
+            device_id?: string | null;
+        };
+        /**
          * SeparationMode
          * @description A user-facing separation mode derived from model capabilities.
          */
@@ -384,6 +644,71 @@ export interface components {
              * @description Available quality tiers.
              */
             quality_options: components["schemas"]["QualityOption"][];
+        };
+        /**
+         * SeparationResult
+         * @description Outputs and metrics of a completed separation job.
+         */
+        SeparationResult: {
+            /**
+             * Job Id
+             * @description ULID of the job that produced this result.
+             */
+            job_id: string;
+            /**
+             * Model Id
+             * @description ID of the model that performed the separation.
+             */
+            model_id: string;
+            /**
+             * Stems
+             * @description Separated output stems.
+             */
+            stems: components["schemas"]["Stem"][];
+            /** @description Performance metrics. */
+            metrics: components["schemas"]["SeparationResultMetrics"];
+        };
+        /**
+         * SeparationResultMetrics
+         * @description Performance metrics of a completed separation.
+         */
+        SeparationResultMetrics: {
+            /**
+             * Processing Seconds
+             * @description Wall-clock processing time in seconds.
+             */
+            processing_seconds: number;
+            /**
+             * Realtime Factor
+             * @description RTF = audio duration / processing duration.
+             */
+            realtime_factor: number;
+        };
+        /**
+         * Stem
+         * @description One separated output stem of a completed job.
+         */
+        Stem: {
+            /**
+             * Name
+             * @description Stem name, e.g. "vocals", "instrumental".
+             */
+            name: string;
+            /**
+             * Duration Seconds
+             * @description Stem duration in seconds.
+             */
+            duration_seconds: number;
+            /**
+             * Sample Rate Hz
+             * @description Sample rate in Hz.
+             */
+            sample_rate_hz: number;
+            /**
+             * Channels
+             * @description Number of audio channels.
+             */
+            channels: number;
         };
         /** ValidationError */
         ValidationError: {
@@ -410,63 +735,11 @@ export interface components {
             version: string;
         };
         /**
-         * ComputeDevice
-         * @description A logical compute device usable for separation jobs.
-         *
-         *     ``backend`` is an open set — ``cuda`` and ``cpu`` initially; later
-         *     accelerators (``mps``, ``directml``, …) are added without API changes.
-         */
-        ComputeDevice: {
-            /**
-             * Id
-             * @description Logical device ID, e.g. "cuda:0", "cpu".
-             */
-            id: string;
-            /**
-             * Backend
-             * @description Compute backend identifier (open set).
-             */
-            backend: string;
-            /**
-             * Name
-             * @description Human-readable device name.
-             */
-            name: string;
-            /**
-             * Memory Total Bytes
-             * @description Total device memory in bytes.
-             */
-            memory_total_bytes: number;
-        };
-        /**
          * ErrorEnvelope
          * @description Top-level shape of every error response body.
          */
         ErrorEnvelope: {
             error: components["schemas"]["ErrorInfo"];
-        };
-        /**
-         * ErrorInfo
-         * @description Machine-readable error information carried by every error response.
-         */
-        ErrorInfo: {
-            /**
-             * Code
-             * @description Stable machine-readable error code (snake_case).
-             */
-            code: string;
-            /**
-             * Message
-             * @description Human-readable description of the failure.
-             */
-            message: string;
-            /**
-             * Detail
-             * @description Optional structured context for the error (empty object when absent).
-             */
-            detail?: {
-                [key: string]: unknown;
-            };
         };
         /**
          * GpuMetrics
@@ -517,60 +790,6 @@ export interface components {
              * @description GPU temperature in °C; null when NVML is unavailable.
              */
             temperature_celsius: number | null;
-        };
-        /**
-         * Job
-         * @description A separation job record.
-         *
-         *     ``result`` is populated on ``completed``; ``error`` on ``failed``.
-         *     ``started_at``/``finished_at`` are null until the job reaches the
-         *     corresponding point of its lifecycle.
-         */
-        Job: {
-            /**
-             * Id
-             * @description ULID identifying the job.
-             */
-            id: string;
-            /**
-             * Audio Id
-             * @description ULID of the input audio.
-             */
-            audio_id: string;
-            /** @description Requested configuration. */
-            configuration: components["schemas"]["SeparationConfiguration"];
-            /**
-             * Model Id
-             * @description ID of the model selected for this job.
-             */
-            model_id: string;
-            /** @description Current state in the job state machine. */
-            state: components["schemas"]["JobState"];
-            /**
-             * Progress
-             * @description Overall progress in [0, 1] (real work: completed_chunks / total_chunks).
-             */
-            progress: number;
-            /**
-             * Created At
-             * Format: date-time
-             * @description Creation timestamp (timezone-aware).
-             */
-            created_at: string;
-            /**
-             * Started At
-             * @description Processing start; null while queued.
-             */
-            started_at: string | null;
-            /**
-             * Finished At
-             * @description Terminal timestamp; null until then.
-             */
-            finished_at: string | null;
-            /** @description Failure information; null unless failed. */
-            error: components["schemas"]["ErrorInfo"] | null;
-            /** @description Separation result; null until completed. */
-            result: components["schemas"]["SeparationResult"] | null;
         };
         /**
          * JobCancelledEvent
@@ -735,20 +954,6 @@ export interface components {
             started_at: string;
         };
         /**
-         * JobState
-         * @description States of the job state machine.
-         *
-         *     Processing order::
-         *
-         *         queued → preparing → decoding → loading_model → separating
-         *                → post_processing → encoding → completed
-         *
-         *     Any non-terminal state may transition to ``cancelled`` (user cancellation)
-         *     or ``failed`` (error).
-         * @enum {string}
-         */
-        JobState: "queued" | "preparing" | "decoding" | "loading_model" | "separating" | "post_processing" | "encoding" | "completed" | "cancelled" | "failed";
-        /**
          * ModelInfo
          * @description Summary of the model in use, embedded in runtime metrics.
          */
@@ -839,98 +1044,6 @@ export interface components {
             /** @description Processing statistics. */
             processing: components["schemas"]["ProcessingMetrics"];
         };
-        /**
-         * SeparationConfiguration
-         * @description User-facing configuration of a separation job (the create-job request).
-         */
-        SeparationConfiguration: {
-            /**
-             * Audio Id
-             * @description ULID of the uploaded audio to separate.
-             */
-            audio_id: string;
-            /**
-             * Mode Id
-             * @description Separation mode ID, e.g. "vocals".
-             */
-            mode_id: string;
-            /**
-             * Quality Id
-             * @description Quality tier ID, e.g. "high_quality".
-             */
-            quality_id: string;
-            /**
-             * Device Id
-             * @description Compute device to use; null lets the backend pick the best device.
-             * @default null
-             */
-            device_id: string | null;
-        };
-        /**
-         * SeparationResult
-         * @description Outputs and metrics of a completed separation job.
-         */
-        SeparationResult: {
-            /**
-             * Job Id
-             * @description ULID of the job that produced this result.
-             */
-            job_id: string;
-            /**
-             * Model Id
-             * @description ID of the model that performed the separation.
-             */
-            model_id: string;
-            /**
-             * Stems
-             * @description Separated output stems.
-             */
-            stems: components["schemas"]["Stem"][];
-            /** @description Performance metrics. */
-            metrics: components["schemas"]["SeparationResultMetrics"];
-        };
-        /**
-         * SeparationResultMetrics
-         * @description Performance metrics of a completed separation.
-         */
-        SeparationResultMetrics: {
-            /**
-             * Processing Seconds
-             * @description Wall-clock processing time in seconds.
-             */
-            processing_seconds: number;
-            /**
-             * Realtime Factor
-             * @description RTF = audio duration / processing duration.
-             */
-            realtime_factor: number;
-        };
-        /**
-         * Stem
-         * @description One separated output stem of a completed job.
-         */
-        Stem: {
-            /**
-             * Name
-             * @description Stem name, e.g. "vocals", "instrumental".
-             */
-            name: string;
-            /**
-             * Duration Seconds
-             * @description Stem duration in seconds.
-             */
-            duration_seconds: number;
-            /**
-             * Sample Rate Hz
-             * @description Sample rate in Hz.
-             */
-            sample_rate_hz: number;
-            /**
-             * Channels
-             * @description Number of audio channels.
-             */
-            channels: number;
-        };
         WebSocketEvent: components["schemas"]["JobCreatedEvent"] | components["schemas"]["JobStartedEvent"] | components["schemas"]["JobStageChangedEvent"] | components["schemas"]["JobProgressEvent"] | components["schemas"]["RuntimeMetricsEvent"] | components["schemas"]["JobCompletedEvent"] | components["schemas"]["JobCancelledEvent"] | components["schemas"]["JobFailedEvent"];
     };
     responses: never;
@@ -977,6 +1090,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["VersionInfo"];
+                };
+            };
+        };
+    };
+    list_devices_api_v1_system_devices_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ComputeDevice"][];
                 };
             };
         };
@@ -1141,6 +1274,121 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SeparationMode"][];
+                };
+            };
+        };
+    };
+    list_jobs_api_v1_jobs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"][];
+                };
+            };
+        };
+    };
+    create_job_api_v1_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SeparationConfiguration"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_job_api_v1_jobs__job_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_job_api_v1_jobs__job_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
