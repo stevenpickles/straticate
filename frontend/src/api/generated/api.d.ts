@@ -87,7 +87,13 @@ export interface paths {
          *     ``audio_too_large`` (413) when the body exceeds
          *     ``Settings.max_upload_bytes``; ``audio_not_decodable`` (422) when
          *     ffprobe cannot decode the bytes as audio (the extension is never
-         *     trusted).
+         *     trusted); ``audio_probe_timed_out`` (504) when ffprobe exceeds
+         *     ``Settings.ffmpeg_timeout_seconds``.
+         *
+         *     The last two are deliberately distinct. ``audio_not_decodable`` tells the
+         *     user their file is the problem and re-uploading it will not help; a probe
+         *     that ran out of time says nothing about the file, and retrying is exactly
+         *     the right response.
          */
         post: operations["upload_audio_api_v1_audio_post"];
         delete?: never;
@@ -319,7 +325,10 @@ export interface paths {
          *
          *     Errors: ``job_not_found`` (404), ``result_not_available`` (409),
          *     ``stem_not_found`` (404) when the job's result lists no such stem, and
-         *     ``stem_file_missing`` (404) when the listed stem's file is gone from disk.
+         *     ``stem_file_missing`` (404) when the listed stem's file is gone from disk —
+         *     including when it disappears *between* the check and the send, which is
+         *     what :class:`StemFileResponse` and the passed-through ``stat_result``
+         *     exist for.
          */
         get: operations["get_job_stem_api_v1_jobs__job_id__stems__stem_name__get"];
         put?: never;
@@ -358,7 +367,8 @@ export interface paths {
          *     Errors (see ``docs/contracts/rest-api.md``): ``job_not_found`` (404),
          *     ``result_not_available`` (409, with the job's current ``state`` in
          *     ``detail``), ``stem_not_found`` (404, with ``available_stems`` in
-         *     ``detail``), ``stem_file_missing`` (404), ``export_failed`` (500), and an
+         *     ``detail``), ``stem_file_missing`` (404), ``export_failed`` (500),
+         *     ``export_timed_out`` (504) when FFmpeg exceeds its bounded run time, and an
          *     unknown ``format`` as the standard ``validation_error`` (422).
          */
         get: operations["export_job_stems_api_v1_jobs__job_id__export_get"];
@@ -609,6 +619,14 @@ export interface components {
          *     ``architecture`` is an open set (e.g. ``mel_band_roformer``, ``mdx``,
          *     ``mdxc``, ``demucs``, ``fake``); application code never branches on it
          *     outside the inference package.
+         *
+         *     ``stems`` carries the constraints the separation engine has always
+         *     enforced: each name matches
+         *     :data:`~straticate.schemas.stems.STEM_NAME_REGEX`, and the list holds no
+         *     duplicates. They live here so a malformed catalog fails **at load time**
+         *     (feature 010's stated principle) instead of loading cleanly, serving
+         *     ``GET /models`` and ``GET /separation-modes``, and then raising an
+         *     unhandled ``ValueError`` on the first job created for that mode.
          */
         Model: {
             /**
@@ -640,7 +658,7 @@ export interface components {
             quality_tier?: components["schemas"]["QualityTier"] | null;
             /**
              * Stems
-             * @description Stem names this model produces.
+             * @description Stem names this model produces; unique, in output order.
              */
             stems: string[];
             /**
@@ -803,6 +821,12 @@ export interface components {
         /**
          * Stem
          * @description One separated output stem of a completed job.
+         *
+         *     ``name`` is constrained to :data:`~straticate.schemas.stems.STEM_NAME_REGEX`
+         *     because it is not merely a label: it is the path segment
+         *     ``GET /jobs/{job_id}/stems/{stem_name}`` accepts and the file name on disk.
+         *     Unconstrained, a result could advertise a stem the stem route would then
+         *     refuse — a 404 whose ``detail`` listed the very name it denied.
          */
         Stem: {
             /**

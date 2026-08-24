@@ -71,6 +71,11 @@ def resolve_audio(store: AudioStore, audio_id: str) -> tuple[AudioFile, Path]:
     separate either way, and inventing a second error code for it would only
     give clients a second thing to handle.
 
+    Genuinely pure, as the module docstring promises: it reads the registry and
+    asks :meth:`~straticate.audio.AudioStore.original_path` — the non-creating
+    accessor — for a path, so probing for audio that is not there leaves
+    nothing behind.
+
     Returns:
         The :class:`~straticate.schemas.AudioFile` record and the path of the
         stored original media.

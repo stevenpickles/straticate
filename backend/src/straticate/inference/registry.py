@@ -32,6 +32,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
 
+from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
 from straticate.errors import ApplicationError
 from straticate.inference.base import Separator, SeparatorInfo
 from straticate.inference.fake import (
@@ -80,6 +81,7 @@ def fake_separator_builder(
     model_load_seconds: float = DEFAULT_MODEL_LOAD_SECONDS,
     fade_seconds: float = DEFAULT_FADE_SECONDS,
     device: FakeDeviceProfile | None = DEFAULT_FAKE_DEVICE,
+    ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
 ) -> SeparatorBuilder:
     """Build the :data:`SeparatorBuilder` for the ``fake`` architecture.
 
@@ -103,19 +105,31 @@ def fake_separator_builder(
             model_load_seconds=model_load_seconds,
             fade_seconds=fade_seconds,
             device=device,
+            ffmpeg_timeout_seconds=ffmpeg_timeout_seconds,
         )
 
     return build
 
 
-def default_separator_builders() -> Mapping[str, SeparatorBuilder]:
+def default_separator_builders(
+    *, ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS
+) -> Mapping[str, SeparatorBuilder]:
     """The builders a :class:`SeparatorRegistry` starts with.
 
     Today: the fake engine only. Feature 026 adds its own architecture here (or
     registers it with :meth:`SeparatorRegistry.register`); nothing outside this
     module learns the architecture's name.
+
+    ``ffmpeg_timeout_seconds`` is the one application setting a separator needs:
+    :func:`straticate.main.create_app` passes
+    ``Settings.ffmpeg_timeout_seconds`` here so an application built with
+    explicit settings really governs its subprocesses. It is a *builder*
+    argument rather than a registry one so the registry keeps knowing nothing
+    about how any particular engine decodes audio.
     """
-    return MappingProxyType({FAKE_ARCHITECTURE: fake_separator_builder()})
+    return MappingProxyType(
+        {FAKE_ARCHITECTURE: fake_separator_builder(ffmpeg_timeout_seconds=ffmpeg_timeout_seconds)}
+    )
 
 
 class SeparatorRegistry:

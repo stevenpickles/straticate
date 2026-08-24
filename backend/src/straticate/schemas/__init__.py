@@ -39,8 +39,11 @@ from straticate.schemas.models import (
     QualityTier,
     SeparationMode,
 )
+from straticate.schemas.stems import STEM_NAME_PATTERN, STEM_NAME_REGEX, StemName
 
 __all__ = [
+    "STEM_NAME_PATTERN",
+    "STEM_NAME_REGEX",
     "AudioFile",
     "AudioMetadata",
     "ComputeDevice",
@@ -69,6 +72,7 @@ __all__ = [
     "SeparationResult",
     "SeparationResultMetrics",
     "Stem",
+    "StemName",
     "VersionInfo",
     "WebSocketEvent",
 ]

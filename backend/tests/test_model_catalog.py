@@ -8,6 +8,7 @@ import pytest
 
 from straticate.config import Settings
 from straticate.errors import ApplicationError
+from straticate.main import create_app
 from straticate.models import CATALOG_FILENAME, ModelCatalog, ModelCatalogError
 
 
@@ -85,6 +86,42 @@ def test_duplicate_model_id_fails_loudly(tmp_path: Path) -> None:
     write_catalog(tmp_path, [make_model("m-001"), make_model("m-001")])
     with pytest.raises(ModelCatalogError, match="duplicate model ID 'm-001'"):
         ModelCatalog.from_directory(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stems",
+    [
+        pytest.param(["Vocals", "Instrumental"], id="capitalized"),
+        pytest.param(["vocals", "drums-2"], id="hyphen"),
+        pytest.param(["vocals", "../escape"], id="traversal"),
+        pytest.param(["1st", "instrumental"], id="leading-digit"),
+    ],
+)
+def test_invalid_stem_name_fails_at_load_time(tmp_path: Path, stems: list[str]) -> None:
+    """Not at job-create time, where it used to surface as an unhandled 500."""
+    write_catalog(tmp_path, [make_model("m-001", stems=stems)])
+    with pytest.raises(ModelCatalogError, match=r"models\.0\.stems") as excinfo:
+        ModelCatalog.from_directory(tmp_path)
+    assert CATALOG_FILENAME in str(excinfo.value)
+
+
+def test_duplicate_stem_name_fails_at_load_time(tmp_path: Path) -> None:
+    write_catalog(tmp_path, [make_model("m-001", stems=["vocals", "vocals"])])
+    with pytest.raises(ModelCatalogError, match=r"models\.0\.stems") as excinfo:
+        ModelCatalog.from_directory(tmp_path)
+    message = str(excinfo.value)
+    assert CATALOG_FILENAME in message
+    assert "unique" in message
+
+
+def test_application_refuses_to_start_on_an_invalid_stem_name(tmp_path: Path) -> None:
+    """The whole point of load-time validation: startup fails, not the first job."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    write_catalog(models_dir, [make_model("m-001", stems=["Vocals", "Instrumental"])])
+
+    with pytest.raises(ModelCatalogError):
+        create_app(Settings(models_dir=models_dir, data_dir=tmp_path / "data"))
 
 
 def test_manifest_only_fields_are_dropped_on_load(tmp_path: Path) -> None:

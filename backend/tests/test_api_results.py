@@ -17,11 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 from starlette.types import Message
 
+from straticate.api import results as results_module
 from straticate.api.results import DEFAULT_STEM_MEDIA_TYPE, stem_media_type
 from straticate.config import Settings
 from straticate.errors import ApplicationError
@@ -224,7 +225,7 @@ def register_audio(app: FastAPI, *, seconds: float = 0.4, filename: str = "song.
     """Write a real tone WAV into the app's audio store and register it."""
     store = app.state.audio_store
     audio_id = cast(str, store.new_id())
-    path = cast(Path, store.original_path(audio_id, filename))
+    path = cast(Path, store.prepare_original_path(audio_id, filename))
     write_tone_wav(path, seconds=seconds)
     store.register(
         AudioFile(
@@ -252,11 +253,11 @@ def results_app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture
-async def results_client(results_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+async def results_client(results_app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
     """A client for a running application (lifespan started on this loop)."""
     async with results_app.router.lifespan_context(results_app):
-        transport = httpx.ASGITransport(app=results_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        transport = httpx2.ASGITransport(app=results_app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
 
 
@@ -267,7 +268,7 @@ def audio_id(results_app: FastAPI) -> str:
 
 @pytest.fixture
 async def recorder(
-    results_client: httpx.AsyncClient, results_app: FastAPI
+    results_client: httpx2.AsyncClient, results_app: FastAPI
 ) -> AsyncIterator[EventRecorder]:
     """A listener on the running app's job manager (needs the lifespan)."""
     listener = EventRecorder()
@@ -291,14 +292,14 @@ def configuration(audio_id: str, **overrides: Any) -> dict[str, Any]:
     return body
 
 
-async def create_job(client: httpx.AsyncClient, **body: Any) -> str:
+async def create_job(client: httpx2.AsyncClient, **body: Any) -> str:
     response = await client.post(JOBS_URL, json=body)
     assert response.status_code == 201, response.text
     return cast(str, response.json()["id"])
 
 
 async def run_to_completion(
-    client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, mode_id: str = "vocals"
+    client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, mode_id: str = "vocals"
 ) -> str:
     """Create a job with the real fake separator and await its completion."""
     job_id = await create_job(client, **configuration(audio_id, mode_id=mode_id))
@@ -315,7 +316,7 @@ def stem_url(job_id: str, stem: str) -> str:
     return f"{JOBS_URL}/{job_id}/stems/{stem}"
 
 
-def assert_envelope(response: httpx.Response, code: str, status: int) -> dict[str, Any]:
+def assert_envelope(response: httpx2.Response, code: str, status: int) -> dict[str, Any]:
     """Assert the standard error envelope and return the error object."""
     assert response.status_code == status, response.text
     body: dict[str, Any] = response.json()
@@ -338,7 +339,7 @@ def assert_envelope(response: httpx.Response, code: str, status: int) -> dict[st
     ],
 )
 async def test_result_of_a_completed_job(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     mode_id: str,
@@ -365,7 +366,7 @@ async def test_result_of_a_completed_job(
 
 
 async def test_result_matches_the_result_on_the_job_record(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """``/result`` serves exactly the record ``GET /jobs/{id}`` carries."""
     job_id = await run_to_completion(results_client, recorder, audio_id)
@@ -376,7 +377,7 @@ async def test_result_matches_the_result_on_the_job_record(
 
 
 async def test_result_of_an_unknown_job_returns_job_not_found(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
 ) -> None:
     error = assert_envelope(await results_client.get(result_url("01NOTAJOB")), "job_not_found", 404)
     assert error["detail"] == {"job_id": "01NOTAJOB"}
@@ -394,7 +395,7 @@ async def test_result_of_an_unknown_job_returns_job_not_found(
     ],
 )
 async def test_result_of_a_running_job_returns_409(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     results_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -422,7 +423,7 @@ async def test_result_of_a_running_job_returns_409(
 
 
 async def test_result_of_a_queued_job_returns_409(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     results_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -446,7 +447,7 @@ async def test_result_of_a_queued_job_returns_409(
 
 
 async def test_result_of_a_cancelled_job_returns_409(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     results_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -475,7 +476,7 @@ async def test_result_of_a_cancelled_job_returns_409(
 
 
 async def test_result_of_a_failed_job_returns_409(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     results_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -503,7 +504,7 @@ async def test_result_of_a_failed_job_returns_409(
     [("vocals", VOCALS_STEMS), ("standard_stems", STANDARD_STEMS)],
 )
 async def test_every_stem_is_served_byte_identical_to_the_file_on_disk(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     tmp_path: Path,
@@ -528,7 +529,7 @@ async def test_every_stem_is_served_byte_identical_to_the_file_on_disk(
 
 
 async def test_stem_response_headers(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     response = await results_client.get(stem_url(job_id, "vocals"))
@@ -539,6 +540,36 @@ async def test_stem_response_headers(
     assert response.headers["content-disposition"] == 'inline; filename="vocals.wav"'
     assert "etag" in response.headers
     assert "last-modified" in response.headers
+
+
+async def test_stem_headers_are_readable_cross_origin(
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
+) -> None:
+    """Every header the contract documents must be exposed to browser JS.
+
+    Without ``expose_headers`` a cross-origin fetch receives these headers and
+    the browser hides all of them: the player could read the bytes but not the
+    ``Content-Range`` describing which bytes, nor the validators ``If-Range``
+    needs.
+    """
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    response = await results_client.get(
+        stem_url(job_id, "vocals"),
+        headers={"Origin": "http://localhost:5173", "Range": "bytes=0-99"},
+    )
+
+    assert response.status_code == 206
+    exposed = {
+        name.strip().lower()
+        for name in response.headers["access-control-expose-headers"].split(",")
+    }
+    assert {
+        "accept-ranges",
+        "content-disposition",
+        "content-range",
+        "etag",
+        "last-modified",
+    } <= exposed
 
 
 def test_media_type_is_derived_from_the_file_suffix() -> None:
@@ -553,7 +584,7 @@ def test_media_type_is_derived_from_the_file_suffix() -> None:
 
 
 async def test_range_returns_206_with_the_exact_slice(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     on_disk = stem_path(tmp_path, job_id, "vocals").read_bytes()
@@ -569,7 +600,7 @@ async def test_range_returns_206_with_the_exact_slice(
 
 
 async def test_a_mid_file_range_returns_that_slice(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     on_disk = stem_path(tmp_path, job_id, "vocals").read_bytes()
@@ -584,7 +615,7 @@ async def test_a_mid_file_range_returns_that_slice(
 
 
 async def test_an_open_ended_range_serves_the_rest_of_the_file(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     on_disk = stem_path(tmp_path, job_id, "vocals").read_bytes()
@@ -600,7 +631,7 @@ async def test_an_open_ended_range_serves_the_rest_of_the_file(
 
 
 async def test_a_suffix_range_serves_the_final_bytes(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     on_disk = stem_path(tmp_path, job_id, "vocals").read_bytes()
@@ -613,7 +644,7 @@ async def test_a_suffix_range_serves_the_final_bytes(
 
 
 async def test_a_range_past_the_end_of_the_file_is_rejected(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     size = stem_path(tmp_path, job_id, "vocals").stat().st_size
@@ -626,7 +657,7 @@ async def test_a_range_past_the_end_of_the_file_is_rejected(
 
 
 async def test_a_malformed_range_is_rejected(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     response = await results_client.get(
@@ -636,7 +667,7 @@ async def test_a_malformed_range_is_rejected(
 
 
 async def test_a_ranged_request_for_a_missing_stem_still_404s(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """Range never bypasses the lookup rules."""
     job_id = await run_to_completion(results_client, recorder, audio_id)
@@ -650,13 +681,13 @@ async def test_a_ranged_request_for_a_missing_stem_still_404s(
 
 
 async def test_stem_of_an_unknown_job_returns_job_not_found(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
 ) -> None:
     assert_envelope(await results_client.get(stem_url("01NOTAJOB", "vocals")), "job_not_found", 404)
 
 
 async def test_unknown_stem_returns_stem_not_found(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
 
@@ -671,7 +702,7 @@ async def test_unknown_stem_returns_stem_not_found(
 
 
 async def test_a_stem_of_another_mode_is_not_served(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     """The *result* is the authority, not the filesystem.
 
@@ -686,7 +717,7 @@ async def test_a_stem_of_another_mode_is_not_served(
 
 
 async def test_a_deleted_stem_file_returns_stem_file_missing(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     """An orphaned job directory is a 404, never a 500 (014's limitation)."""
     job_id = await run_to_completion(results_client, recorder, audio_id)
@@ -703,7 +734,7 @@ async def test_a_deleted_stem_file_returns_stem_file_missing(
 
 
 async def test_a_removed_job_directory_returns_stem_file_missing(
-    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(results_client, recorder, audio_id)
     for stem in VOCALS_STEMS:
@@ -712,6 +743,79 @@ async def test_a_removed_job_directory_returns_stem_file_missing(
     job_output_dir(tmp_path, job_id).rmdir()
 
     assert_envelope(await results_client.get(stem_url(job_id, "vocals")), "stem_file_missing", 404)
+
+
+async def test_a_stem_deleted_between_check_and_send_returns_404(
+    results_client: httpx2.AsyncClient,
+    recorder: EventRecorder,
+    audio_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The TOCTOU window, closed deterministically — no timing, no sleep.
+
+    The handler proves the stem exists and hands the path to the response,
+    which opens it a moment later. Deleting the file inside that window used to
+    surface as Starlette's ``RuntimeError`` — a 500 on a route that documents
+    ``stem_file_missing``. Patching the lookup to delete the file just after it
+    returns puts the deletion *exactly* in the window, every run.
+    """
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    real_lookup = results_module.stem_source
+
+    def vanishing_lookup(
+        data_dir: Path, job: str, stem: str, available: list[str]
+    ) -> tuple[Path, Any]:
+        path, info = real_lookup(data_dir, job, stem, available)
+        path.unlink()  # the window: checked, then gone before the send
+        return path, info
+
+    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+
+    error = assert_envelope(
+        await results_client.get(stem_url(job_id, "vocals")), "stem_file_missing", 404
+    )
+    assert error["detail"] == {"job_id": job_id, "stem": "vocals"}
+
+
+def test_only_body_carrying_requests_pre_open_the_stem() -> None:
+    """The TOCTOU pre-open is skipped where the response never reads the file.
+
+    ``FileResponse`` sends headers only for ``HEAD``, and hands the path to the
+    server when ``http.response.pathsend`` is offered. Pre-opening in those
+    cases would buy nothing and would cost a dispatch into the *shared* default
+    ``ThreadPoolExecutor`` — the scarce resource this feature's FFmpeg bound
+    exists to protect — on a path the stem player hits once per seek.
+    """
+    assert results_module.streams_a_body({"type": "http", "method": "GET"})
+    assert results_module.streams_a_body({"type": "http", "method": "GET", "extensions": {}})
+    assert not results_module.streams_a_body({"type": "http", "method": "HEAD"})
+    assert not results_module.streams_a_body({"type": "http", "method": "head"})
+    assert not results_module.streams_a_body(
+        {"type": "http", "method": "GET", "extensions": {"http.response.pathsend": {}}}
+    )
+
+
+async def test_a_range_request_still_gets_the_404_guarantee(
+    results_client: httpx2.AsyncClient,
+    recorder: EventRecorder,
+    audio_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Narrowing the pre-open must not weaken it where a body is streamed."""
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    real_lookup = results_module.stem_source
+
+    def vanishing_lookup(
+        data_dir: Path, job: str, stem: str, available: list[str]
+    ) -> tuple[Path, Any]:
+        path, info = real_lookup(data_dir, job, stem, available)
+        path.unlink()
+        return path, info
+
+    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+
+    response = await results_client.get(stem_url(job_id, "vocals"), headers={"Range": "bytes=0-99"})
+    assert_envelope(response, "stem_file_missing", 404)
 
 
 # -- path safety ------------------------------------------------------------
@@ -738,7 +842,7 @@ TRAVERSAL_STEM_NAMES = [
 
 @pytest.mark.parametrize("stem_name", TRAVERSAL_STEM_NAMES)
 async def test_traversal_attempts_produce_a_clean_404(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     tmp_path: Path,
@@ -782,7 +886,7 @@ RAW_TRAVERSAL_PATHS = [
 async def raw_asgi_get(app: FastAPI, path: str) -> tuple[int, dict[str, str], bytes]:
     """Send a GET whose **raw** path reaches the app unnormalized.
 
-    ``httpx`` resolves dot segments client-side (RFC 3986), so a request built
+    ``httpx2`` resolves dot segments client-side (RFC 3986), so a request built
     through it can never carry ``..`` to the server. A real ASGI server does
     not normalize, so these paths are driven straight at the application.
     """
@@ -823,7 +927,7 @@ async def raw_asgi_get(app: FastAPI, path: str) -> tuple[int, dict[str, str], by
 
 @pytest.mark.parametrize("raw_path", RAW_TRAVERSAL_PATHS)
 async def test_an_unnormalized_url_path_never_serves_a_file(
-    results_client: httpx.AsyncClient,
+    results_client: httpx2.AsyncClient,
     results_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,

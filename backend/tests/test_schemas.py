@@ -6,7 +6,9 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from straticate.inference import STEM_NAME_PATTERN as inference_stem_pattern
 from straticate.schemas import (
+    STEM_NAME_PATTERN,
     AudioFile,
     ComputeDevice,
     ErrorEnvelope,
@@ -22,6 +24,7 @@ from straticate.schemas import (
     Model,
     RuntimeMetricsEvent,
     SeparationMode,
+    Stem,
     WebSocketEvent,
 )
 
@@ -151,6 +154,51 @@ class TestRoundTrips:
             Job.model_validate({**JOB_JSON, "progress": 1.5})
         with pytest.raises(ValidationError):
             Job.model_validate({**JOB_JSON, "progress": -0.1})
+
+
+class TestStemNames:
+    """A stem name is a file name and a URL segment, so the contract bounds it.
+
+    ``SeparatorInfo`` has always enforced this; before it was also stated here,
+    a result could advertise a stem ``GET /stems/{name}`` would then deny, and
+    a catalog could load with names no job could ever use.
+    """
+
+    @pytest.mark.parametrize(
+        "name",
+        ["Vocals", "drums-2", "../escape", "stems/vocals", "1st", "", "vocals "],
+    )
+    def test_stem_name_is_rejected(self, name: str) -> None:
+        payload = {
+            "name": name,
+            "duration_seconds": 227.4,
+            "sample_rate_hz": 44100,
+            "channels": 2,
+        }
+        with pytest.raises(ValidationError):
+            Stem.model_validate(payload)
+
+    @pytest.mark.parametrize("name", ["vocals", "instrumental", "other", "drum_kit", "stem2"])
+    def test_valid_stem_name_is_accepted(self, name: str) -> None:
+        payload = {
+            "name": name,
+            "duration_seconds": 1.0,
+            "sample_rate_hz": 44100,
+            "channels": 2,
+        }
+        assert Stem.model_validate(payload).name == name
+
+    def test_model_rejects_an_invalid_stem_name(self) -> None:
+        with pytest.raises(ValidationError, match="stems"):
+            Model.model_validate({**MODEL_JSON, "stems": ["Vocals", "instrumental"]})
+
+    def test_model_rejects_duplicate_stems(self) -> None:
+        with pytest.raises(ValidationError, match="unique"):
+            Model.model_validate({**MODEL_JSON, "stems": ["vocals", "vocals"]})
+
+    def test_the_constraint_has_one_definition(self) -> None:
+        """The separator seam and the API contract share a single pattern."""
+        assert inference_stem_pattern is STEM_NAME_PATTERN
 
 
 class TestJobState:

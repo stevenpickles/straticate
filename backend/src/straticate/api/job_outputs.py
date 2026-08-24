@@ -17,6 +17,8 @@ is simply not one of the job's stem names — a clean 404 long before a path
 exists.
 """
 
+import os
+import stat as stat_module
 from pathlib import Path
 
 from straticate.errors import ApplicationError
@@ -85,8 +87,18 @@ def completed_job(manager: JobManager, job_id: str) -> tuple[Job, SeparationResu
     return job, result
 
 
-def stem_source_path(data_dir: Path, job_id: str, stem_name: str, available: list[str]) -> Path:
-    """Resolve one stem of a completed job to an existing file on disk.
+def stem_source(
+    data_dir: Path, job_id: str, stem_name: str, available: list[str]
+) -> tuple[Path, os.stat_result]:
+    """Resolve one stem of a completed job to a file and the ``stat`` that proved it.
+
+    The ``stat_result`` is returned rather than discarded so a caller can hand
+    it to :class:`~starlette.responses.FileResponse`. That matters: the
+    existence check and the response are two different moments, and this
+    module's own documentation says a job directory "can be removed underneath
+    a live job". Re-stat'ing inside the response would widen that window and
+    turn a vanished file into a ``RuntimeError`` — a 500 on a route that
+    promises ``stem_file_missing``.
 
     Args:
         data_dir: Application data directory.
@@ -95,12 +107,12 @@ def stem_source_path(data_dir: Path, job_id: str, stem_name: str, available: lis
         available: Stem names the job's result lists — the only authority.
 
     Returns:
-        The stem's file path, which exists.
+        The stem's file path and its ``os.stat_result``.
 
     Raises:
         ApplicationError: ``stem_not_found`` (404) when ``available`` does not
             list the name, ``stem_file_missing`` (404) when it does but the
-            file is gone.
+            file is gone (or is not a regular file).
     """
     if stem_name not in available:
         raise stem_not_found(job_id, stem_name, available)
@@ -108,9 +120,18 @@ def stem_source_path(data_dir: Path, job_id: str, stem_name: str, available: lis
         path = stem_path(data_dir, job_id, stem_name)
     except ValueError as exc:  # pragma: no cover - a result never lists one
         raise stem_not_found(job_id, stem_name, available) from exc
-    if not path.is_file():
+    try:
+        info = os.stat(path)
+    except OSError as exc:
+        raise stem_file_missing(job_id, stem_name) from exc
+    if not stat_module.S_ISREG(info.st_mode):
         raise stem_file_missing(job_id, stem_name)
-    return path
+    return path, info
+
+
+def stem_source_path(data_dir: Path, job_id: str, stem_name: str, available: list[str]) -> Path:
+    """:func:`stem_source` for callers that only need the path (e.g. export)."""
+    return stem_source(data_dir, job_id, stem_name, available)[0]
 
 
 __all__ = [
@@ -118,5 +139,6 @@ __all__ = [
     "result_not_available",
     "stem_file_missing",
     "stem_not_found",
+    "stem_source",
     "stem_source_path",
 ]

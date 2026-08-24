@@ -1,71 +1,232 @@
 # [029] Skeleton hardening (deferred review findings)
 
 Branch: `029-skeleton-hardening`
-Status: PLANNED
+Status: PR OPEN
 Dependencies: 004, 005
+PR: #29
 
 ## Objective
 
-Resolve code-review findings that were out of scope for the feature that
-surfaced them. The PR #5 items were confirmed by an adversarial review pass on
-2026-08-23; the PR #17 items on 2026-08-24.
+Every code-review finding that five earlier PRs (#5, #8, #17, #20, #25)
+recorded as "out of scope here" is now fixed, or explicitly re-dispositioned to
+the feature that will do it. M1's accumulated debt stops being carried forward
+into M2.
 
-## Scope
+## What was done
 
-- **500 responses lack CORS headers.** The catch-all `Exception` handler runs
-  in Starlette's outermost `ServerErrorMiddleware`, outside `CORSMiddleware`,
-  so cross-origin callers cannot read the `internal_error` envelope. Restructure
-  (e.g. envelope-producing middleware inside the CORS layer) so the error
-  contract survives 500s.
-- **Wire `Settings` for real.** `host`, `port`, and `data_dir` are currently
-  unread; the config docstring advertises `STRATICATE_PORT` as a working
-  override. Add a serve entry point that consumes host/port (or fix the docs),
-  move the CORS origin allowlist into `Settings`, and have `data_dir` consumed
-  once feature 006 lands.
-- **Single-source the version.** `straticate/__init__.py` hand-duplicates
-  `pyproject.toml`'s version; use hatchling dynamic versioning (or
-  `importlib.metadata`) so `/api/v1/version`, package metadata, and the
-  frontend badge cannot drift. Add a test that would catch drift.
-- **Import-time side effects.** Module-level `app = create_app()` plus
-  `logging.basicConfig(force=True)` inside the factory reset global logging on
-  every import/instantiation (clobbering test `caplog`). Move logging setup to
-  the server entry point and/or adopt `uvicorn --factory`.
-- **CI FFmpeg placement.** The backend job installs FFmpeg though no backend
-  test uses it yet, and the frontend job (which will run the FFmpeg-dependent
-  E2E tier per DEVELOPMENT.md) doesn't. Align installs with actual consumers
-  when 006/007 land; fix DEVELOPMENT.md's claim that both jobs install it.
+Eleven items, each its own commit, in the order they appear below.
 
-### Deferred from PR #17 (feature 015, job REST endpoints)
+### A. Configuration and startup
 
-- **An invalid catalog becomes a 500 at job-create time instead of failing at
-  startup.** `separator_info_from_model` feeds `Model.stems` into
-  `SeparatorInfo`, which enforces `^[a-z][a-z0-9_]*$` and uniqueness.
-  `schemas.models.Model` enforces neither (only `min_length=2`), and
-  `ModelCatalog` checks only cross-model stem *agreement*. A catalog entry with
-  `"stems": ["Vocals", "Instrumental"]` (or a duplicate stem) therefore loads
-  cleanly, serves `GET /models` and `GET /separation-modes` fine, and then
-  raises an unhandled `ValueError` on the first `POST /api/v1/jobs` for that
-  mode — a `500` whose real cause appears only in the server log. This
-  contradicts feature 010's own stated principle that a malformed catalog fails
-  loudly at startup rather than degrading. Fix by validating the stem pattern
-  and uniqueness on `Model` (or in `ModelCatalog`), with a test asserting the
-  failure happens at load time. Not fixed in 015 because
-  `backend/src/straticate/schemas/` is a shared contract that feature was
-  explicitly barred from touching.
-- **`resolve_audio` is not pure — it creates a directory as a side effect.**
-  `jobs/resolution.py` documents its three resolvers as pure, but
-  `AudioStore.original_path` does `directory.mkdir(parents=True,
-  exist_ok=True)`. On the documented "registered record whose file has
-  disappeared" path, `resolve_audio` therefore recreates an empty
-  `{data_dir}/audio/{audio_id}/` and *then* returns 404, leaving orphan
-  directories behind on what is supposed to be a read-only lookup. Fix by
-  giving `AudioStore` a non-creating path accessor and mkdir-ing only on the
-  write path (feature 006's module, hence deferred).
+1. **The version has one source.** `straticate/__init__.py` hardcoded
+   `0.1.0.dev0`, duplicating `pyproject.toml`. It now resolves at import time
+   via `importlib.metadata.version("straticate")`, with a recognisably unreal
+   `0.0.0+unknown` fallback for the case where no distribution is installed at
+   all. `tests/test_version.py` reads the version out of `pyproject.toml` with
+   `tomllib` and asserts it matches `__version__`, so editing one without the
+   other fails the suite; a second test rejects the fallback, so the comparison
+   cannot pass by accident, and a third asserts `GET /api/v1/version` serves
+   the same string.
 
-### Deferred from PR #17 to feature 026 (not this feature)
+2. **`Settings` is wired for real.** `serve()` (and `python -m straticate`)
+   reads `host`, `port` and `log_level` and hands them to uvicorn, so
+   `STRATICATE_PORT=9000 uv run python -m straticate` does what the config
+   docstring always promised. The CORS origin allowlist moved out of the
+   hardcoded list in `create_app` into `Settings.cors_origins` (a JSON array in
+   the environment). `ffmpeg_timeout_seconds` was added here for item 9.
+   `data_dir` **was already consumed** — by `AudioStore` (006), the job output
+   layout (014) and the export cache (022) — so nothing was needed beyond
+   saying so; the `Settings` class docstring now names the consumer of every
+   field, because a setting nothing reads is a promise the application does not
+   keep. DEVELOPMENT.md documents both ways to start the server and how they
+   differ.
+
+3. **Building an application configures nothing process-global — but running
+   one still configures logging.** `configure_logging()` calls
+   `logging.basicConfig(force=True)`, which replaces the root logger's handlers
+   for the whole interpreter; calling it from `create_app` meant every
+   instantiation — one per test using the `app` fixture — tore down pytest's
+   `caplog` handler.
+
+   Logging now happens **at startup, in the lifespan**: once per running
+   application, on every entry path, never on import. That distinction matters
+   because uvicorn's `LOGGING_CONFIG` declares handlers only for
+   `uvicorn`/`uvicorn.error`/`uvicorn.access` and never touches the root
+   logger — so under the documented `uvicorn straticate.main:app` command,
+   leaving logging to uvicorn would drop every `straticate.*` record onto
+   `logging.lastResort` (WARNING and above only, bare message, no timestamp, no
+   logger name) and make `STRATICATE_LOG_LEVEL=DEBUG` do nothing at all. The
+   lifespan calls the new `ensure_logging_configured()`, which is
+   non-destructive (`basicConfig` without `force`), so an embedding process —
+   or pytest, whose `caplog` handler lives on the root logger — keeps whatever
+   it configured. `serve()` still configures logging authoritatively, with
+   `force`, and passes `log_config=None` so uvicorn's dictConfig does not
+   replace it.
+
+   **The module-level `app = create_app()` stays**, deliberately and now
+   documented as such: `uvicorn straticate.main:app` is what DEVELOPMENT.md,
+   CI and hand-testing use, and with the global side effect gone there is
+   nothing left for `--factory` to fix. `tests/test_main.py` proves `caplog`
+   still captures after `create_app()`, that `create_app` never configures
+   logging while `serve()` does, that the uvicorn entry path *does* produce a
+   formatted application logger honouring `log_level`, and that startup never
+   overrides an existing configuration.
+
+### B. The error contract
+
+4. **A 500 carries CORS headers.** The catch-all `Exception` handler runs in
+   Starlette's outermost `ServerErrorMiddleware`, outside `CORSMiddleware`, so
+   a cross-origin caller got an opaque network failure for the one error it
+   most needs to report. `ErrorEnvelopeMiddleware` (a pure ASGI middleware in
+   `errors.py`) now produces the `internal_error` envelope one layer lower, and
+   is added *before* CORS so that CORS ends up outermost — `add_middleware`
+   prepends, so the last added is the outermost layer, and a comment at the
+   call site says so. The registered `Exception` handler is kept as a fallback
+   for anything raised outside the middleware.
+   `tests/test_errors.py` sends an `Origin` at a route that raises and asserts
+   **both** the envelope body and the `access-control-allow-origin` response
+   header; removing the middleware makes it fail (verified).
+
+   Two settings that reach their consumers by being **passed down**, not
+   re-read: `cors_origins` also decides `allow_credentials` (see item 5), and
+   `ffmpeg_timeout_seconds` travels from `app.state.settings` into the upload
+   route, the export route and the separator (see item 9). Reading the
+   process-global `get_settings()` deep in the call stack would have made
+   `create_app(Settings(...))` — the documented path every test fixture uses —
+   silently ineffective.
+
+5. **The documented response headers are readable cross-origin.**
+   `Accept-Ranges`, `Content-Disposition`, `Content-Range`, `ETag` and
+   `Last-Modified` are all part of the stem/export contract and none was in
+   `Access-Control-Expose-Headers`, so browser JavaScript could receive a byte
+   range and not see which range it got. All five are exposed now, asserted on
+   a real `206` stem response carrying an `Origin`, and written into
+   `docs/contracts/rest-api.md`.
+
+   `allow_credentials` is no longer hardcoded to `True`. Now that the origin
+   list is configurable and documented as a JSON array — which invites a
+   `"*"` entry — a wildcard would have made Starlette echo each caller's own
+   `Origin` back beside `Access-Control-Allow-Credentials: true`, i.e.
+   allow-any-origin-with-credentials, which the previously hardcoded two-entry
+   list made impossible. `allows_credentials()` derives the flag from the list:
+   a wildcard degrades to the safe standard behaviour
+   (`Access-Control-Allow-Origin: *`, no credentials), and naming origins
+   explicitly keeps credentials enabled. Documented in the REST contract.
+
+### C. Stem names — one fix, two findings
+
+6. **Stem names are constrained at the schema boundary.** The pattern
+   `^[a-z][a-z0-9_]*$` and uniqueness were enforced only by `SeparatorInfo`.
+   `schemas.jobs.Stem.name` and each entry of `schemas.models.Model.stems` now
+   carry the pattern, and `Model.stems` rejects duplicates. That single fix
+   closes both findings: a catalog with `"stems": ["Vocals", …]` (or a repeat)
+   can no longer load cleanly and then 500 on the first job, and a result can
+   no longer advertise a stem `/stems/{name}` would deny.
+   The pattern has exactly one definition, in the new
+   `straticate/schemas/stems.py`, imported by `schemas/` and re-exported by
+   `inference/base.py` — that module imports nothing from the application, so
+   both sides of the seam share it with no circular import.
+   `ModelCatalog.from_file` fails at **load time** with `ModelCatalogError`
+   naming the file and `models.N.stems`, tested for four bad-name shapes and
+   for a duplicate, plus a test that `create_app` itself refuses to start.
+   `frontend/src/api/generated/api.d.ts` was regenerated and committed; the
+   wire shape is unchanged (descriptions only), so no other frontend file
+   moved.
+
+### D. Filesystem robustness
+
+7. **A read-only audio lookup creates nothing.** `AudioStore.original_path`
+   did `mkdir(parents=True, exist_ok=True)`, so `resolve_audio` — documented as
+   pure — recreated an empty `{data_dir}/audio/{audio_id}/` on the "registered
+   record whose file has disappeared" path and *then* returned 404, leaving an
+   orphan directory per failed probe. `original_path` is now pure;
+   `prepare_original_path` creates the directory and is called only from the
+   upload write path. Tested by snapshotting the tree around two failing
+   lookups.
+
+8. **The TOCTOU window on stem serving is closed.** `stem_source()` returns the
+   `os.stat_result` it used, which is passed to the response as `stat_result=`
+   so nothing re-`stat`s. `FileResponse` still sends its headers *before*
+   opening the file, so `StemFileResponse` opens it first — while a 404 is
+   still choosable — and maps `OSError`/`RuntimeError` onto the documented
+   `stem_file_missing`. Tested deterministically by patching the lookup to
+   delete the file exactly in the window: no timing, no `sleep`.
+   The pre-open is **narrowed to requests that actually stream a body**: a
+   `HEAD` or a server offering `http.response.pathsend` never reads the file,
+   so opening it would buy nothing and would cost a dispatch into the same
+   shared default `ThreadPoolExecutor` that item 9 identifies as the scarce
+   resource — on a path the stem player hits once per seek. A range request
+   still streams a body and keeps the full 404 guarantee, which has its own
+   test.
+
+   Two cases remain and are documented rather than papered over: the
+   microseconds between our open and Starlette's, and a file lost mid-stream,
+   when the status line is already on the wire.
+
+### E. Subprocess safety
+
+9. **Every FFmpeg invocation is bounded.** `subprocess.run` had no `timeout` in
+   `api/export.py`, `audio/probe.py` **or** `inference/pcm.py`; all three
+   dispatch onto asyncio's shared default `ThreadPoolExecutor`, so a wedged
+   subprocess is a thread held forever and enough of them starve probing and
+   separation, not just exports. There is now one runner —
+   `straticate.audio.ffmpeg.run_ffmpeg` — which raises `FFmpegTimeout` on
+   expiry, after `subprocess.run` has killed the process. Its
+   `timeout_seconds` is a **required** argument and the module reads no
+   settings of its own: the bound travels from `app.state.settings` down
+   through the caller (the upload route, the export route, and the separator,
+   which is constructed with it via `default_separator_builders`), so
+   `create_app(Settings(ffmpeg_timeout_seconds=30))` really governs FFmpeg
+   rather than only the environment variable doing so. The one definition of
+   the default lives in `DEFAULT_FFMPEG_TIMEOUT_SECONDS`, which `Settings`
+   takes its field default from.
+   Each call site maps it onto **its own** code, because a timeout is not "not
+   decodable" and the three surfaces are not interchangeable:
+
+   | surface | code | status |
+   | --- | --- | --- |
+   | `POST /audio` (ffprobe) | `audio_probe_timed_out` | 504 |
+   | a job's decode (FFmpeg) | `audio_decode_timed_out` | job `error.code` |
+   | `GET /jobs/{id}/export` (FFmpeg) | `export_timed_out` | 504 |
+
+   All three are documented in `docs/contracts/rest-api.md` (including a
+   "Timeouts" section explaining the shared-executor reason). Every timeout
+   path is tested with a stubbed runner — never by waiting.
+
+### F. Tooling
+
+10. **The CI FFmpeg claim was wrong; the workflow was right.** Re-checked
+    before changing anything: nine backend test modules use FFmpeg or ffprobe
+    for real (generated fixtures, upload probing, export transcoding, and
+    ffprobe verification of transcoded output), so the backend job's install is
+    correct. The frontend suite is Vitest against mocked responses and needs
+    nothing until the Playwright tier exists (feature 030). So `ci.yml` is
+    **unchanged** and DEVELOPMENT.md's "Both jobs install FFmpeg via apt" was
+    corrected to say which job installs it, why, and when the frontend job
+    should gain it.
+
+11. **`httpx2` adopted; the suite has no warnings.** `httpx2` is real,
+    published (Pydantic's successor to `httpx`, 2.12.0) and API-compatible with
+    everything the suite uses — `AsyncClient`, `ASGITransport`,
+    `raise_app_exceptions` — so the deprecation was fixed rather than filtered:
+    `httpx` was replaced outright in the dev dependencies and the test imports
+    renamed, keeping one HTTP client rather than two. The backend suite now
+    runs with **zero** warnings and no `filterwarnings` entry, and
+    DEVELOPMENT.md records that a warning in the output is a finding, not
+    background noise.
+
+## Re-dispositioned, not fixed
+
+- **The Playwright E2E tier → feature 030.** This is a whole new test tier, not
+  a deferred fix, so it is tracked separately as feature **030 — Playwright E2E
+  tier (fake separator)** (ledger row added in this PR, depends on 024).
+  DEVELOPMENT.md's test-strategy table and its CI section both now point at
+  030 instead of "around M1".
+
+## Still deferred to feature 026 (unchanged)
 
 Recorded here so they are not lost; they must be resolved **as part of 026**,
-where they stop being theoretical:
+where they stop being theoretical. Neither was touched by this feature.
 
 - **Separator construction runs on the event loop inside the request handler.**
   `SeparatorRegistry.get()` builds the separator on a cache miss, inside the
@@ -81,71 +242,107 @@ where they stop being theoretical:
   yet; today both fake models declare `cuda` and `cpu`, so the gap is
   unreachable. 026 introduces the first model for which it is not.
 
-### Deferred from PR #20 (feature 021, result + stem serving)
-
-- **`Stem.name` is unconstrained, so `/result` can advertise a stem
-  `/stems/{name}` denies.** `schemas.models`-side: `Stem.name`
-  (`backend/src/straticate/schemas/jobs.py`) is a plain `str`, while
-  `SeparatorInfo` validates its stem names against
-  `^[a-z][a-z0-9_]*$`. A separator returning `"Vocals"` or `"drums-2"` would
-  have it listed in the result, pass the membership check, then fail
-  `stem_path()` and produce a self-contradictory 404 whose `detail` lists the
-  very stem it says does not exist. **This is the same root cause as the PR #17
-  finding above** — fixing stem-name validation once at the schema boundary
-  resolves both.
-- **TOCTOU between `path.is_file()` and `FileResponse`'s own `os.stat`.**
-  Starlette re-stats the file and raises `RuntimeError` on `FileNotFoundError`,
-  surfacing as a 500 where the module promises `stem_file_missing` (404). The
-  window is real precisely because the module documents that a job directory
-  "can be removed underneath a live job". Pass the single `os.stat` result
-  through as `stat_result=`, and/or catch `OSError`/`RuntimeError` around the
-  send.
-- **CORS exposes no custom response headers.** `CORSMiddleware` is configured
-  with explicit origins but no `expose_headers`, so `Content-Range`,
-  `Accept-Ranges` and `ETag` — which the REST contract now documents as part of
-  the stem response — are invisible to cross-origin JavaScript. Inert today
-  because `frontend/vite.config.ts` proxies `/api` (the browser sees
-  same-origin) and `<audio src>` handles ranges below the JS layer, but feature
-  023's Web Audio path would hit it the moment it talked to `:8000` directly.
-  Note this alongside the existing CORS item above.
-
-### Deferred from PR #25 (feature 022, stem export)
-
-- **`subprocess.run` has no `timeout`, on the shared default executor.** A
-  wedged FFmpeg pins a thread from asyncio's default `ThreadPoolExecutor`
-  forever and the request never returns. That executor is shared with
-  `audio/probe.py` and `inference/pcm.py`, so enough stuck subprocesses starve
-  audio probing and separation, not just exports. `probe.py` and `pcm.py` have
-  the same omission, which is why this was *not* fixed inside 022 — patching
-  only the newest call site would leave the codebase inconsistent. Fix all
-  three together with a bounded timeout (and a documented error on expiry),
-  since export is the first endpoint where a caller can start an unbounded
-  number of subprocesses on demand.
-
-### Test-tooling debt (noticed 2026-08-24, not from a review)
-
-- **`starlette.testclient` with `httpx` is deprecated.** The backend suite
-  emits `StarletteDeprecationWarning: Using httpx with starlette.testclient is
-  deprecated; install httpx2 instead` from `backend/tests/test_api_jobs.py`.
-  Harmless today, but it becomes a hard failure whenever Starlette drops the
-  shim, and it is the only warning in an otherwise clean run.
-- **The Playwright E2E tier is still unwritten.** `DEVELOPMENT.md`'s test
-  strategy schedules it "around M1"; M1 is now met and the workflow it would
-  cover is stable, so the tier is both overdue and finally worth pinning down.
-  It would have caught at least two defects this milestone that unit tests did
-  not: a stale REST snapshot stranding the progress UI, and the `inspect` phase
-  having no route out.
-
 ## Out of scope
 
-New endpoints or schema changes.
+New endpoints and new response shapes. (Item 6 adds *validation* to existing
+fields — a constraint, not a new shape. Item 9 adds three error **codes**,
+which the item explicitly required and which are documented in the REST
+contract.) No behaviour change to the job manager, event hub, separators,
+telemetry sampler, or the model catalog beyond item 6's load-time validation.
+No frontend source other than the regenerated `api/generated/api.d.ts`. No
+Playwright work (030). No PyTorch, real models or downloads (025/026).
+
+## Modules changed
+
+- `backend/src/straticate/`: `__init__.py`, `__main__.py` (new), `main.py`,
+  `config.py`, `errors.py`, `logging.py`, `api/{audio,export,job_outputs,results}.py`,
+  `audio/{__init__,ffmpeg (new),probe,storage}.py`,
+  `inference/{base,fake,pcm,registry}.py`,
+  `jobs/resolution.py`, `schemas/{__init__,jobs,models,stems (new)}.py`
+- `backend/pyproject.toml`, `backend/uv.lock`
+- `backend/tests/`: `test_version.py`, `test_main.py`, `test_ffmpeg_runner.py`
+  (all new) plus `conftest.py`, `test_api_export.py`, `test_api_jobs.py`,
+  `test_api_results.py`, `test_audio.py`, `test_errors.py`,
+  `test_inference_fake.py`, `test_jobs_resolution.py`, `test_model_catalog.py`,
+  `test_models_api.py`, `test_schemas.py`, `test_system.py`,
+  `test_telemetry_sampler.py`
+- `frontend/src/api/generated/api.d.ts` (regenerated)
+- `DEVELOPMENT.md`, `docs/contracts/rest-api.md`, `ROADMAP.md`
+- `.github/workflows/ci.yml` — **deliberately unchanged** (item 10)
 
 ## Acceptance criteria
 
-- [ ] Each item above fixed or explicitly re-dispositioned in this document
-- [ ] All quality gates green
+- [x] Every item 1–11 fixed; the Playwright bullet re-dispositioned to 030 with
+      the ledger row added
+- [x] A 500 carries CORS headers, proven by asserting the
+      `access-control-allow-origin` header, not just the body
+- [x] An invalid catalog (bad stem name, or a duplicate) fails at **startup**
+      with `ModelCatalogError`
+- [x] A read-only audio lookup creates no directories
+- [x] A stem file deleted between check and send yields 404
+      `stem_file_missing`, never a 500
+- [x] All three FFmpeg call sites have a bounded timeout mapping to a
+      documented per-surface error code
+- [x] `__version__` and `pyproject.toml` cannot drift without a test failing
+- [x] `caplog` works after `create_app()`
+- [x] The backend suite runs with no warnings
+- [x] `frontend/src/api/generated/api.d.ts` regenerated and committed
+- [x] All quality gates green
 
 ## Required tests
 
-500-envelope CORS test; version-drift test; logging-isolation test (caplog
-survives `create_app()`).
+Added alongside each item: the version-drift test; `caplog`-after-`create_app`;
+`serve()` binding host/port from the environment; the 500-with-`Origin` CORS
+test and the same for a handled `ApplicationError`; `expose_headers` on a real
+`206`; invalid-catalog-at-startup (bad pattern **and** duplicate, plus
+`create_app` refusing to start); `Stem.name` rejecting bad names and `Model`
+rejecting duplicates; a read-only lookup creating no directory and
+`original_path`/`prepare_original_path` differing; the deterministic TOCTOU
+404 (whole-file and range); the pre-open skipped where no body is streamed; and
+a timeout path for each of the three FFmpeg call sites plus the runner itself.
+
+Review follow-ups carry their own regression tests, each verified to fail
+against the code as it stood: the uvicorn entry path producing a configured
+application logger; an injected `Settings.ffmpeg_timeout_seconds` governing
+each of the three call sites; and `serve()` leaving the test session's root
+logging untouched (via a `quiet_serve` fixture, since stubbing only
+`uvicorn.run` re-ran `basicConfig(force=True)` mid-session and stripped every
+root handler — the very side effect this feature removes). Conventions unchanged: `ASGITransport`/`TestClient`,
+`asyncio.Event`-gated coordination, generated audio fixtures, and **no
+`sleep()` as synchronization** — every timeout test stubs the runner rather
+than waiting.
+
+## Notes / decisions
+
+- **`python -m straticate` passes the application object, not the
+  `"straticate.main:app"` import string.** The string form makes uvicorn
+  re-import the module in the worker, building a second application (a second
+  catalog load, a second device probe) and discarding the first. Reload-style
+  supervision is therefore not offered by `serve()`; that is `uvicorn --reload`
+  on the command line, which DEVELOPMENT.md documents.
+- **Logging belongs to startup, not to import and not to the factory.** The
+  three candidates were `create_app` (fires per import and per test fixture —
+  the original bug), `serve()` alone (leaves the documented uvicorn command
+  with no application logging at all), and the lifespan (once per running
+  application, on both paths). The lifespan wins, and it uses the
+  non-destructive form so it can never clobber a caller who configured logging
+  first.
+- **Middleware order is load-bearing.** `add_middleware` prepends, so the last
+  one added is the outermost layer. `ErrorEnvelopeMiddleware` is added first
+  and `CORSMiddleware` second, precisely so the envelope travels back out
+  through CORS. Swapping the two lines silently restores the bug; the
+  `Origin`-header test is what catches it.
+- **Three timeout codes, not one.** A single generic code would have leaked
+  across three unrelated API surfaces, and reusing `audio_not_decodable` would
+  have told users their file was broken on the strength of a subprocess that
+  never reached a verdict.
+- **Settings reach consumers by being passed, never by a global read.**
+  `run_ffmpeg`'s `timeout_seconds` is required rather than defaulted precisely
+  so a future call site cannot quietly fall back to a value nobody chose. The
+  separator takes the bound as a construction option, which keeps the
+  `Separator` protocol (ARCHITECTURE.md §7) free of tool-specific parameters:
+  *how* a separator obtains PCM is its own business.
+- **`export_timed_out` is a code, not an `export_failed` reason.**
+  `export_failed` means the encode was attempted and failed — a statement about
+  the audio or the disk. A timeout is a statement about the server, with a
+  different remedy.
