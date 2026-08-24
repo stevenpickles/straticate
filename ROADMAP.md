@@ -39,47 +39,61 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
 ## Current state (2026-08-24)
 
-**Milestone M1 is met.** Features 001–024 are merged into `dev`.
-**442 backend tests and 517 frontend tests**, all CI-enforced on every PR.
+**Milestones M1 and M2 are both met.** Features 001–026 plus 029 and 031 are
+merged. **693 backend tests and 517 frontend tests**, all CI-enforced, the
+backend suite clean under `-W error`.
 
-M1's formal acceptance is that *a person* can run backend + frontend locally per
-DEVELOPMENT.md and perform the whole workflow against the fake separator, with
-CI green, on a machine with no GPU. That was carried out by hand in a browser on
-2026-08-24 against a real uvicorn backend and Vite dev server on a CPU-only
-host (no `torch` installed, so `GET /system/devices` reports CPU only):
+### M2 — first real separation
 
-| Step | Observed |
+Straticate performs a genuine vocal separation. A vendored Mel-Band RoFormer
+(MIT) runs the Kim Vocal 2 checkpoint (MIT since 2026-04-22) behind the
+existing `Separator` seam, with weights installed and SHA-256-verified by
+feature 025.
+
+**Separation quality, measured against ground truth** — a 20 s mixture built
+from a locally synthesised speech track over a generated backing, so the true
+sources were known:
+
+| correlation | value |
 | --- | --- |
-| Upload | 3-minute MP3 accepted; ffprobe metadata rendered, `bit_depth` row correctly absent for a lossy source |
-| Configure | Modes, stem lists and quality tiers rendered from `/separation-modes`; 4-stem mode selected |
-| Separate | Job created, returned immediately, ran to `completed` at **12.4x real time** |
-| Progress | Live chunk-grained progress over WebSocket (36 chunks), stage, elapsed, audio processed |
-| Telemetry | Model / device / processing panel populated, including real-time factor |
-| Cancel | A separate 10-minute job cancelled mid-run: settled on `cancelled` naming the stage, **no partial stem left on disk**, re-cancel idempotent |
-| Inspect | All four stems loaded and played in sync off one clock; solo and mute per stem; scrubber and time readout |
-| Export | 3-of-4 stem subset exported as `wav_pcm24`; server produced `vocals/drums/other.wav` + `separation.json`, with `bass` correctly excluded |
-| Round trip | "Start another separation" returned to `configure` with the uploaded file retained |
+| vocals stem ↔ true voice | **+0.993** |
+| vocals stem ↔ true backing | −0.001 |
+| instrumental stem ↔ true backing | **+1.000** |
+| instrumental stem ↔ true voice | +0.003 |
+| *mixture* ↔ true voice (baseline) | +0.231 |
 
-Playback ran uninterrupted while the export transcoded, confirming the export
-path does not block the event loop.
+The mixture correlates with the voice at 0.23 and the extracted stem at 0.99:
+separation, not a passthrough. The baseline row is what makes it a measurement
+rather than a number.
 
-One caveat on the export step: the browser automation context suppresses
-page-initiated downloads, so the file landing on the user's disk could not be
-observed — the server-side artifact was verified instead, and the UI's success
-line reflects the fetch completing rather than a confirmed disk write (recorded
-as a known limitation in `docs/features/024-export-ui.md`).
+**What is not verified.** Development and validation happened on a **CPU-only**
+host. `torch.autocast`, flash-attention backend selection and the real CUDA
+allocator are **written and type-checked but never executed**; the
+`@pytest.mark.gpu` test skips. No GPU telemetry figure anywhere is measured, and
+none was invented. NVML was never exercised. CPU real-time factor is **0.21–0.30**
+(3.5–5× slower than real time), which is why feature 027's fast tier matters.
 
-Working today: the complete `select -> configure -> separate -> inspect ->
-export` workflow, end to end, with no ML model.
+**Before a release claims CUDA support, someone must run the GPU tier on real
+hardware.** That is the single largest untested surface in the project.
 
-**Next up — M2 (features 025, 026).** Real HQ vocal separation on CUDA with CPU
-fallback, which needs the model download manager (025) first. Feature **029**
-runs first and clears the way: it fixes the deferred review findings from five
-PRs (#5, #8, #17, #20, #25), and leaves two items recorded for **026** to carry
-out (separator construction on the event loop; `Model.capabilities` never
-consulted when resolving a device). The Playwright E2E tier that DEVELOPMENT.md
-once scheduled "around M1" is now feature **030**, split out of 029 because it
-is a new test tier rather than a deferred fix.
+### M1 — fake-separator end-to-end
+
+Met earlier the same day and verified by hand in a browser: upload → catalog-driven
+configuration → job → live chunk progress → telemetry → cancel → synchronized
+stem playback with solo/mute/seek → export. See the git history of this section.
+
+### Next
+
+- **027** (MDX fast tier) — the CPU story: RoFormer is 3.5–5× slower than real
+  time, so a fast tier is a product requirement, not a nicety.
+- **028** (4-stem model + capability-driven modes).
+- **030** (Playwright E2E tier) — overdue since M1; it would have caught two
+  M1 defects that unit tests did not.
+- Whether `quality_options` should hide tiers whose weights are not installed
+  is still open (010 raised it, 025 and 026 both deliberately deferred it). It
+  now has a concrete shape: `POST /jobs` answers `model_weights_missing` and
+  `GET /models` carries `installation`, so a client can render an "Install"
+  affordance instead. The decision belongs with a model-management UI.
 
 ## Feature ledger
 
@@ -109,13 +123,13 @@ is a new test tier rather than a deferred fix.
 | 022 | Stem export (WAV24/float32/FLAC)             | MERGED  | 021        | `022-stem-export` | #25 |
 | 023 | Stem player UI (sync playback, solo, mute)   | MERGED  | 017, 021   | `023-stem-player` | #26 |
 | 024 | Export UI                                    | MERGED  | 022, 023   | `024-export-ui` | #27 |
-| 025 | Model download manager (SHA-256, atomic)     | PR OPEN | 010        | `025-model-download-manager` | #30 |
-| 026 | Real separator: HQ vocals (RoFormer-family)  | PR OPEN | 014, 018, 025 | `026-roformer-separator` | #33 |
+| 025 | Model download manager (SHA-256, atomic)     | MERGED  | 010        | `025-model-download-manager` | #30 |
+| 026 | Real separator: HQ vocals (Mel-Band RoFormer)| MERGED  | 014, 018, 025 | `026-roformer-separator` | #33 |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
 | 029 | Skeleton hardening (deferred review finds)  | MERGED  | 004, 005   | `029-skeleton-hardening` | #29 |
 | 030 | Playwright E2E tier (fake separator)         | PLANNED | 024        | | |
-| 031 | Post-029 review findings (stem Range, logging, test integrity) | PR OPEN | 029 | `031-post-029-findings` | #32 |
+| 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
