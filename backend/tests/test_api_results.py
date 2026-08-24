@@ -22,6 +22,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.types import Message
 
+from straticate.api import results as results_module
 from straticate.api.results import DEFAULT_STEM_MEDIA_TYPE, stem_media_type
 from straticate.config import Settings
 from straticate.errors import ApplicationError
@@ -742,6 +743,38 @@ async def test_a_removed_job_directory_returns_stem_file_missing(
     job_output_dir(tmp_path, job_id).rmdir()
 
     assert_envelope(await results_client.get(stem_url(job_id, "vocals")), "stem_file_missing", 404)
+
+
+async def test_a_stem_deleted_between_check_and_send_returns_404(
+    results_client: httpx.AsyncClient,
+    recorder: EventRecorder,
+    audio_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The TOCTOU window, closed deterministically — no timing, no sleep.
+
+    The handler proves the stem exists and hands the path to the response,
+    which opens it a moment later. Deleting the file inside that window used to
+    surface as Starlette's ``RuntimeError`` — a 500 on a route that documents
+    ``stem_file_missing``. Patching the lookup to delete the file just after it
+    returns puts the deletion *exactly* in the window, every run.
+    """
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    real_lookup = results_module.stem_source
+
+    def vanishing_lookup(
+        data_dir: Path, job: str, stem: str, available: list[str]
+    ) -> tuple[Path, Any]:
+        path, info = real_lookup(data_dir, job, stem, available)
+        path.unlink()  # the window: checked, then gone before the send
+        return path, info
+
+    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+
+    error = assert_envelope(
+        await results_client.get(stem_url(job_id, "vocals")), "stem_file_missing", 404
+    )
+    assert error["detail"] == {"job_id": job_id, "stem": "vocals"}
 
 
 # -- path safety ------------------------------------------------------------
