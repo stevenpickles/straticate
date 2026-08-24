@@ -13,6 +13,9 @@ Public surface (consumed by features 013/014/015):
   cancellation primitives.
 - :func:`assert_transition` / :class:`InvalidJobTransition` — state-machine
   validation.
+- :func:`resolve_audio` / :func:`resolve_model` / :func:`resolve_device` — the
+  pure resolvers that turn a create-job request's IDs into the audio file,
+  catalog model and compute device the job runs with (feature 015).
 - :func:`get_job_manager` — FastAPI dependency accessor.
 """
 
@@ -33,6 +36,7 @@ from straticate.jobs.manager import (
     JobManager,
     get_job_manager,
 )
+from straticate.jobs.resolution import resolve_audio, resolve_device, resolve_model
 from straticate.jobs.state import InvalidJobTransition, assert_transition
 
 __all__ = [
@@ -52,4 +56,7 @@ __all__ = [
     "assert_transition",
     "get_event_hub",
     "get_job_manager",
+    "resolve_audio",
+    "resolve_device",
+    "resolve_model",
 ]

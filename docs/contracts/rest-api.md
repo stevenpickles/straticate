@@ -147,12 +147,12 @@ mode ID; tier labels are humanized tier IDs.
 
 ## Jobs
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| POST | `/jobs` | Create a separation job → `Job` (state `queued`), returns immediately |
-| GET | `/jobs` | List jobs |
-| GET | `/jobs/{job_id}` | Fetch `Job` (reconnect/refresh source of truth) |
-| POST | `/jobs/{job_id}/cancel` | Request cooperative cancellation → `Job` |
+| Method | Path | Purpose | Status |
+| --- | --- | --- | --- |
+| POST | `/jobs` | Create a separation job → `Job` (state `queued`), returns immediately | `201` |
+| GET | `/jobs` | List jobs, oldest first | `200` |
+| GET | `/jobs/{job_id}` | Fetch `Job` (reconnect/refresh source of truth) | `200` |
+| POST | `/jobs/{job_id}/cancel` | Request cooperative cancellation → `Job` | `200` |
 
 Create request (`SeparationConfiguration`):
 
@@ -188,6 +188,41 @@ Create request (`SeparationConfiguration`):
 States: `queued · preparing · decoding · loading_model · separating ·
 post_processing · encoding · completed · cancelled · failed` (see
 ARCHITECTURE.md §6). On `completed`, `result` is a `SeparationResult`.
+
+**`configuration.device_id` is always the resolved device.** Creating a job
+resolves the compute device — the request's `device_id`, or the backend's
+preferred device when the request omitted it — and records *that* on the job.
+So `Job.configuration.device_id` is never null in a response or an event, even
+though the create request's field is optional.
+
+**`GET /jobs` returns jobs in submission order (oldest first)** — the order the
+backend accepted them, which is also the order they run in (the queue is FIFO
+with one active job, ARCHITECTURE.md §6). Clients that want newest-first sort
+client-side. Job records are in-memory only: the list is empty after a restart.
+
+**Cancellation is a request, not a stop.** `POST /jobs/{job_id}/cancel` takes no
+body. A `queued` job is cancelled immediately; a running one is asked to stop at
+its next cooperative checkpoint, so the returned `Job` may still be in a
+processing state and the authoritative transition arrives as a `job_cancelled`
+WebSocket event. Cancelling a job that already reached a terminal state is a
+**no-op that still returns `200`** — the operation is idempotent and never
+produces a conflict.
+
+Job error codes:
+
+| code | status | when |
+| --- | --- | --- |
+| `audio_not_found` | 404 | `audio_id` is unknown, or its file is gone from disk |
+| `separation_mode_not_found` | 404 | `mode_id` is not one of the derived separation modes |
+| `quality_option_not_found` | 404 | `quality_id` is not an option of that mode |
+| `device_not_found` | 404 | `device_id` is not a detected compute device |
+| `separator_unavailable` | 501 | no separator implementation exists for the resolved model's architecture |
+| `job_not_found` | 404 | unknown `job_id` (get/cancel) |
+| `service_unavailable` | 503 | the job manager is shutting down (create/cancel) |
+
+A malformed create body is the standard `validation_error` (422). References are
+resolved in the order audio → mode → quality → device → separator, so the first
+unresolvable one is what the client is told about.
 
 ## Results, stems, export
 
