@@ -12,7 +12,8 @@ from the file the separator wrote, whole and sliced.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+import json
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -326,6 +327,94 @@ def assert_envelope(response: httpx2.Response, code: str, status: int) -> dict[s
     assert error["code"] == code
     assert isinstance(error["message"], str) and error["message"]
     return error
+
+
+def vanish_in_the_toctou_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Delete each stem file the instant the handler has finished checking it.
+
+    The handler proves the stem exists and hands the path to the response,
+    which opens it a moment later. Patching the lookup to unlink just after it
+    returns puts the deletion *exactly* in that window on every run — no
+    timing, no sleep — which is how the ``stem_file_missing`` guarantee is
+    tested deterministically.
+    """
+    real_lookup = results_module.stem_source
+
+    def vanishing_lookup(
+        data_dir: Path, job: str, stem: str, available: list[str]
+    ) -> tuple[Path, Any]:
+        path, info = real_lookup(data_dir, job, stem, available)
+        path.unlink()  # the window: checked, then gone before the send
+        return path, info
+
+    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+
+
+async def raw_asgi_messages(
+    app: FastAPI,
+    path: str,
+    *,
+    headers: Sequence[tuple[bytes, bytes]] = (),
+    extensions: dict[str, dict[str, Any]] | None = None,
+) -> list[Message]:
+    """Drive a GET straight at the application and return what it sent.
+
+    Two things ``httpx2.ASGITransport`` cannot express live here. It resolves
+    dot segments client-side (RFC 3986), so a request built through it can
+    never carry ``..`` to the server, while a real ASGI server does not
+    normalize; and it builds a scope with **no** ``extensions`` key, so a
+    server-offered extension such as ``http.response.pathsend`` is only
+    reachable by constructing the scope by hand.
+
+    The messages are returned raw, so a test can assert on a ``pathsend``
+    message that carries no body at all.
+    """
+    messages: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"test"), *headers],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+        "state": {},
+        "extensions": dict(extensions or {}),
+    }
+    await app(scope, receive, send)
+    return messages
+
+
+async def raw_asgi_get(
+    app: FastAPI,
+    path: str,
+    *,
+    headers: Sequence[tuple[bytes, bytes]] = (),
+    extensions: dict[str, dict[str, Any]] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
+    """:func:`raw_asgi_messages`, decoded into status, headers and body."""
+    messages = await raw_asgi_messages(app, path, headers=headers, extensions=extensions)
+
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    response_headers = {
+        key.decode("latin-1").lower(): value.decode("latin-1") for key, value in start["headers"]
+    }
+    body = b"".join(
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
+    )
+    return cast(int, start["status"]), response_headers, body
 
 
 # -- GET /jobs/{id}/result --------------------------------------------------
@@ -760,21 +849,16 @@ async def test_a_stem_deleted_between_check_and_send_returns_404(
     returns puts the deletion *exactly* in the window, every run.
     """
     job_id = await run_to_completion(results_client, recorder, audio_id)
-    real_lookup = results_module.stem_source
-
-    def vanishing_lookup(
-        data_dir: Path, job: str, stem: str, available: list[str]
-    ) -> tuple[Path, Any]:
-        path, info = real_lookup(data_dir, job, stem, available)
-        path.unlink()  # the window: checked, then gone before the send
-        return path, info
-
-    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+    vanish_in_the_toctou_window(monkeypatch)
 
     error = assert_envelope(
         await results_client.get(stem_url(job_id, "vocals")), "stem_file_missing", 404
     )
     assert error["detail"] == {"job_id": job_id, "stem": "vocals"}
+
+
+PATHSEND_SCOPE_EXTENSIONS: dict[str, dict[str, Any]] = {results_module.PATHSEND_EXTENSION: {}}
+RANGE_HEADER = (b"range", b"bytes=0-99")
 
 
 def test_only_body_carrying_requests_pre_open_the_stem() -> None:
@@ -785,13 +869,30 @@ def test_only_body_carrying_requests_pre_open_the_stem() -> None:
     cases would buy nothing and would cost a dispatch into the *shared* default
     ``ThreadPoolExecutor`` — the scarce resource this feature's FFmpeg bound
     exists to protect — on a path the stem player hits once per seek.
+
+    A ``Range`` request is *not* one of those cases, however far the server's
+    extensions reach: ``FileResponse`` passes ``send_pathsend`` to
+    ``_handle_simple`` alone, so the range arms always open the file.
     """
     assert results_module.streams_a_body({"type": "http", "method": "GET"})
     assert results_module.streams_a_body({"type": "http", "method": "GET", "extensions": {}})
     assert not results_module.streams_a_body({"type": "http", "method": "HEAD"})
     assert not results_module.streams_a_body({"type": "http", "method": "head"})
     assert not results_module.streams_a_body(
-        {"type": "http", "method": "GET", "extensions": {"http.response.pathsend": {}}}
+        {"type": "http", "method": "GET", "extensions": PATHSEND_SCOPE_EXTENSIONS}
+    )
+    # Range beats pathsend: the bytes are read, so the pre-open must happen.
+    assert results_module.streams_a_body(
+        {
+            "type": "http",
+            "method": "GET",
+            "extensions": PATHSEND_SCOPE_EXTENSIONS,
+            "headers": [RANGE_HEADER],
+        }
+    )
+    # ... but a HEAD still reads nothing, on every arm of the response.
+    assert not results_module.streams_a_body(
+        {"type": "http", "method": "HEAD", "headers": [RANGE_HEADER]}
     )
 
 
@@ -803,19 +904,73 @@ async def test_a_range_request_still_gets_the_404_guarantee(
 ) -> None:
     """Narrowing the pre-open must not weaken it where a body is streamed."""
     job_id = await run_to_completion(results_client, recorder, audio_id)
-    real_lookup = results_module.stem_source
-
-    def vanishing_lookup(
-        data_dir: Path, job: str, stem: str, available: list[str]
-    ) -> tuple[Path, Any]:
-        path, info = real_lookup(data_dir, job, stem, available)
-        path.unlink()
-        return path, info
-
-    monkeypatch.setattr(results_module, "stem_source", vanishing_lookup)
+    vanish_in_the_toctou_window(monkeypatch)
 
     response = await results_client.get(stem_url(job_id, "vocals"), headers={"Range": "bytes=0-99"})
     assert_envelope(response, "stem_file_missing", 404)
+
+
+async def test_a_range_request_keeps_the_404_guarantee_under_pathsend(
+    results_client: httpx2.AsyncClient,
+    results_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same guarantee on a server that offers ``http.response.pathsend``.
+
+    ``test_a_range_request_still_gets_the_404_guarantee`` cannot reach this:
+    ``httpx2.ASGITransport`` builds a scope with no ``extensions`` key, so the
+    pathsend branch of :func:`~straticate.api.results.streams_a_body` is never
+    taken there and the pre-open happens for the wrong reason. Driving the
+    scope by hand is the only way in — hence ``raw_asgi_get``.
+
+    Without the ``Range`` clause the pre-open is skipped, ``FileResponse``
+    takes ``_handle_single_range`` (which ignores ``send_pathsend`` and opens
+    the file itself), and the vanished stem raises ``FileNotFoundError`` with
+    ``206`` already on the wire: this test then fails with that exception
+    escaping the application rather than with a wrong status code.
+    """
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    vanish_in_the_toctou_window(monkeypatch)
+
+    status, _headers, body = await raw_asgi_get(
+        results_app,
+        stem_url(job_id, "vocals"),
+        headers=[RANGE_HEADER],
+        extensions=PATHSEND_SCOPE_EXTENSIONS,
+    )
+
+    assert status == 404, status
+    error = cast(dict[str, Any], json.loads(body)["error"])
+    assert error["code"] == "stem_file_missing"
+    assert error["detail"] == {"job_id": job_id, "stem": "vocals"}
+
+
+async def test_a_whole_file_request_under_pathsend_serves_the_path(
+    results_client: httpx2.AsyncClient,
+    results_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+    tmp_path: Path,
+) -> None:
+    """The narrowing still holds where it is correct: no ``Range``, no read.
+
+    A full-file response under the extension hands the server a path and sends
+    no body at all, which is exactly the dispatch the pre-open is skipped to
+    avoid. Without this, the fix for the ranged case could be "always
+    pre-open" and nothing would notice.
+    """
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+
+    sent = await raw_asgi_messages(
+        results_app, stem_url(job_id, "vocals"), extensions=PATHSEND_SCOPE_EXTENSIONS
+    )
+
+    kinds = [message["type"] for message in sent]
+    assert kinds == ["http.response.start", "http.response.pathsend"], kinds
+    assert sent[0]["status"] == 200
+    assert sent[1]["path"] == str(stem_path(tmp_path, job_id, "vocals"))
 
 
 # -- path safety ------------------------------------------------------------
@@ -881,48 +1036,6 @@ RAW_TRAVERSAL_PATHS = [
     pytest.param("stems/", id="empty-stem-name"),
     pytest.param("stems/subdir/vocals", id="extra-segment"),
 ]
-
-
-async def raw_asgi_get(app: FastAPI, path: str) -> tuple[int, dict[str, str], bytes]:
-    """Send a GET whose **raw** path reaches the app unnormalized.
-
-    ``httpx2`` resolves dot segments client-side (RFC 3986), so a request built
-    through it can never carry ``..`` to the server. A real ASGI server does
-    not normalize, so these paths are driven straight at the application.
-    """
-    messages: list[Message] = []
-
-    async def receive() -> Message:
-        return {"type": "http.request", "body": b"", "more_body": False}
-
-    async def send(message: Message) -> None:
-        messages.append(message)
-
-    scope: dict[str, Any] = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": "GET",
-        "scheme": "http",
-        "path": path,
-        "raw_path": path.encode(),
-        "query_string": b"",
-        "root_path": "",
-        "headers": [(b"host", b"test")],
-        "client": ("127.0.0.1", 12345),
-        "server": ("test", 80),
-        "state": {},
-    }
-    await app(scope, receive, send)
-
-    start = next(message for message in messages if message["type"] == "http.response.start")
-    headers = {
-        key.decode("latin-1").lower(): value.decode("latin-1") for key, value in start["headers"]
-    }
-    body = b"".join(
-        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
-    )
-    return cast(int, start["status"]), headers, body
 
 
 @pytest.mark.parametrize("raw_path", RAW_TRAVERSAL_PATHS)

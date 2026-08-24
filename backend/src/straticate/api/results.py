@@ -85,25 +85,59 @@ def stem_media_type(path: Path) -> str:
     return STEM_MEDIA_TYPES.get(path.suffix.lower(), DEFAULT_STEM_MEDIA_TYPE)
 
 
+RANGE_HEADER = b"range"
+"""Raw ASGI name of the request header that selects a partial response."""
+
+PATHSEND_EXTENSION = "http.response.pathsend"
+"""ASGI extension by which a server takes a file *path* instead of bytes."""
+
+
+def has_range_header(scope: Scope) -> bool:
+    """Whether this request carries a ``Range`` header.
+
+    Read straight off the raw ASGI header list rather than through
+    :class:`~starlette.datastructures.Headers`, which requires ``headers`` to
+    be present in the scope and rewrites it in place. Names arrive lower-cased
+    per the ASGI spec; the ``lower()`` is free insurance against a hand-built
+    scope that forgets.
+    """
+    return any(name.lower() == RANGE_HEADER for name, _value in scope.get("headers", ()))
+
+
 def streams_a_body(scope: Scope) -> bool:
     """Whether serving this request will actually read the file's bytes.
 
-    Mirrors :class:`~starlette.responses.FileResponse`'s own two shortcuts: a
-    ``HEAD`` gets headers only, and a server advertising the
-    ``http.response.pathsend`` extension is handed the path instead of the
-    contents. In both cases the file is never opened, so pre-opening it would
-    be a worker-thread dispatch bought for nothing.
+    Mirrors :class:`~starlette.responses.FileResponse`'s own two shortcuts,
+    **each with the exact reach it has in Starlette**:
 
-    The ``pathsend`` arm is the one that fires in practice (uvicorn offers the
-    extension on some transports); the ``HEAD`` arm is currently unreachable
-    through the API, since FastAPI registers this route for ``GET`` only and a
-    ``HEAD`` is answered with ``405``. It is checked anyway because it is
-    ``FileResponse``'s contract, not ours, and a route gaining ``HEAD`` should
-    not quietly reintroduce the cost.
+    - a ``HEAD`` gets headers only, on every arm of the response; and
+    - a server advertising the ``http.response.pathsend`` extension is handed
+      the path instead of the contents — but *only on the full-file arm*.
+      ``FileResponse._handle_simple`` is the one method that takes the
+      ``send_pathsend`` flag; ``_handle_single_range`` and
+      ``_handle_multiple_ranges`` call ``anyio.open_file`` unconditionally
+      (starlette 1.6, ``responses.py``).
+
+    So a ranged request reads the file whatever the server offers, and the
+    pre-open it needs is exactly the one this function must not skip: skipping
+    it let a stem that vanished in the TOCTOU window emit ``206`` and then die
+    mid-body, where :class:`StemFileResponse` can only re-raise. ``Range``
+    therefore wins over ``pathsend``.
+
+    Neither shortcut fires on this project's own server: the pinned uvicorn
+    0.52.4 implements no pathsend at all (nothing in the installed package
+    mentions it), and the ``HEAD`` arm is unreachable through the API because
+    FastAPI registers this route for ``GET`` only and answers a ``HEAD`` with
+    ``405``. Both are checked anyway because they are ``FileResponse``'s
+    contract rather than ours — a route gaining ``HEAD``, or a deployment
+    behind a server that does implement the extension, should neither
+    reintroduce the cost nor lose the guarantee.
     """
     if scope.get("method", "GET").upper() == "HEAD":
         return False
-    return "http.response.pathsend" not in scope.get("extensions", {})
+    if has_range_header(scope):
+        return True
+    return PATHSEND_EXTENSION not in scope.get("extensions", {})
 
 
 class StemFileResponse(FileResponse):
@@ -127,8 +161,10 @@ class StemFileResponse(FileResponse):
 
     The pre-open is skipped when the response will not read the file anyway:
     a ``HEAD`` (``FileResponse`` sends headers only) or a server offering the
-    ``http.response.pathsend`` extension (the file is handed to the server by
-    path). Skipping matters because the open is dispatched to a worker thread,
+    ``http.response.pathsend`` extension for a request with no ``Range``
+    (the file is handed to the server by path — a ranged response opens it
+    regardless; see :func:`streams_a_body`). Skipping matters because the open
+    is dispatched to a worker thread,
     and that thread comes from the same shared default ``ThreadPoolExecutor``
     that :mod:`straticate.audio.ffmpeg` identifies as the scarce resource —
     the stem player issues a range request per seek, so this is a hot path.

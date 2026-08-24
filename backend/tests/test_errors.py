@@ -1,10 +1,14 @@
 """Tests for the consistent error envelope."""
 
+import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx2
+import pytest
 from fastapi import FastAPI
+from starlette.testclient import TestClient
+from starlette.types import Message
 
 from straticate.errors import ApplicationError
 
@@ -77,6 +81,107 @@ async def test_unhandled_exception_returns_internal_error(app: FastAPI) -> None:
     assert error["code"] == "internal_error"
     assert "secret traceback detail" not in response.text
     assert "RuntimeError" not in response.text
+
+
+async def test_an_unexpected_route_exception_reaches_the_client(app: FastAPI) -> None:
+    """``raise_app_exceptions=True`` must mean what it says.
+
+    ``ErrorEnvelopeMiddleware`` catches every ``Exception`` to produce the
+    enveloped, CORS-carrying 500 — and if it stopped there, an
+    ``httpx2.ASGITransport`` or a ``TestClient`` built with the default
+    ``raise_app_exceptions=True`` would never see the exception again. A route
+    that started raising ``AttributeError`` would silently return a 500 and
+    every assertion in this suite that does not check ``status_code`` would
+    still pass, which is the quietest possible failure mode.
+
+    So the middleware re-raises after sending, exactly as Starlette's own
+    ``ServerErrorMiddleware`` does.
+    """
+
+    @app.get("/api/v1/crash-loudly")
+    async def crash() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+        raise RuntimeError("the route is broken")
+
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        with pytest.raises(RuntimeError, match="the route is broken"):
+            await client.get("/api/v1/crash-loudly")
+
+
+def test_an_unexpected_route_exception_reaches_the_test_client(app: FastAPI) -> None:
+    """The same, for the other client the suite uses.
+
+    ``test_api_ws.py`` and ``test_api_jobs.py`` drive the application through
+    Starlette's ``TestClient``, whose ``raise_app_exceptions`` also defaults to
+    ``True``; both clients have to keep the guarantee.
+    """
+
+    @app.get("/api/v1/crash-in-testclient")
+    async def crash() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+        raise RuntimeError("the route is broken")
+
+    with TestClient(app) as client, pytest.raises(RuntimeError, match="the route is broken"):
+        client.get("/api/v1/crash-in-testclient")
+
+
+async def test_a_re_raised_500_still_sends_exactly_one_response(app: FastAPI) -> None:
+    """Re-raising must not cost the client its envelope, nor duplicate it.
+
+    The exception travels on to ``ServerErrorMiddleware``, which would answer
+    it too — but the envelope is already on the wire, so its
+    ``response_started`` flag is set and it sends nothing. Driving the raw ASGI
+    application is what makes both halves visible: exactly one
+    ``http.response.start``, carrying the envelope *and* the CORS header, and
+    the original exception still escaping.
+    """
+
+    @app.get("/api/v1/crash-once")
+    async def crash() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+        raise RuntimeError("boom")
+
+    origin = "http://localhost:5173"
+    messages: list[Message] = []
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Message) -> None:
+        messages.append(message)
+
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/v1/crash-once",
+        "raw_path": b"/api/v1/crash-once",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"test"), (b"origin", origin.encode())],
+        "client": ("127.0.0.1", 12345),
+        "server": ("test", 80),
+        "state": {},
+        "extensions": {},
+    }
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await app(scope, receive, send)
+
+    starts = [message for message in messages if message["type"] == "http.response.start"]
+    assert len(starts) == 1, messages
+    assert starts[0]["status"] == 500
+    headers = {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in starts[0]["headers"]
+    }
+    assert headers["access-control-allow-origin"] == origin
+    body = b"".join(
+        message.get("body", b"") for message in messages if message["type"] == "http.response.body"
+    )
+    error = _envelope(cast(dict[str, Any], json.loads(body)))
+    assert error["code"] == "internal_error"
+    assert "boom" not in body.decode()
 
 
 async def test_internal_error_is_readable_cross_origin(app: FastAPI) -> None:

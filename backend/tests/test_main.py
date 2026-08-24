@@ -1,7 +1,9 @@
 """Entry points and application wiring: settings really reach the server."""
 
 import logging
-from collections.abc import Iterator
+import re
+from collections.abc import Generator, Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any, cast
 
 import httpx2
@@ -11,6 +13,9 @@ from straticate import main
 from straticate.config import Settings, get_settings
 from straticate.inference import FakeSeparator, SeparatorRegistry
 from straticate.models import ModelCatalog
+from straticate.schemas import ComputeDevice
+from straticate.system import DeviceDetector
+from straticate.system import devices as devices_module
 
 
 def _no_server(*_args: Any, **_kwargs: Any) -> None:
@@ -43,6 +48,33 @@ def quiet_serve(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
     monkeypatch.setattr(main, "configure_logging", configured.append)
     monkeypatch.setattr(main.uvicorn, "run", _no_server)
     yield configured
+
+
+@contextmanager
+def bare_root_logger() -> Generator[logging.Logger]:
+    """Reproduce the uvicorn situation: a root logger nobody has configured.
+
+    Uvicorn's ``LOGGING_CONFIG`` declares handlers for its own loggers and
+    leaves the root one alone, which is the state the startup-logging tests
+    need. The session's handlers are *detached* rather than removed, so
+    ``logging.basicConfig(force=True)`` — which closes every handler it takes
+    off the root logger — cannot reach pytest's own capture, and everything is
+    put back afterwards.
+
+    A context manager rather than a fixture because pytest attaches its
+    ``caplog`` handler to the root logger for the *call* phase, i.e. after
+    fixture setup has run: emptying the list has to happen inside the test
+    body to have any effect.
+    """
+    root = logging.getLogger()
+    saved_handlers = list(root.handlers)
+    saved_level = root.level
+    root.handlers = []
+    try:
+        yield root
+    finally:
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
 
 
 def test_serve_binds_the_configured_host_and_port(
@@ -208,11 +240,7 @@ async def test_the_uvicorn_entry_path_configures_application_logging() -> None:
     reproduces the uvicorn situation — a bare root logger — and then runs the
     application lifespan.
     """
-    root = logging.getLogger()
-    saved_handlers = list(root.handlers)
-    saved_level = root.level
-    root.handlers = []
-    try:
+    with bare_root_logger() as root:
         app = main.create_app(Settings(log_level="DEBUG"))
         assert not root.handlers, "building the app must still configure nothing"
 
@@ -236,9 +264,159 @@ async def test_the_uvicorn_entry_path_configures_application_logging() -> None:
             assert rendered.endswith("dropping a client"), rendered
             # STRATICATE_LOG_LEVEL=DEBUG has to actually enable DEBUG records.
             assert logging.getLogger("straticate.jobs.hub").isEnabledFor(logging.DEBUG)
-    finally:
-        root.handlers = saved_handlers
-        root.setLevel(saved_level)
+
+
+# -- startup device probing -------------------------------------------------
+
+PROBE_BACKEND = "imaginary"
+PROBE_DEBUG_MESSAGE = "the imaginary runtime is not installed"
+PROBE_FAILURE = "no such backend"
+
+DEVICES_LOGGER = devices_module.__name__
+
+FORMATTED_RECORD = re.compile(
+    r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) "
+    r"(?P<level>[A-Z]+) +(?P<logger>\S+) - (?P<message>.*)$",
+    re.MULTILINE,
+)
+"""Matches one line rendered by :data:`straticate.logging._FORMAT`.
+
+Asserting on the *rendered* line is the point: ``logging.lastResort`` prints a
+bare ``%(message)s``, so a record that reaches it matches nothing here — which
+is exactly the failure this section guards against.
+"""
+
+
+class LoggingProbe:
+    """A device probe that logs where the real startup probes log.
+
+    Two records, mirroring the two the finding is about:
+    ``TorchCudaProbe``'s ``logger.debug("PyTorch is not installed; …")``
+    (dropped entirely by ``lastResort``), and the
+    ``logger.warning(…, exc_info=True)`` that
+    :meth:`~straticate.system.DeviceDetector._probe_safely` emits for a probe
+    that raises — the warning here is genuinely produced by that production
+    code, by raising. Both go to the real
+    :mod:`straticate.system.devices` logger, since where the records *land* is
+    what is under test.
+    """
+
+    backend: str = PROBE_BACKEND
+
+    def detect(self) -> Sequence[ComputeDevice]:
+        logging.getLogger(DEVICES_LOGGER).debug(PROBE_DEBUG_MESSAGE)
+        raise RuntimeError(PROBE_FAILURE)
+
+
+class LoggingDetector(DeviceDetector):
+    """The real detector, pre-loaded with :class:`LoggingProbe`."""
+
+    def __init__(self) -> None:
+        super().__init__(probes=[LoggingProbe()])
+
+
+def use_a_logging_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``create_app``'s own detector the chatty one.
+
+    Patching the class rather than assigning ``app.state.device_detector``
+    afterwards is deliberate: the defect was *when* ``create_app`` probed, so
+    the probe has to be in place before ``create_app`` is called.
+    """
+    monkeypatch.setattr(main, "DeviceDetector", LoggingDetector)
+
+
+def formatted_records(stderr: str) -> list[tuple[str, str, str]]:
+    """Every project-formatted ``(level, logger, message)`` line in ``stderr``."""
+    return [
+        (match["level"], match["logger"], match["message"])
+        for match in FORMATTED_RECORD.finditer(stderr)
+    ]
+
+
+def assert_startup_probe_records(stderr: str) -> None:
+    """Assert both startup device records arrived filtered and formatted."""
+    records = formatted_records(stderr)
+    assert ("DEBUG", DEVICES_LOGGER, PROBE_DEBUG_MESSAGE) in records, stderr
+    assert any(
+        level == "WARNING" and logger == DEVICES_LOGGER and PROBE_BACKEND in message
+        for level, logger, message in records
+    ), stderr
+    # ``exc_info=True`` must reach the handler too, or a failing probe is
+    # reported without saying why.
+    assert f"RuntimeError: {PROBE_FAILURE}" in stderr, stderr
+
+
+async def test_the_uvicorn_entry_path_formats_startup_device_records(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``uvicorn straticate.main:app``: the device probe logs *after* startup.
+
+    ``create_app`` runs at **import** — before ``serve()``'s
+    ``configure_logging`` and before the lifespan's
+    ``ensure_logging_configured`` — so a probe run from there wrote to
+    ``logging.lastResort``: the debug line dropped even under
+    ``STRATICATE_LOG_LEVEL=DEBUG``, the warning printed bare. Probing moved
+    into the lifespan, which is the earliest point that runs once per *running*
+    application with logging already configured; ``create_app`` gained no
+    global logging call, which is what 029 removed.
+
+    The first assertion is the one that fails against the old code: building
+    the application probed, and the warning landed on a bare stderr.
+    """
+    use_a_logging_probe(monkeypatch)
+
+    with bare_root_logger() as root:
+        app = main.create_app(Settings(log_level="DEBUG"))
+        assert capsys.readouterr().err == "", "building the app must not probe, so must not log"
+        assert not root.handlers, "building the app must still configure nothing"
+
+        async with app.router.lifespan_context(app):
+            pass
+
+        assert_startup_probe_records(capsys.readouterr().err)
+
+
+async def test_the_serve_entry_path_formats_startup_device_records(
+    monkeypatch: pytest.MonkeyPatch,
+    fresh_settings: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same guarantee for ``python -m straticate`` (i.e. :func:`serve`).
+
+    Deliberately **not** using ``quiet_serve``: the real ``configure_logging``
+    is what is under test. ``bare_root_logger`` contains it — the session's own
+    handlers are detached before ``basicConfig(force=True)`` can close them,
+    and reattached afterwards.
+
+    ``serve()`` configures logging and hands the module-level ``app`` to
+    ``uvicorn.run``, which runs its lifespan; that last step is what the stub
+    stands in for.
+    """
+    monkeypatch.setenv("STRATICATE_LOG_LEVEL", "DEBUG")
+    use_a_logging_probe(monkeypatch)
+
+    targets: list[Any] = []
+
+    def capture(target: Any, **_kwargs: Any) -> None:
+        targets.append(target)
+
+    monkeypatch.setattr(main.uvicorn, "run", capture)
+
+    with bare_root_logger():
+        # The module-level ``app`` is built at import, with logging as bare as
+        # it is here; ``serve()`` then configures logging and hands it over.
+        served = main.create_app()
+        monkeypatch.setattr(main, "app", served)
+        assert capsys.readouterr().err == "", "building the app must not probe, so must not log"
+
+        main.serve()
+        assert targets == [served]
+
+        async with served.router.lifespan_context(served):
+            pass
+
+        assert_startup_probe_records(capsys.readouterr().err)
 
 
 async def test_startup_never_overrides_an_existing_logging_configuration(
