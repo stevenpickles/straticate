@@ -609,6 +609,14 @@ export interface components {
          *     ``architecture`` is an open set (e.g. ``mel_band_roformer``, ``mdx``,
          *     ``mdxc``, ``demucs``, ``fake``); application code never branches on it
          *     outside the inference package.
+         *
+         *     ``stems`` carries the constraints the separation engine has always
+         *     enforced: each name matches
+         *     :data:`~straticate.schemas.stems.STEM_NAME_REGEX`, and the list holds no
+         *     duplicates. They live here so a malformed catalog fails **at load time**
+         *     (feature 010's stated principle) instead of loading cleanly, serving
+         *     ``GET /models`` and ``GET /separation-modes``, and then raising an
+         *     unhandled ``ValueError`` on the first job created for that mode.
          */
         Model: {
             /**
@@ -640,7 +648,7 @@ export interface components {
             quality_tier?: components["schemas"]["QualityTier"] | null;
             /**
              * Stems
-             * @description Stem names this model produces.
+             * @description Stem names this model produces; unique, in output order.
              */
             stems: string[];
             /**
@@ -803,6 +811,12 @@ export interface components {
         /**
          * Stem
          * @description One separated output stem of a completed job.
+         *
+         *     ``name`` is constrained to :data:`~straticate.schemas.stems.STEM_NAME_REGEX`
+         *     because it is not merely a label: it is the path segment
+         *     ``GET /jobs/{job_id}/stems/{stem_name}`` accepts and the file name on disk.
+         *     Unconstrained, a result could advertise a stem the stem route would then
+         *     refuse — a 404 whose ``detail`` listed the very name it denied.
          */
         Stem: {
             /**
