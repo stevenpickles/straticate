@@ -99,7 +99,7 @@ features can hold disjoint file ownership rather than by feature number:
 | 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
 | 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
 | 020 | Telemetry panel UI (model/GPU/processing)    | PLANNED | 016        | | |
-| 021 | Result management + stem serving             | PLANNED | 014, 015   | | |
+| 021 | Result management + stem serving             | PR OPEN | 014, 015   | `021-result-serving` | #20 |
 | 022 | Stem export (WAV24/float32/FLAC)             | PLANNED | 021        | | |
 | 023 | Stem player UI (sync playback, solo, mute)   | PLANNED | 017, 021*  | | |
 | 024 | Export UI                                    | PLANNED | 022*, 023  | | |
