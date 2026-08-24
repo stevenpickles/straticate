@@ -39,41 +39,52 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
 ## Current state (2026-08-24)
 
-Phases 0–5 are merged into `dev`: features 001–010, 012–016 and 018.
-**296 backend tests and 186 frontend tests**, all CI-enforced on every PR.
+Phases 0–6 (partly) are merged into `dev`: features 001–021 except 022–024.
+**381 backend tests and 319 frontend tests**, all CI-enforced on every PR.
 
-**The two halves are joined.** Feature 015 landed the job REST endpoints, so
-the whole backend path works end to end and was verified against a real server
-(not just the ASGI test transport): upload → `POST /jobs` (201, returns
-immediately) → FIFO queue → `FakeSeparator` → real WebSocket events
-(`job_created → job_started → job_stage_changed → job_progress → job_completed`)
-→ four playable stems on disk. Cancelling mid-run returns while the job is still
-`separating`, emits `job_cancelled` with `stage_at_cancellation`, is idempotent,
-and leaves no partial stem behind.
+**The application works end to end in a browser.** Verified manually on a
+GPU-free machine against a real backend and Vite dev server, not just the test
+harness: a 3-minute MP3 was dropped in, ffprobe metadata rendered (with the
+`bit_depth` row correctly absent for a lossy source), the four-stem mode was
+chosen from catalog-derived options, and the job ran to `completed` at **13.7×
+real time** with live chunk-grained progress and a populated telemetry panel —
+model, device and processing, including real-time factor. A second 10-minute
+job was cancelled mid-run: the UI settled on `cancelled` reporting the stage,
+and **no partial stem was left on disk**. `GET /jobs/{id}/stems/{stem}` serves
+`206 Partial Content` with `accept-ranges: bytes`.
+
+The device shown is the fake separator's own honestly-labelled
+`Straticate Fake Accelerator` / `backend: "fake"` / `fake:0`. That is
+deliberate: feature 019 publishes the separator's `DeviceStats` verbatim
+(feature 014's design) rather than deriving GPU identity from the compute
+device, which is what lets the whole telemetry path be demonstrated on a
+machine with no GPU. This **supersedes the telemetry sketch in
+`docs/features/018-device-detection.md`**, which predates 014 — see
+`docs/features/019-telemetry-sampler.md`.
 
 Working today:
 
-- **Backend** — FastAPI app with the shared contract layer (Pydantic → OpenAPI →
-  generated TypeScript), audio upload/probe/delete, the model catalog serving
-  capability-derived separation modes, compute-device detection (CUDA via an
-  *optional* torch probe, CPU fallback; no torch dependency yet), the
+- **Backend** — the shared contract layer (Pydantic → OpenAPI → generated
+  TypeScript), audio upload/probe/delete, the model catalog serving
+  capability-derived separation modes, compute-device detection, the
   asynchronous job manager, the WebSocket event hub, the `Separator`
-  abstraction with a working `FakeSeparator`, and the job REST resource with
-  the architecture-keyed `SeparatorRegistry`.
-- **Frontend** — app shell, drag-drop/file-picker upload with progress, the
-  audio metadata panel, and the typed job REST + WebSocket clients with
-  reconnect. **No UI yet starts a job** — that is 011.
+  abstraction with `FakeSeparator`, the job REST resource with the
+  architecture-keyed `SeparatorRegistry`, the runtime telemetry sampler, and
+  result + stem serving with byte-range support.
+- **Frontend** — app shell, drag-drop upload, metadata panel, catalog-driven
+  mode/quality selection that starts jobs, live progress with cancel and
+  terminal-state handling, the session-wide job event socket with REST resync
+  on reconnect, and the runtime telemetry panel.
 
-**Next up.** The remaining M1 work fans out in three waves, ordered by which
-features can hold disjoint file ownership rather than by feature number:
+**Remaining for M1 — features 022, 023, 024.** Stem export (022) is backend and
+independent; the stem player (023) and export UI (024) complete the loop.
+`023` and `022` may run in parallel; `024` follows both. Nothing else blocks
+M1: every dependency of 022–024 is merged.
 
-- **Wave A** — **011** (mode/quality selection UI + the "separate" action),
-  **019** (telemetry sampler), **021** (result serving + stem streaming).
-- **Wave B** — **017** (progress UI + cancel), **020** (telemetry panel),
-  **022** (stem export). 017 and 020 need the phase scaffolding and the
-  per-component CSS convention that 011 introduces, which is why they follow it
-  rather than running beside it (matching the `011 → 017` edge in the graph).
-- **Wave C** — **023** (stem player) and **024** (export UI) → milestone **M1**.
+Deferred review findings from PRs #5, #8, #17 and #20 are tracked as feature
+**029**; two of them (separator construction on the event loop, and
+`Model.capabilities` never being consulted) are recorded there as work feature
+**026** must carry out.
 
 ## Feature ledger
 
@@ -89,17 +100,17 @@ features can hold disjoint file ownership rather than by feature number:
 | 008 | Drag-drop + file picker + upload state UI    | MERGED  | 003, 005   | `008-drag-drop-ui` | #7 |
 | 009 | Metadata display UI                          | MERGED  | 008        | `009-metadata-display` | #10 |
 | 010 | Model catalog + capabilities backend         | MERGED  | 005        | `010-model-catalog` | #11 |
-| 011 | Separation mode + quality selection UI       | PR OPEN | 009, 010*  | `011-mode-selection-ui` | #19 |
+| 011 | Separation mode + quality selection UI       | MERGED  | 009, 010*, 015, 016 | `011-mode-selection-ui` | #19 |
 | 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |
 | 013 | WebSocket event hub + typed events           | MERGED  | 012        | `013-websocket-hub` | #13 |
 | 014 | Separator interface + FakeSeparator          | MERGED  | 012        | `014-fake-separator` | #15 |
 | 015 | Job REST endpoints (create/get/cancel/list)  | MERGED  | 012, 014   | `015-job-endpoints` | #17 |
 | 016 | Frontend job + WebSocket clients             | MERGED  | 003, 005*  | `016-job-ws-clients` | #14 |
-| 017 | Progress UI + cancel + error handling        | PR OPEN | 011, 015, 016 | `017-progress-cancel-ui` | #23 |
+| 017 | Progress UI + cancel + error handling        | MERGED  | 011, 015, 016 | `017-progress-cancel-ui` | #23 |
 | 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
-| 019 | Runtime telemetry sampler + metrics events   | PR OPEN | 013, 018   | `019-telemetry-sampler` | #21 |
-| 020 | Telemetry panel UI (model/GPU/processing)    | PR OPEN | 011, 016, 019* | `020-telemetry-panel` | #22 |
-| 021 | Result management + stem serving             | PR OPEN | 014, 015   | `021-result-serving` | #20 |
+| 019 | Runtime telemetry sampler + metrics events   | MERGED  | 013, 018   | `019-telemetry-sampler` | #21 |
+| 020 | Telemetry panel UI (model/GPU/processing)    | MERGED  | 011, 016, 019* | `020-telemetry-panel` | #22 |
+| 021 | Result management + stem serving             | MERGED  | 014, 015   | `021-result-serving` | #20 |
 | 022 | Stem export (WAV24/float32/FLAC)             | PLANNED | 021        | | |
 | 023 | Stem player UI (sync playback, solo, mute)   | PLANNED | 017, 021*  | | |
 | 024 | Export UI                                    | PLANNED | 022*, 023  | | |

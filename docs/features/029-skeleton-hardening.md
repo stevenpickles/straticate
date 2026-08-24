@@ -81,6 +81,34 @@ where they stop being theoretical:
   yet; today both fake models declare `cuda` and `cpu`, so the gap is
   unreachable. 026 introduces the first model for which it is not.
 
+### Deferred from PR #20 (feature 021, result + stem serving)
+
+- **`Stem.name` is unconstrained, so `/result` can advertise a stem
+  `/stems/{name}` denies.** `schemas.models`-side: `Stem.name`
+  (`backend/src/straticate/schemas/jobs.py`) is a plain `str`, while
+  `SeparatorInfo` validates its stem names against
+  `^[a-z][a-z0-9_]*$`. A separator returning `"Vocals"` or `"drums-2"` would
+  have it listed in the result, pass the membership check, then fail
+  `stem_path()` and produce a self-contradictory 404 whose `detail` lists the
+  very stem it says does not exist. **This is the same root cause as the PR #17
+  finding above** — fixing stem-name validation once at the schema boundary
+  resolves both.
+- **TOCTOU between `path.is_file()` and `FileResponse`'s own `os.stat`.**
+  Starlette re-stats the file and raises `RuntimeError` on `FileNotFoundError`,
+  surfacing as a 500 where the module promises `stem_file_missing` (404). The
+  window is real precisely because the module documents that a job directory
+  "can be removed underneath a live job". Pass the single `os.stat` result
+  through as `stat_result=`, and/or catch `OSError`/`RuntimeError` around the
+  send.
+- **CORS exposes no custom response headers.** `CORSMiddleware` is configured
+  with explicit origins but no `expose_headers`, so `Content-Range`,
+  `Accept-Ranges` and `ETag` — which the REST contract now documents as part of
+  the stem response — are invisible to cross-origin JavaScript. Inert today
+  because `frontend/vite.config.ts` proxies `/api` (the browser sees
+  same-origin) and `<audio src>` handles ranges below the JS layer, but feature
+  023's Web Audio path would hit it the moment it talked to `:8000` directly.
+  Note this alongside the existing CORS item above.
+
 ## Out of scope
 
 New endpoints or schema changes.
