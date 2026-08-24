@@ -41,6 +41,7 @@ anything already off the loop) and is documented as blocking.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
@@ -243,13 +244,23 @@ class SeparatorRegistry:
             builders through this argument.
     """
 
-    __slots__ = ("_builders", "_instances", "_locks")
+    __slots__ = ("_builders", "_instances", "_locks", "_registry_lock")
 
     def __init__(self, builders: Mapping[str, SeparatorBuilder] | None = None) -> None:
         source = default_separator_builders() if builders is None else builders
         self._builders: dict[str, SeparatorBuilder] = dict(source)
         self._instances: dict[str, Separator] = {}
-        self._locks: dict[str, asyncio.Lock] = {}
+        # ``threading`` locks rather than ``asyncio`` ones, for two reasons.
+        # An ``asyncio.Lock`` binds to whichever loop first awaits it, and a
+        # registry outlives any one loop — an application object driven by an
+        # async client and then by a synchronous ``TestClient``, or two
+        # ``asyncio.run`` calls, would meet ``RuntimeError: ... is bound to a
+        # different event loop`` on the next cache miss instead of building.
+        # And the build itself already runs in a worker thread, so a thread
+        # lock is what actually guards it; nothing here is ever held across an
+        # ``await``.
+        self._locks: dict[str, threading.Lock] = {}
+        self._registry_lock = threading.Lock()
 
     @property
     def architectures(self) -> frozenset[str]:
@@ -281,9 +292,7 @@ class SeparatorRegistry:
         cached = self._instances.get(model.id)
         if cached is not None:
             return cached
-        separator = self._build(model)
-        self._instances[model.id] = separator
-        return separator
+        return self._build_once(model)
 
     async def aget(self, model: Model) -> Separator:
         """Return the separator for ``model``, building it **off the event loop**.
@@ -294,11 +303,9 @@ class SeparatorRegistry:
         loop keeps serving other requests, dispatching job events and pushing
         WebSocket frames while several hundred megabytes of weights load.
 
-        The lock is per model ID rather than global: two jobs for *different*
-        models may load in parallel, while two submissions racing for the *same*
-        model load it once and share the instance — which matters, because a
-        second copy of a 228-million-parameter network is not a wasted
-        millisecond but a wasted gigabyte.
+        The lock is a **thread** lock taken inside that worker (see
+        :meth:`_lock_for`), not an ``asyncio`` one: nothing is held across an
+        ``await``, and a registry outlives any single event loop.
 
         Raises:
             ApplicationError: As :meth:`get`.
@@ -306,14 +313,39 @@ class SeparatorRegistry:
         cached = self._instances.get(model.id)
         if cached is not None:
             return cached
-        lock = self._locks.setdefault(model.id, asyncio.Lock())
-        async with lock:
+        return await asyncio.to_thread(self._build_once, model)
+
+    def _build_once(self, model: Model) -> Separator:
+        """Build and cache ``model``'s separator, at most once, under its lock.
+
+        Runs in whichever thread called it — the worker thread for
+        :meth:`aget`, the caller's own for :meth:`get`. Everything that touches
+        the instance cache happens here, so both accessors share one definition
+        of "build once".
+        """
+        with self._lock_for(model.id):
             cached = self._instances.get(model.id)
             if cached is not None:
                 return cached
-            separator = await asyncio.to_thread(self._build, model)
+            separator = self._build(model)
             self._instances[model.id] = separator
             return separator
+
+    def _lock_for(self, model_id: str) -> threading.Lock:
+        """The lock guarding one model's construction, created on first need.
+
+        Per model ID rather than global, so two jobs for *different* models may
+        load in parallel while two racing submissions for the *same* model load
+        it once — which for a 228-million-parameter network is a wasted gigabyte
+        rather than a wasted millisecond. The registry-wide lock exists only to
+        make this mapping thread-safe, and is never held while a build runs.
+        """
+        with self._registry_lock:
+            lock = self._locks.get(model_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[model_id] = lock
+            return lock
 
     def _build(self, model: Model) -> Separator:
         """Run the builder registered for ``model``'s architecture."""
