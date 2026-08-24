@@ -25,6 +25,20 @@ cd backend
 uv run uvicorn straticate.main:app --reload --port 8000
 ```
 
+Or run it from its own settings, with no uvicorn flags to keep in sync:
+
+```bash
+cd backend
+uv run python -m straticate                       # 127.0.0.1:8000
+STRATICATE_PORT=9000 uv run python -m straticate  # 127.0.0.1:9000
+```
+
+The two differ only in who owns the bind address and the log configuration.
+`uvicorn straticate.main:app` takes both from its command line (and is what
+`--reload` needs); `python -m straticate` takes `STRATICATE_HOST`,
+`STRATICATE_PORT` and `STRATICATE_LOG_LEVEL` from
+`backend/src/straticate/config.py`, where every setting is documented.
+
 Quality checks (all must pass before a PR):
 
 ```bash

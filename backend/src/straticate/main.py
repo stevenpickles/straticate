@@ -1,13 +1,24 @@
-"""Application factory and ASGI entry point.
+"""Application factory and ASGI entry points.
 
-Run the development server with::
+Two ways in, and they differ in exactly one respect — who owns logging:
 
-    uv run uvicorn straticate.main:app --port 8000
+- ``uv run uvicorn straticate.main:app --reload --port 8000`` (development)
+  serves the module-level :data:`app`. Uvicorn owns the log configuration and
+  the bind address; ``Settings.host``/``Settings.port`` are not consulted,
+  because the flags on the command line are.
+- ``uv run python -m straticate`` (or :func:`serve`) reads ``host``, ``port``
+  and ``log_level`` from :class:`~straticate.config.Settings`, so
+  ``STRATICATE_PORT=9000 uv run python -m straticate`` really does what the
+  settings docstring promises.
+
+Neither path changes what the application *is*: :func:`create_app` builds the
+same object either way, and building it has no process-global side effects.
 """
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -122,7 +133,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -141,3 +152,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 app = create_app()
+
+
+def serve() -> None:
+    """Run the application with uvicorn, bound per :class:`Settings`.
+
+    This is what makes ``STRATICATE_HOST`` and ``STRATICATE_PORT`` real: the
+    settings are read here and handed to uvicorn, so
+    ``STRATICATE_PORT=9000 uv run python -m straticate`` listens on 9000.
+
+    The already-built module-level :data:`app` is passed as an object rather
+    than as the ``"straticate.main:app"`` import string: the string form makes
+    uvicorn re-import this module in the worker, which would build a *second*
+    application (a second model catalog load, a second device probe) and
+    discard the first. Passing the object also means ``--reload``-style
+    supervision is deliberately not offered here; development reload is
+    uvicorn's own command line (see DEVELOPMENT.md).
+    """
+    settings = get_settings()
+    uvicorn.run(app, host=settings.host, port=settings.port)
