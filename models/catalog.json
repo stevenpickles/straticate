@@ -28,6 +28,62 @@
       "sample_rate": 44100,
       "requirements": { "recommended_vram_mb": 0 },
       "capabilities": { "cuda": true, "cpu": true }
+    },
+    {
+      "schema_version": 1,
+      "id": "vocals-hq-001",
+      "display_name": "Vocals — High Quality",
+      "architecture": "mel_band_roformer",
+      "version": "kim-vocal-2",
+      "separation_mode": "vocals",
+      "quality_tier": "high_quality",
+      "stems": ["vocals", "instrumental"],
+      "sample_rate": 44100,
+      "requirements": { "recommended_vram_mb": 8192, "minimum_ram_mb": 8192 },
+      "capabilities": { "cuda": true, "cpu": true },
+      "artifact": {
+        "download_url": "https://huggingface.co/KimberleyJSN/melbandroformer/resolve/94a0e5de2622a4160198b158e6f8141296da887e/MelBandRoformer.ckpt",
+        "size_bytes": 913106900,
+        "sha256": "87201f4d31afb5bc79993230fc49446918425574db48c01c405e44f365c7559e"
+      },
+      "licensing": {
+        "code_license": "MIT",
+        "weights_license": "MIT",
+        "redistribution_permitted": true,
+        "commercial_use_permitted": true,
+        "attribution": "Weights: Kim Vocal 2 (Mel-Band RoFormer) by Kimberley Jensen — https://huggingface.co/KimberleyJSN/melbandroformer. Architecture: vendored from openmirlab/melband-roformer-infer, which adapts lucidrains/BS-RoFormer."
+      },
+      "default_inference_parameters": {
+        "model": {
+          "dim": 384,
+          "depth": 6,
+          "stereo": true,
+          "num_stems": 1,
+          "time_transformer_depth": 1,
+          "freq_transformer_depth": 1,
+          "num_bands": 60,
+          "dim_head": 64,
+          "heads": 8,
+          "attn_dropout": 0,
+          "ff_dropout": 0,
+          "flash_attn": true,
+          "dim_freqs_in": 1025,
+          "sample_rate": 44100,
+          "stft_n_fft": 2048,
+          "stft_hop_length": 441,
+          "stft_win_length": 2048,
+          "stft_normalized": false,
+          "mask_estimator_depth": 2,
+          "multi_stft_resolution_loss_weight": 1.0,
+          "multi_stft_resolutions_window_sizes": [4096, 2048, 1024, 512, 256],
+          "multi_stft_hop_size": 147,
+          "multi_stft_normalized": false
+        },
+        "inference": {
+          "chunk_size": 352800,
+          "num_overlap": 2
+        }
+      }
     }
   ]
 }

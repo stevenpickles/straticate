@@ -25,12 +25,26 @@ for a real backend (it loads weights), the job manager runs one job at a time
 (ARCHITECTURE.md §6), and a separator's own contract is one separation at a
 time (feature 014) — so a shared, lazily created instance per model is exactly
 right.
+
+**Building one must not happen on the event loop.** For the fake engine a cache
+miss costs microseconds; for a real backend it is hundreds of megabytes read off
+disk and a 228-million-parameter network assembled, and doing that inside an
+``async def`` handler would stall the job worker, the event dispatcher, every
+other HTTP request and all WebSocket delivery for the duration. Hence
+:meth:`SeparatorRegistry.aget` — the accessor request handlers use — which
+offloads the build to a worker thread and serializes concurrent misses for the
+same model behind one lock, so two simultaneous job submissions load the weights
+once. :meth:`SeparatorRegistry.get` remains for synchronous callers (tests, and
+anything already off the loop) and is documented as blocking.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
 from straticate.errors import ApplicationError
@@ -45,6 +59,12 @@ from straticate.inference.fake import (
     FakeDeviceProfile,
     FakeSeparator,
 )
+from straticate.inference.roformer import (
+    ROFORMER_ARCHITECTURE,
+    RoFormerParameters,
+    RoFormerSeparator,
+)
+from straticate.models.layout import weights_path
 from straticate.schemas.models import Model
 
 SeparatorBuilder = Callable[[Model], Separator]
@@ -111,24 +131,106 @@ def fake_separator_builder(
     return build
 
 
+InferenceParameterSource = Callable[[str], Mapping[str, Any] | None]
+"""Resolves a model ID to its manifest's ``default_inference_parameters``.
+
+A deliberately narrow seam. A real backend needs the checkpoint's own
+hyperparameters, which ARCHITECTURE.md §9 keeps in the catalog *as data* and
+``models/catalog.py`` keeps off the public :class:`~straticate.schemas.Model` —
+so the builder needs a way back to the catalog entry. Passing a one-argument
+lookup rather than the whole :class:`~straticate.models.ModelCatalog` keeps this
+module from importing the catalog service at all, and lets a test supply a dict.
+"""
+
+
+def roformer_separator_builder(
+    *,
+    models_dir: Path | None,
+    inference_parameters: InferenceParameterSource | None = None,
+    ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
+) -> SeparatorBuilder:
+    """Build the :data:`SeparatorBuilder` for the Mel-Band RoFormer architecture.
+
+    Every catalog model whose ``architecture`` is
+    :data:`~straticate.inference.roformer.ROFORMER_ARCHITECTURE` is served by a
+    :class:`~straticate.inference.roformer.RoFormerSeparator` configured from the
+    catalog entry — its descriptor from the public
+    :class:`~straticate.schemas.Model`, its hyperparameters and chunking from the
+    entry's ``default_inference_parameters``. **Adding a second RoFormer
+    checkpoint is therefore a pure data edit.**
+
+    Weights are located, never fetched: ``{models_dir}/weights/{model_id}/…``,
+    exactly where feature 025's installer publishes them after verifying their
+    SHA-256. A model whose weights are absent fails with
+    ``model_weights_missing`` (409) at construction — which, because
+    :meth:`SeparatorRegistry.aget` is awaited inside ``POST /jobs``, is the
+    status that request answers with.
+
+    Args:
+        models_dir: ``Settings.models_dir``. ``None`` means this process was not
+            told where weights live, which is a wiring error and is reported as
+            ``separator_unavailable`` rather than guessed at.
+        inference_parameters: Lookup for the model's
+            ``default_inference_parameters``.
+        ffmpeg_timeout_seconds: Bound for the separator's decode subprocesses.
+    """
+
+    def build(model: Model) -> Separator:
+        if models_dir is None or inference_parameters is None:
+            raise ApplicationError(
+                "separator_unavailable",
+                (
+                    f"Model {model.id!r} needs installed weights, but this application "
+                    f"was built without a models directory."
+                ),
+                status_code=501,
+                detail={"model_id": model.id, "architecture": model.architecture},
+            )
+        return RoFormerSeparator(
+            separator_info_from_model(model),
+            weights_file=weights_path(models_dir, model.id),
+            parameters=RoFormerParameters.from_catalog(
+                inference_parameters(model.id), model_id=model.id
+            ),
+            ffmpeg_timeout_seconds=ffmpeg_timeout_seconds,
+        )
+
+    return build
+
+
 def default_separator_builders(
-    *, ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS
+    *,
+    ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
+    models_dir: Path | None = None,
+    inference_parameters: InferenceParameterSource | None = None,
 ) -> Mapping[str, SeparatorBuilder]:
     """The builders a :class:`SeparatorRegistry` starts with.
 
-    Today: the fake engine only. Feature 026 adds its own architecture here (or
-    registers it with :meth:`SeparatorRegistry.register`); nothing outside this
-    module learns the architecture's name.
+    Two architectures: the fake engine (feature 014) and Mel-Band RoFormer
+    (feature 026). Both are always registered, so
+    :attr:`SeparatorRegistry.architectures` is an honest statement of what this
+    build can run, and a catalog naming anything else still gets
+    ``separator_unavailable`` (501).
 
-    ``ffmpeg_timeout_seconds`` is the one application setting a separator needs:
-    :func:`straticate.main.create_app` passes
-    ``Settings.ffmpeg_timeout_seconds`` here so an application built with
-    explicit settings really governs its subprocesses. It is a *builder*
-    argument rather than a registry one so the registry keeps knowing nothing
-    about how any particular engine decodes audio.
+    ``ffmpeg_timeout_seconds``, ``models_dir`` and ``inference_parameters`` are
+    the application facts a separator needs. :func:`straticate.main.create_app`
+    passes all three, so an application built with explicit settings really
+    governs its subprocesses and really reads weights from *its* models
+    directory. They are *builder* arguments rather than registry ones so the
+    registry keeps knowing nothing about how any particular engine decodes audio
+    or finds its weights.
     """
     return MappingProxyType(
-        {FAKE_ARCHITECTURE: fake_separator_builder(ffmpeg_timeout_seconds=ffmpeg_timeout_seconds)}
+        {
+            FAKE_ARCHITECTURE: fake_separator_builder(
+                ffmpeg_timeout_seconds=ffmpeg_timeout_seconds
+            ),
+            ROFORMER_ARCHITECTURE: roformer_separator_builder(
+                models_dir=models_dir,
+                inference_parameters=inference_parameters,
+                ffmpeg_timeout_seconds=ffmpeg_timeout_seconds,
+            ),
+        }
     )
 
 
@@ -141,12 +243,13 @@ class SeparatorRegistry:
             builders through this argument.
     """
 
-    __slots__ = ("_builders", "_instances")
+    __slots__ = ("_builders", "_instances", "_locks")
 
     def __init__(self, builders: Mapping[str, SeparatorBuilder] | None = None) -> None:
         source = default_separator_builders() if builders is None else builders
         self._builders: dict[str, SeparatorBuilder] = dict(source)
         self._instances: dict[str, Separator] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
 
     @property
     def architectures(self) -> frozenset[str]:
@@ -164,14 +267,56 @@ class SeparatorRegistry:
     def get(self, model: Model) -> Separator:
         """Return the separator for ``model``, creating it on first use.
 
+        **Blocking.** A cache miss runs the architecture's builder inline, which
+        for a real backend reads weights off disk. Never call this from a
+        coroutine running on the application's event loop — use :meth:`aget`.
+
         Raises:
             ApplicationError: ``separator_unavailable`` (501) when no builder
                 is registered for the model's architecture — the model is
                 catalogued but this build has no implementation able to run it.
+                A builder may raise its own ``ApplicationError`` (for instance
+                ``model_weights_missing``), which propagates unchanged.
         """
         cached = self._instances.get(model.id)
         if cached is not None:
             return cached
+        separator = self._build(model)
+        self._instances[model.id] = separator
+        return separator
+
+    async def aget(self, model: Model) -> Separator:
+        """Return the separator for ``model``, building it **off the event loop**.
+
+        This is what request handlers call. A cache hit returns without ever
+        suspending; a miss takes a per-model lock, re-checks the cache, and runs
+        the builder in a worker thread through :func:`asyncio.to_thread`, so the
+        loop keeps serving other requests, dispatching job events and pushing
+        WebSocket frames while several hundred megabytes of weights load.
+
+        The lock is per model ID rather than global: two jobs for *different*
+        models may load in parallel, while two submissions racing for the *same*
+        model load it once and share the instance — which matters, because a
+        second copy of a 228-million-parameter network is not a wasted
+        millisecond but a wasted gigabyte.
+
+        Raises:
+            ApplicationError: As :meth:`get`.
+        """
+        cached = self._instances.get(model.id)
+        if cached is not None:
+            return cached
+        lock = self._locks.setdefault(model.id, asyncio.Lock())
+        async with lock:
+            cached = self._instances.get(model.id)
+            if cached is not None:
+                return cached
+            separator = await asyncio.to_thread(self._build, model)
+            self._instances[model.id] = separator
+            return separator
+
+    def _build(self, model: Model) -> Separator:
+        """Run the builder registered for ``model``'s architecture."""
         builder = self._builders.get(model.architecture)
         if builder is None:
             raise ApplicationError(
@@ -181,15 +326,15 @@ class SeparatorRegistry:
                 status_code=501,
                 detail={"model_id": model.id, "architecture": model.architecture},
             )
-        separator = builder(model)
-        self._instances[model.id] = separator
-        return separator
+        return builder(model)
 
 
 __all__ = [
+    "InferenceParameterSource",
     "SeparatorBuilder",
     "SeparatorRegistry",
     "default_separator_builders",
     "fake_separator_builder",
+    "roformer_separator_builder",
     "separator_info_from_model",
 ]
