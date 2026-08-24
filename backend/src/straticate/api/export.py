@@ -24,11 +24,30 @@ Four things this module is careful about:
   immutable, so the built file is cached under
   ``{data_dir}/jobs/{job_id}/exports/`` under a name derived from the format
   and the sorted stem list, and a repeated identical download is served
-  straight from disk.
+  straight from disk. Concurrent identical requests share **one** build: the
+  cache check is a fast path, and the real guard is a per-artifact
+  :class:`BuildLocks` entry that the second request waits on before
+  re-checking. Without it, N simultaneous downloads would each transcode every
+  stem, N times the CPU, competing with a running separation.
 - **A reader never sees a partial artifact.** Every build writes to a unique
   ``.part`` file and is renamed into place with :func:`os.replace`, the same
   discipline :class:`~straticate.inference.FakeSeparator` uses for stems, so a
   concurrent or failed export can never serve a truncated zip.
+- **A cancelled request cleans up after itself.** ``asyncio.to_thread`` is not
+  cancellable: if the handler unwound while a worker thread was still running
+  FFmpeg, the thread would keep writing into a staging directory that was
+  being torn down, and the ``.part`` file would be orphaned forever (nothing
+  has a retention policy). Builds are therefore **shielded** — a client that
+  disconnects mid-download leaves the build to finish and publish its
+  artifact, and the ``.part`` is unlinked in a ``finally`` that runs only
+  after the worker thread has returned.
+
+**Errors say what failed, not where.** FFmpeg's stderr and filesystem error
+strings carry absolute server paths, so they are *logged* and the client is
+told only a short classification (:data:`TRANSCODE_FAILED`,
+:data:`FILESYSTEM_ERROR`) in ``detail.reason`` — the same discipline
+:func:`straticate.errors._handle_unexpected_error` applies to unhandled
+exceptions.
 
 The lookups (``job_not_found`` / ``result_not_available`` / ``stem_not_found``
 / ``stem_file_missing``) are :mod:`straticate.api.job_outputs`'s, shared with
@@ -45,18 +64,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import subprocess
 import zipfile
+from collections.abc import AsyncGenerator, Coroutine
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 from pydantic import AfterValidator, AwareDatetime, BaseModel, Field
 
@@ -67,10 +89,18 @@ from straticate.errors import ApplicationError
 from straticate.inference import job_output_dir
 from straticate.schemas import SeparationResult
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/jobs", tags=["export"])
 
 EXPORTS_DIRECTORY = "exports"
 """Name of the export-artifact directory under a job's output directory."""
+
+TRANSCODE_FAILED = "transcode_failed"
+"""``detail.reason``: FFmpeg exited non-zero encoding one stem."""
+
+FILESYSTEM_ERROR = "filesystem_error"
+"""``detail.reason``: the archive or the artifact could not be written."""
 
 MANIFEST_NAME = "separation.json"
 """Name of the manifest entry inside a multi-stem export archive."""
@@ -150,7 +180,83 @@ class ExportManifest(BaseModel):
 
 
 class ExportError(Exception):
-    """A build step failed (FFmpeg, the zip writer, or the filesystem)."""
+    """A build step failed (FFmpeg, the zip writer, or the filesystem).
+
+    ``reason`` is the short, **client-safe** classification that reaches
+    ``detail.reason`` — one of :data:`TRANSCODE_FAILED` or
+    :data:`FILESYSTEM_ERROR`. The diagnostic text (FFmpeg's stderr, an OS error
+    string) is logged at the raise site and deliberately never travels with the
+    exception: it carries absolute server paths, and no other 500 in this
+    application leaks those.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class BuildLocks:
+    """Per-artifact build locks, so one artifact is built once at a time.
+
+    The handler's ``artifact.is_file()`` check is only a fast path: between it
+    and the build there is no atomicity, so N simultaneous identical downloads
+    would each transcode every stem. Holding a lock keyed by the artifact path
+    across "check again, then build" collapses them into one build that the
+    others wait for and then serve from cache.
+
+    Entries are reference-counted and dropped when the last waiter leaves, so
+    the registry does not grow with every artifact a long-running server has
+    ever produced. One registry lives per application (see
+    :func:`get_export_locks`), which also keeps the locks bound to a single
+    event loop.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[Path, tuple[asyncio.Lock, int]] = {}
+
+    def building(self, key: Path) -> int:
+        """Number of requests currently holding or waiting for ``key``."""
+        entry = self._entries.get(key)
+        return 0 if entry is None else entry[1]
+
+    @asynccontextmanager
+    async def acquire(self, key: Path) -> AsyncGenerator[None]:
+        """Hold the lock for ``key`` for the duration of the block.
+
+        Registration is a plain dict update with no ``await`` in front of it,
+        so on a single-threaded event loop two requests cannot both decide they
+        are the first.
+        """
+        entry = self._entries.get(key)
+        lock = asyncio.Lock() if entry is None else entry[0]
+        self._entries[key] = (lock, (0 if entry is None else entry[1]) + 1)
+        try:
+            async with lock:
+                yield
+        finally:
+            held, waiters = self._entries[key]
+            if waiters <= 1:
+                del self._entries[key]
+            else:
+                self._entries[key] = (held, waiters - 1)
+
+
+def get_export_locks(request: Request) -> BuildLocks:
+    """Return this application's :class:`BuildLocks`, creating it on demand.
+
+    Created lazily on ``app.state`` rather than in
+    :func:`straticate.main.create_app` so the whole mechanism stays inside this
+    router. There is no race: the function contains no ``await``, and the event
+    loop is single-threaded.
+    """
+    locks = getattr(request.app.state, "export_locks", None)
+    if locks is None:
+        locks = BuildLocks()
+        request.app.state.export_locks = locks
+    return cast(BuildLocks, locks)
+
+
+LocksDep = Annotated[BuildLocks, Depends(get_export_locks)]
 
 
 FormatQuery = Annotated[
@@ -212,6 +318,11 @@ def _export_failed(job_id: str, export_format: ExportFormat, reason: str) -> App
     all server-side faults the client cannot fix by changing its request — but
     they are *expected* faults with a documented code, never an unhandled
     traceback.
+
+    ``reason`` is a short classification (:data:`TRANSCODE_FAILED`,
+    :data:`FILESYSTEM_ERROR`), never the underlying tool's message: FFmpeg's
+    stderr and OS error strings contain absolute server paths. The diagnostic
+    text is logged instead.
     """
     return ApplicationError(
         "export_failed",
@@ -286,7 +397,9 @@ def transcode_sync(source: Path, destination: Path, spec: _FormatSpec) -> None:
     audio is ever carried into the output.
 
     Raises:
-        ExportError: FFmpeg exited non-zero.
+        ExportError: FFmpeg exited non-zero. Its stderr names absolute server
+            paths, so it is logged here and the exception carries only
+            :data:`TRANSCODE_FAILED`.
     """
     command = [
         "ffmpeg",
@@ -306,8 +419,14 @@ def transcode_sync(source: Path, destination: Path, spec: _FormatSpec) -> None:
     ]
     result = subprocess.run(command, capture_output=True, check=False)
     if result.returncode != 0:
-        message = result.stderr.decode("utf-8", "replace").strip()
-        raise ExportError(f"ffmpeg could not encode {source.name!r}: {message}")
+        logger.error(
+            "ffmpeg exited %d encoding %s as %s: %s",
+            result.returncode,
+            source,
+            spec.codec,
+            result.stderr.decode("utf-8", "replace").strip(),
+        )
+        raise ExportError(TRANSCODE_FAILED)
 
 
 def _write_archive_sync(destination: Path, members: list[tuple[str, Path]], manifest: str) -> None:
@@ -336,7 +455,7 @@ def _build_manifest(result: SeparationResult, export_format: ExportFormat, stems
     return manifest.model_dump_json(indent=2)
 
 
-async def _build_artifact(
+async def build_artifact(
     artifact: Path,
     sources: list[tuple[str, Path]],
     result: SeparationResult,
@@ -349,18 +468,36 @@ async def _build_artifact(
     Everything blocking happens in a worker thread; this coroutine only awaits.
     The build writes to a ``.part`` name unique to this call — two concurrent
     identical exports therefore never share a partial file — and
-    :func:`os.replace` publishes it. On any failure the ``.part`` file is
-    removed, so a later request rebuilds rather than serving rubbish.
+    :func:`os.replace` publishes it.
+
+    Two details that only bite in production:
+
+    - The ``finally`` unlinks the ``.part`` on **every** exit, including
+      cancellation. On success the rename already consumed it, so the unlink is
+      a no-op; on failure or cancellation it is what stops a permanent leak
+      (nothing ever cleans up an export directory). This coroutine is only ever
+      run shielded, so the ``finally`` cannot run while a worker thread is
+      still writing — see :func:`_build_cached`.
+    - If ``artifact`` appeared while this build was running, the rename is
+      **skipped**. The published file may already be open in another response
+      (:class:`~fastapi.responses.FileResponse` holds a handle), and on Windows
+      replacing an open file raises ``PermissionError`` — which would fail a
+      request whose transcode actually succeeded. The two builds produce
+      equivalent audio, so keeping the published one is free.
 
     Raises:
         ExportError: Any build step failed.
     """
     spec = _FORMAT_SPECS[export_format]
-    artifact.parent.mkdir(parents=True, exist_ok=True)
     part = artifact.with_name(f"{artifact.name}.{uuid4().hex}.part")
     try:
+        artifact.parent.mkdir(parents=True, exist_ok=True)
         if archive:
-            with TemporaryDirectory(dir=artifact.parent, prefix=".build-") as staging:
+            # ``ignore_cleanup_errors`` because a failed build's staging
+            # directory is not worth turning into a second, misleading error.
+            with TemporaryDirectory(
+                dir=artifact.parent, prefix=".build-", ignore_cleanup_errors=True
+            ) as staging:
                 members: list[tuple[str, Path]] = []
                 for name, source in sources:
                     encoded = Path(staging) / f"{name}{spec.suffix}"
@@ -370,13 +507,83 @@ async def _build_artifact(
                 await asyncio.to_thread(_write_archive_sync, part, members, manifest)
         else:
             await asyncio.to_thread(transcode_sync, sources[0][1], part, spec)
-        await asyncio.to_thread(os.replace, part, artifact)
+        if not artifact.is_file():
+            await asyncio.to_thread(os.replace, part, artifact)
     except OSError as exc:
+        logger.exception("Could not write the export artifact %s", artifact)
+        raise ExportError(FILESYSTEM_ERROR) from exc
+    finally:
+        _discard(part)
+
+
+def _discard(part: Path) -> None:
+    """Remove a leftover ``.part`` file, tolerating a filesystem that refuses.
+
+    Cleanup must never replace the failure (or the cancellation) that brought
+    us here, so an unlink that cannot proceed is logged and swallowed.
+    """
+    try:
         part.unlink(missing_ok=True)
-        raise ExportError(str(exc)) from exc
-    except ExportError:
-        part.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - a locked or vanished temporary file
+        logger.warning("Could not remove the partial export file %s", part, exc_info=True)
+
+
+async def _build_cached(
+    locks: BuildLocks,
+    artifact: Path,
+    sources: list[tuple[str, Path]],
+    result: SeparationResult,
+    export_format: ExportFormat,
+    *,
+    archive: bool,
+) -> None:
+    """Build ``artifact`` unless another request is already building it.
+
+    The lock is held across "check again, then build", which is what makes the
+    handler's optimistic ``is_file()`` check safe: a second request for the
+    same artifact waits here and then finds the file, rather than running a
+    duplicate transcode of every stem.
+
+    Raises:
+        ExportError: Any build step failed.
+    """
+    async with locks.acquire(artifact):
+        if artifact.is_file():
+            return
+        await build_artifact(artifact, sources, result, export_format, archive=archive)
+
+
+async def _shielded(work: Coroutine[Any, Any, None]) -> None:
+    """Await ``work``, letting it finish even if *this* coroutine is cancelled.
+
+    :func:`asyncio.to_thread` cannot be cancelled: the worker thread runs
+    FFmpeg to completion whatever the caller does. Unwinding the build
+    immediately would therefore tear down its staging directory under a live
+    subprocess — a ``PermissionError`` out of ``TemporaryDirectory.__exit__``
+    on Windows, a thread writing into an unlinked directory on POSIX — and
+    orphan the ``.part`` file for good.
+
+    Shielding instead lets the build finish and publish its artifact, so a
+    client that disconnects mid-download merely warms the cache. The caller
+    still unwinds immediately.
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        # The build outlives us; consume its outcome so an ExportError raised
+        # after we are gone is not reported as a never-retrieved exception.
+        task.add_done_callback(_log_orphaned_build)
         raise
+
+
+def _log_orphaned_build(task: asyncio.Task[None]) -> None:
+    """Retrieve the outcome of a build whose requester has disconnected."""
+    if task.cancelled():  # pragma: no cover - the build itself is never cancelled
+        return
+    error = task.exception()
+    if error is not None:
+        logger.warning("Export build failed after the client disconnected", exc_info=error)
 
 
 @router.get("/{job_id}/export", response_class=FileResponse, responses=_EXPORT_RESPONSES)
@@ -384,6 +591,7 @@ async def export_job_stems(
     job_id: str,
     manager: ManagerDep,
     settings: SettingsDep,
+    locks: LocksDep,
     export_format: FormatQuery = ExportFormat.WAV_PCM24,
     stems: StemsQuery = None,
 ) -> FileResponse:
@@ -398,7 +606,10 @@ async def export_job_stems(
 
     The built file is cached under the job's ``exports/`` directory and reused:
     a completed job's stems never change, so a repeated identical download is
-    served straight from disk without running FFmpeg again.
+    served straight from disk without running FFmpeg again. Simultaneous
+    identical requests share one build rather than racing (see
+    :class:`BuildLocks`), and a request cancelled mid-build leaves the build to
+    finish rather than abandoning a partial file.
 
     Errors (see ``docs/contracts/rest-api.md``): ``job_not_found`` (404),
     ``result_not_available`` (409, with the job's current ``state`` in
@@ -418,9 +629,11 @@ async def export_job_stems(
     artifact = exports_dir / artifact_name(export_format, selected, archive=archive)
     if not artifact.is_file():
         try:
-            await _build_artifact(artifact, sources, result, export_format, archive=archive)
+            await _shielded(
+                _build_cached(locks, artifact, sources, result, export_format, archive=archive)
+            )
         except ExportError as exc:
-            raise _export_failed(job.id, export_format, str(exc)) from exc
+            raise _export_failed(job.id, export_format, exc.reason) from exc
 
     return FileResponse(
         artifact,

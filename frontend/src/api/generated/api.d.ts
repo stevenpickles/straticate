@@ -350,7 +350,10 @@ export interface paths {
          *
          *     The built file is cached under the job's ``exports/`` directory and reused:
          *     a completed job's stems never change, so a repeated identical download is
-         *     served straight from disk without running FFmpeg again.
+         *     served straight from disk without running FFmpeg again. Simultaneous
+         *     identical requests share one build rather than racing (see
+         *     :class:`BuildLocks`), and a request cancelled mid-build leaves the build to
+         *     finish rather than abandoning a partial file.
          *
          *     Errors (see ``docs/contracts/rest-api.md``): ``job_not_found`` (404),
          *     ``result_not_available`` (409, with the job's current ``state`` in

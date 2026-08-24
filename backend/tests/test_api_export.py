@@ -19,7 +19,8 @@ import io
 import json
 import threading
 import zipfile
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -203,24 +204,37 @@ class TranscodeSpy:
 
     ``calls`` proves the cache actually avoids re-transcoding. ``block``
     parks the *worker thread* inside the transcode on a
-    :class:`threading.Event`, which is what makes the event-loop-liveness
-    tests meaningful: if the transcode ran on the loop, nothing else could
-    make progress while it is parked.
+    :class:`threading.Event`, which is what makes the event-loop-liveness and
+    concurrency tests meaningful: if the transcode ran on the loop, nothing
+    else could make progress while it is parked.
+
+    ``block_after`` parks **after** the real FFmpeg call instead of before it,
+    so the output file genuinely exists on disk while the thread is held. That
+    is what the cancellation test needs: the leak it guards against is a real
+    ``.part`` file, and one that was never written cannot be leaked.
     """
 
-    def __init__(self, inner: Callable[..., None], *, block: bool = False) -> None:
+    def __init__(
+        self, inner: Callable[..., None], *, block: bool = False, block_after: bool = False
+    ) -> None:
         self._inner = inner
         self.calls = 0
         self.entered = threading.Event()
         self.release = threading.Event()
-        self._block = block
+        self._block = block or block_after
+        self._block_after = block_after
+
+    def _park(self) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=WAIT_TIMEOUT), "transcode never released"
 
     def __call__(self, *args: Any, **kwargs: Any) -> None:
         self.calls += 1
-        if self._block:
-            self.entered.set()
-            assert self.release.wait(timeout=WAIT_TIMEOUT), "transcode never released"
+        if self._block and not self._block_after:
+            self._park()
         self._inner(*args, **kwargs)
+        if self._block_after:
+            self._park()
 
 
 # -- fixtures ---------------------------------------------------------------
@@ -814,14 +828,16 @@ async def test_an_ffmpeg_failure_is_export_failed(
     job_id = await run_to_completion(export_client, recorder, audio_id)
 
     def explode(*_args: Any, **_kwargs: Any) -> None:
-        raise export_module.ExportError("ffmpeg exited 1: no such encoder")
+        raise export_module.ExportError(export_module.TRANSCODE_FAILED)
 
     monkeypatch.setattr(export_module, "transcode_sync", explode)
 
     error = assert_envelope(await export(export_client, job_id), "export_failed", 500)
-    assert error["detail"]["job_id"] == job_id
-    assert error["detail"]["format"] == ExportFormat.WAV_PCM24.value
-    assert "no such encoder" in error["detail"]["reason"]
+    assert error["detail"] == {
+        "job_id": job_id,
+        "format": ExportFormat.WAV_PCM24.value,
+        "reason": export_module.TRANSCODE_FAILED,
+    }
 
 
 async def test_a_real_ffmpeg_failure_is_export_failed(
@@ -835,7 +851,37 @@ async def test_a_real_ffmpeg_failure_is_export_failed(
     data_dir = cast(Settings, export_app.state.settings).data_dir
     stem_path(data_dir, job_id, "vocals").write_bytes(b"not a wav file at all")
 
-    assert_envelope(await export(export_client, job_id, stems="vocals"), "export_failed", 500)
+    response = await export(export_client, job_id, stems="vocals")
+    error = assert_envelope(response, "export_failed", 500)
+    assert error["detail"]["reason"] == export_module.TRANSCODE_FAILED
+
+
+async def test_an_export_failure_never_leaks_server_paths_or_ffmpeg_stderr(
+    export_client: httpx.AsyncClient,
+    export_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The diagnostic goes to the log; the client gets a classification.
+
+    FFmpeg's stderr names the absolute path of the file it could not read, and
+    no other 500 in this application puts server-side detail on the wire.
+    """
+    job_id = await run_to_completion(export_client, recorder, audio_id)
+    data_dir = cast(Settings, export_app.state.settings).data_dir
+    stem_path(data_dir, job_id, "vocals").write_bytes(b"not a wav file at all")
+
+    with caplog.at_level("ERROR", logger="straticate.api.export"):
+        response = await export(export_client, job_id, stems="vocals")
+
+    assert response.status_code == 500
+    body = response.text
+    assert str(data_dir) not in body
+    assert "vocals.wav" not in body
+    assert "ffmpeg" not in body.lower()
+    # The operator, however, gets the whole story.
+    assert any("ffmpeg exited" in record.getMessage() for record in caplog.records), caplog.text
 
 
 async def test_a_failed_export_leaves_no_artifact_behind(
@@ -850,7 +896,7 @@ async def test_a_failed_export_leaves_no_artifact_behind(
     data_dir = cast(Settings, export_app.state.settings).data_dir
 
     def explode(*_args: Any, **_kwargs: Any) -> None:
-        raise export_module.ExportError("boom")
+        raise export_module.ExportError(export_module.TRANSCODE_FAILED)
 
     monkeypatch.setattr(export_module, "transcode_sync", explode)
     assert_envelope(await export(export_client, job_id), "export_failed", 500)
@@ -1011,3 +1057,183 @@ async def test_the_job_worker_keeps_running_during_an_export(
 
     blocking_spy.release.set()
     assert (await asyncio.wait_for(task, timeout=WAIT_TIMEOUT)).status_code == 200
+
+
+# -- concurrency, cancellation and cache integrity ---------------------------
+
+
+class ContentionProbe(export_module.BuildLocks):
+    """A build-lock registry that signals when a second request arrives.
+
+    Installed on ``app.state`` before the requests are made, it gives the
+    concurrency tests an exact "the other request is now at the lock" moment,
+    so nothing has to be timed or slept on.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.arrivals = 0
+        self.second_arrived = asyncio.Event()
+
+    @asynccontextmanager
+    async def acquire(self, key: Path) -> AsyncGenerator[None]:
+        self.arrivals += 1
+        if self.arrivals >= 2:
+            self.second_arrived.set()
+        async with super().acquire(key):
+            yield
+
+
+@pytest.fixture
+def after_spy(monkeypatch: pytest.MonkeyPatch) -> Iterator[TranscodeSpy]:
+    """A transcode that parks its worker thread *after* FFmpeg has written."""
+    counter = TranscodeSpy(export_module.transcode_sync, block_after=True)
+    monkeypatch.setattr(export_module, "transcode_sync", counter)
+    yield counter
+    counter.release.set()
+
+
+def exports_dir_of(app: FastAPI, job_id: str) -> Path:
+    data_dir = cast(Settings, app.state.settings).data_dir
+    return job_output_dir(data_dir, job_id) / EXPORTS_DIRECTORY
+
+
+def assert_no_build_residue(exports: Path) -> None:
+    """No ``.part`` file and no staging directory survives a finished build."""
+    assert list(exports.glob("*.part")) == [], "a partial artifact was left behind"
+    assert list(exports.glob(".build-*")) == [], "a staging directory was left behind"
+
+
+@pytest.mark.parametrize(("stems", "archive"), [("vocals", False), (None, True)])
+async def test_a_cancelled_export_leaves_no_part_file_behind(
+    export_client: httpx.AsyncClient,
+    export_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+    after_spy: TranscodeSpy,
+    stems: str | None,
+    archive: bool,
+) -> None:
+    """A client that disconnects mid-export must not orphan a file forever.
+
+    ``asyncio.to_thread`` cannot be cancelled, so the build is shielded: it
+    finishes, publishes its artifact and unlinks its ``.part``. Nothing ever
+    cleans an export directory, so a leak here would be permanent.
+
+    The follow-up request is the synchronisation: it queues on the same build
+    lock, so it can only return once the shielded build has finished.
+    """
+    job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
+
+    task = asyncio.create_task(export(export_client, job_id, stems=stems))
+    await asyncio.wait_for(
+        asyncio.to_thread(after_spy.entered.wait, WAIT_TIMEOUT), timeout=WAIT_TIMEOUT
+    )
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    after_spy.release.set()
+    follow_up = await asyncio.wait_for(
+        export(export_client, job_id, stems=stems), timeout=WAIT_TIMEOUT
+    )
+    assert follow_up.status_code == 200, follow_up.text
+
+    exports = exports_dir_of(export_app, job_id)
+    assert_no_build_residue(exports)
+    # The cancelled build published its artifact, so nothing was wasted.
+    if archive:
+        assert MANIFEST_NAME in zip_entries(follow_up)
+    else:
+        assert not follow_up.content.startswith(b"PK")
+
+
+async def test_concurrent_identical_exports_share_one_build(
+    export_client: httpx.AsyncClient,
+    export_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+    blocking_spy: TranscodeSpy,
+) -> None:
+    """The cache check is a fast path; the build lock is the real guard.
+
+    Without it both requests miss the cache and transcode all four stems, and
+    the loser's ``os.replace`` lands on a file the winner's response already
+    has open — a ``PermissionError`` on Windows, i.e. a 500 for a request whose
+    transcode succeeded.
+    """
+    probe = ContentionProbe()
+    export_app.state.export_locks = probe
+    job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
+
+    first = asyncio.create_task(export(export_client, job_id))
+    await asyncio.wait_for(
+        asyncio.to_thread(blocking_spy.entered.wait, WAIT_TIMEOUT), timeout=WAIT_TIMEOUT
+    )
+    second = asyncio.create_task(export(export_client, job_id))
+    await asyncio.wait_for(probe.second_arrived.wait(), timeout=WAIT_TIMEOUT)
+
+    blocking_spy.release.set()
+    one, two = await asyncio.wait_for(asyncio.gather(first, second), timeout=WAIT_TIMEOUT)
+
+    assert one.status_code == 200, one.text
+    assert two.status_code == 200, two.text
+    assert one.content == two.content
+    assert blocking_spy.calls == len(STANDARD_STEMS), "the second request rebuilt the artifact"
+    assert probe.arrivals == 2
+    assert probe.building(Path(str(exports_dir_of(export_app, job_id)))) == 0
+    assert_no_build_residue(exports_dir_of(export_app, job_id))
+
+
+async def test_the_build_lock_registry_does_not_grow(
+    export_client: httpx.AsyncClient, export_app: FastAPI, recorder: EventRecorder, audio_id: str
+) -> None:
+    """Entries are reference-counted, so a long-lived server does not leak."""
+    probe = ContentionProbe()
+    export_app.state.export_locks = probe
+    job_id = await run_to_completion(export_client, recorder, audio_id)
+
+    for fmt in (ExportFormat.WAV_PCM24, ExportFormat.FLAC, ExportFormat.WAV_FLOAT32):
+        assert (await export(export_client, job_id, export_format=fmt)).status_code == 200
+
+    exports = exports_dir_of(export_app, job_id)
+    for path in exports.iterdir():
+        assert probe.building(path) == 0
+
+
+async def test_a_build_does_not_clobber_an_artifact_that_is_being_served(
+    export_client: httpx.AsyncClient,
+    export_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+) -> None:
+    """The publish step is skipped when the artifact already exists.
+
+    A finished export may still be open in a `FileResponse`; on Windows
+    `os.replace` onto an open destination raises `PermissionError`, which the
+    handler would turn into a 500 for a request whose transcode succeeded. The
+    two builds are equivalent, so keeping the published file is free.
+    """
+    job_id = await run_to_completion(export_client, recorder, audio_id)
+    data_dir = cast(Settings, export_app.state.settings).data_dir
+
+    published = await export(export_client, job_id, stems="vocals")
+    assert published.status_code == 200, published.text
+
+    exports = exports_dir_of(export_app, job_id)
+    artifact = exports / artifact_name(ExportFormat.WAV_PCM24, ["vocals"], archive=False)
+    original = artifact.read_bytes()
+
+    result = SeparationResult.model_validate(
+        (await export_client.get(f"{JOBS_URL}/{job_id}/result")).json()
+    )
+    sources = [("vocals", stem_path(data_dir, job_id, "vocals"))]
+
+    with artifact.open("rb") as streaming:  # what FileResponse holds
+        await export_module.build_artifact(
+            artifact, sources, result, ExportFormat.WAV_PCM24, archive=False
+        )
+        assert streaming.read() == original
+
+    assert artifact.read_bytes() == original
+    assert_no_build_residue(exports)

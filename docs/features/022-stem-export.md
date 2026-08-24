@@ -20,7 +20,8 @@ everything it needs.
   `APIRouter(prefix="/jobs", tags=["export"])` with one `async def` handler,
   the `ExportFormat` query enum, the format → `(container, codec, suffix)`
   table, the `ExportManifest` model written as `separation.json`, the
-  artifact-cache naming, and the threaded FFmpeg/zip build.
+  artifact-cache naming, the `BuildLocks` per-artifact build registry, and the
+  threaded FFmpeg/zip build.
 - `backend/src/straticate/api/job_outputs.py` — the shared lookup 021's doc
   asked for: `completed_job()`, `stem_source_path()` and the
   `result_not_available` / `stem_not_found` / `stem_file_missing` builders,
@@ -81,15 +82,16 @@ everything it needs.
       (see "How the loop is kept free" below).
 - [x] A repeated identical export serves the cached artifact without
       re-transcoding (asserted by counting FFmpeg invocations), and a `.part`
-      file is never served.
+      file is never served. **Simultaneous** identical exports share one build,
+      and a cancelled export leaves no `.part` behind.
 - [x] `ruff format --check` · `ruff check` · `pyright` (strict) · `pytest`
-      all green (436 backend tests, 55 of them new); the frontend still
+      all green (442 backend tests, 61 of them new); the frontend still
       formats, lints, type-checks, tests and builds with the regenerated
       types.
 
 ## Required tests
 
-`backend/tests/test_api_export.py` (55 tests) follows `test_api_results.py`'s
+`backend/tests/test_api_export.py` (61 tests) follows `test_api_results.py`'s
 conventions: the real application with the lifespan running on the test's own
 event loop, a real `JobManager` and `EventHub`, an injected `SeparatorRegistry`
 whose `FakeSeparator` has every simulated delay zeroed, generated WAV fixtures
@@ -111,12 +113,24 @@ listing only what was exported; `job_not_found`; `result_not_available` for
 `stem_not_found` with `available_stems`; 13 traversal / absolute-path /
 URL-encoded / empty-entry selections; four blank `stems` values as
 `validation_error`; a stem file deleted after completion (its sibling still
-exports); a mocked and a **real** FFmpeg failure as `export_failed`; a failed
-export leaving no `.part` behind and rebuilding cleanly afterwards; the cache
-hit, the cache key covering format and selection, the artifact file names on
-disk, a planted stale `.part` never being served, the digest fallback for a
-many-stem model; and the two event-loop liveness tests. Every error envelope's
-exact shape is asserted.
+exports); a mocked and a **real** FFmpeg failure as `export_failed`, plus a
+test that the response body carries neither the data directory, nor a stem
+filename, nor FFmpeg's stderr while the log carries all of it; a failed export
+leaving no `.part` behind and rebuilding cleanly afterwards; the cache hit, the
+cache key covering format and selection, the artifact file names on disk, a
+planted stale `.part` never being served, the digest fallback for a many-stem
+model; a **cancelled** export (single-stem and archive) leaving no `.part` and
+no staging directory; two **simultaneous** identical exports transcoding once;
+the lock registry shrinking back to empty; a rebuild not clobbering an artifact
+that is open in another response; and the two event-loop liveness tests. Every
+error envelope's exact shape is asserted.
+
+Three of those are regressions for review findings on PR #25, and each was
+confirmed to **fail** against the code as first written: the cancelled
+single-stem export left an orphaned `.part`; two simultaneous exports ran
+`8 == 4` transcodes; and rebuilding over an open artifact raised
+`PermissionError: [WinError 5]` out of `os.replace`, i.e. a 500 for a request
+whose transcode had succeeded.
 
 ## Notes / decisions
 
@@ -205,6 +219,65 @@ partial file, and because only the final name is ever served, a leftover
 `.part` can never be handed to a client. A failed build unlinks its `.part`, so
 the next request rebuilds rather than serving rubbish.
 
+### The build lock (review finding on PR #25)
+
+`if not artifact.is_file()` is a **fast path, not a guard**: between the check
+and the build there is no atomicity, so N simultaneous identical downloads each
+transcoded every stem — N times the CPU, competing with a running separation,
+which is exactly the pressure the "one stem at a time" decision above is trying
+to bound. Worse, the loser's `os.replace` landed on the winner's already-open
+file: `FileResponse` holds a handle without `FILE_SHARE_DELETE`, so on Windows
+`MoveFileExW` returned `ERROR_SHARING_VIOLATION` and a request whose transcode
+had **succeeded** got a 500.
+
+`BuildLocks` fixes both. It is a per-application registry (created lazily on
+`app.state`, so `main.py` stays at the one line this feature is allowed) of
+`asyncio.Lock`s keyed by artifact path; the lock is held across "check again,
+then build", so the second request waits and then serves the cached file.
+Entries are reference-counted and deleted when the last waiter leaves, so a
+long-running server does not accumulate one lock per artifact it has ever
+produced. Registration is a plain dict update with no `await` in front of it,
+so on a single-threaded loop two requests cannot both decide they are first.
+
+Belt and braces for the Windows half: `build_artifact` skips the `os.replace`
+entirely when the artifact already exists. The two builds produce equivalent
+audio, so keeping the published one costs nothing, and it also covers a second
+server process sharing the same data directory — which no lock can.
+
+### Cancellation (review finding on PR #25)
+
+`asyncio.to_thread` **cannot be cancelled**: the worker thread runs FFmpeg to
+completion whatever the caller does. Unwinding the build the moment the handler
+was cancelled (a client disconnecting mid-download, a server shutting down)
+therefore did real damage: the single-stem `.part` was never unlinked and
+nothing ever collects it, so **every cancelled export leaked a file
+permanently**; and in the archive branch `TemporaryDirectory.__exit__`
+`shutil.rmtree`d the staging directory under a live FFmpeg — a `PermissionError`
+*replacing* the `CancelledError` on Windows, a thread writing into an unlinked
+directory on POSIX.
+
+The build is now **shielded**: the caller unwinds immediately, the build
+finishes, publishes its artifact and unlinks its `.part` in a `finally` that
+cannot run while the worker thread is still writing. A disconnecting client
+therefore merely warms the cache. The orphaned task gets a done-callback so an
+`ExportError` raised after its requester has gone is logged rather than
+surfacing as a never-retrieved exception, and `TemporaryDirectory` is created
+with `ignore_cleanup_errors=True` so a staging directory that refuses to go
+never becomes a second, misleading error.
+
+### Errors say what failed, not where (review finding on PR #25)
+
+`detail.reason` used to carry FFmpeg's stderr verbatim — which names the
+absolute path of the stem it could not read — and, for an `OSError`, the full
+filesystem error string. That made it the only 500 in the codebase leaking
+server-side detail, against the precedent `errors._handle_unexpected_error`
+sets by logging the traceback and returning a generic envelope.
+
+The diagnostic is now logged and the client gets a short classification:
+`transcode_failed` or `filesystem_error`. A test asserts the response body
+contains neither the data directory, nor a stem filename, nor the string
+"ffmpeg", while the log record contains all of it.
+
 ### Why a separate router file
 
 `api/export.py` rather than a third handler in `api/results.py`: the export
@@ -272,14 +345,17 @@ Errors the UI must render (all the standard envelope,
 | `result_not_available` | 409 | read `detail.state`: still running → wait for the WebSocket `job_completed` event and re-enable the button; `cancelled`/`failed` → say so and hide export |
 | `stem_not_found` | 404 | the selection is stale; refresh from `detail.available_stems` |
 | `stem_file_missing` | 404 | `detail.stem`'s audio is gone from disk; offer to re-run the job |
-| `export_failed` | 500 | the transcode failed; `detail.reason` is diagnostic (not user-facing). Offer a retry |
+| `export_failed` | 500 | the build failed; `detail.reason` is a classification (`transcode_failed` / `filesystem_error`), not a message — never surface it verbatim. Offer a retry; the detail is in the server log |
 | `validation_error` | 422 | a UI bug — an unknown `format`, or `stems=` sent empty instead of omitted |
 
 The first download of a given format/selection runs FFmpeg (seconds for a long
 four-stem job), so show a pending state on the button; **repeats of the same
 format and selection are served from a cached artifact and return
 immediately**, and the selection is order-insensitive, so re-selecting the same
-stems in a different order still hits the cache.
+stems in a different order still hits the cache. Double-clicking the button is
+safe: simultaneous identical requests share one build, and the second waits for
+the first rather than starting a second transcode. Navigating away mid-download
+is safe too — the build finishes server-side, so retrying is a cache hit.
 
 ## Known limitations
 
@@ -292,10 +368,18 @@ stems in a different order still hits the cache.
 - **The cache is never invalidated.** It does not need to be while a completed
   job's stems are immutable, but if a future feature ever rewrites a completed
   job's stems in place, it must delete that job's `exports/` directory.
-- **`export_failed` is coarse.** An FFmpeg non-zero exit, a full disk and a
-  zip failure all produce the same code; the distinguishing text is in
-  `detail.reason`, which is diagnostic rather than something a UI should
-  parse.
+- **`export_failed` is coarse by design.** `detail.reason` is one of
+  `transcode_failed` or `filesystem_error` — a classification, not a message.
+  A full disk and an unwritable directory are indistinguishable to the client;
+  the detail is in the server log, deliberately, because FFmpeg's stderr and OS
+  error strings name absolute server paths.
+- **A cancelled export still runs to completion.** Shielding is what stops the
+  `.part` leak and the staging-directory teardown under a live FFmpeg, but the
+  cost is that a client which disconnects cannot actually stop the work: the
+  build finishes and publishes. For an export (seconds, and the result is a
+  cache hit for the next request) that is the right trade; a genuinely
+  cancellable export would need a killable subprocess handle, which
+  `asyncio.to_thread` does not provide.
 - **No `304`/conditional requests.** The response carries `ETag` and
   `Last-Modified` (Starlette's `FileResponse`), but `If-None-Match` does not
   short-circuit — the same gap 021 documented for stem streaming.

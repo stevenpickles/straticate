@@ -355,8 +355,13 @@ whose downstream tools require 24-bit or float files gets them.
 Export artifacts are built once and cached under
 `{data_dir}/jobs/{job_id}/exports/`, keyed by format and the sorted stem list:
 a completed job's stems are immutable, so a repeated identical download is
-served straight from disk. Nothing ever deletes them (see feature 021's note:
-no retention policy exists yet).
+served straight from disk. Simultaneous identical requests share a single
+build — the second waits for the first and then serves the cached file rather
+than transcoding again. Nothing ever deletes these artifacts (see feature 021's
+note: no retention policy exists yet).
+
+A client that disconnects mid-download does not abort the export: the build
+finishes and publishes its artifact, so the next request for it is a cache hit.
 
 ### Error codes
 
@@ -366,10 +371,18 @@ no retention policy exists yet).
 | `result_not_available` | 409 | the job exists but is not `completed`; `detail` carries `job_id` and the current `state` |
 | `stem_not_found` | 404 | the job's result lists no stem with that name; `detail` carries `available_stems` |
 | `stem_file_missing` | 404 | the result lists the stem but its file is gone from disk (an orphaned job directory from a previous process — job records are in-memory only) |
-| `export_failed` | 500 | *(export only)* a transcode or archive step failed; `detail` carries `job_id`, `format` and a `reason` |
+| `export_failed` | 500 | *(export only)* a transcode or archive step failed; `detail` carries `job_id`, `format` and a short `reason` classification |
 | `validation_error` | 422 | *(export only)* an unknown `format`, or a present-but-empty `stems` |
 
 A stem name that could not be a stem name at all (path traversal, an absolute
 path, a URL-encoded separator) is simply not in the result's stem list, so it
 comes back as a clean `stem_not_found` 404 — never a 500 and never a file from
 outside the job's stem directory. The same holds for a name inside `stems=`.
+
+`export_failed`'s `reason` is one of `transcode_failed` (FFmpeg exited
+non-zero) or `filesystem_error` (the archive or the artifact could not be
+written) — a **classification, not a message**. FFmpeg's stderr and OS error
+strings name absolute server paths, so they are written to the server log and
+never to the response, exactly as `internal_error` does for an unhandled
+exception. Clients should branch on the code, show `reason` only in diagnostic
+output, and never parse it for detail it does not carry.
