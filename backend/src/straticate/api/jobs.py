@@ -32,6 +32,7 @@ from straticate.jobs import JobManager, get_job_manager
 from straticate.jobs.resolution import resolve_audio, resolve_device, resolve_model
 from straticate.schemas import Job, SeparationConfiguration
 from straticate.system import DeviceDetectorDep
+from straticate.telemetry import TelemetrySampler, get_telemetry_sampler
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -48,6 +49,7 @@ def get_separator_registry(request: Request) -> SeparatorRegistry:
 
 RegistryDep = Annotated[SeparatorRegistry, Depends(get_separator_registry)]
 ManagerDep = Annotated[JobManager, Depends(get_job_manager)]
+SamplerDep = Annotated[TelemetrySampler, Depends(get_telemetry_sampler)]
 
 
 def _shutting_down(exc: RuntimeError) -> ApplicationError:
@@ -76,6 +78,7 @@ async def create_job(
     detector: DeviceDetectorDep,
     registry: RegistryDep,
     manager: ManagerDep,
+    sampler: SamplerDep,
 ) -> Job:
     """Create a separation job and return it immediately in state ``queued``.
 
@@ -85,6 +88,14 @@ async def create_job(
     the **resolved** device, so ``Job.configuration.device_id`` is always
     populated — in responses and in every event — even when the request omitted
     it.
+
+    The separator is handed to the telemetry sampler (feature 019) **directly
+    after** ``submit`` returns, with no ``await`` in between: the job ID does
+    not exist until then, and any suspension point between the two would let
+    the manager's worker start the job — and emit ``job_started`` — before the
+    sampler knew which separator to poll. This handler is already required to
+    be ``await``-free between resolution and submit (feature 015), so the
+    registration simply joins that atomic block.
 
     Errors (see ``docs/contracts/rest-api.md``): ``audio_not_found`` (404),
     ``separation_mode_not_found`` (404), ``quality_option_not_found`` (404),
@@ -102,9 +113,11 @@ async def create_job(
     )
     resolved = configuration.model_copy(update={"device_id": device.id})
     try:
-        return manager.submit(resolved, executor, model_id=model.id)
+        job = manager.submit(resolved, executor, model_id=model.id)
     except RuntimeError as exc:
         raise _shutting_down(exc) from exc
+    sampler.register(job.id, executor.separator)
+    return job
 
 
 @router.get("")

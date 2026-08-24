@@ -97,7 +97,7 @@ features can hold disjoint file ownership rather than by feature number:
 | 016 | Frontend job + WebSocket clients             | MERGED  | 003, 005*  | `016-job-ws-clients` | #14 |
 | 017 | Progress UI + cancel + error handling        | PR OPEN | 011, 015, 016 | `017-progress-cancel-ui` | #23 |
 | 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
-| 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
+| 019 | Runtime telemetry sampler + metrics events   | PR OPEN | 013, 018   | `019-telemetry-sampler` | |
 | 020 | Telemetry panel UI (model/GPU/processing)    | PR OPEN | 011, 016, 019* | `020-telemetry-panel` | #22 |
 | 021 | Result management + stem serving             | PR OPEN | 014, 015   | `021-result-serving` | #20 |
 | 022 | Stem export (WAV24/float32/FLAC)             | PLANNED | 021        | | |
