@@ -109,7 +109,7 @@ is a new test tier rather than a deferred fix.
 | 022 | Stem export (WAV24/float32/FLAC)             | MERGED  | 021        | `022-stem-export` | #25 |
 | 023 | Stem player UI (sync playback, solo, mute)   | MERGED  | 017, 021   | `023-stem-player` | #26 |
 | 024 | Export UI                                    | MERGED  | 022, 023   | `024-export-ui` | #27 |
-| 025 | Model download manager (SHA-256, atomic)     | PR OPEN | 010        | `025-model-download-manager` | |
+| 025 | Model download manager (SHA-256, atomic)     | PR OPEN | 010        | `025-model-download-manager` | #30 |
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |

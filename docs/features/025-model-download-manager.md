@@ -3,7 +3,7 @@
 Branch: `025-model-download-manager`
 Status: PR OPEN
 Dependencies: 010
-PR: #…
+PR: #30
 
 ## Objective
 
