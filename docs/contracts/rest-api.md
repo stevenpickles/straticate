@@ -286,6 +286,13 @@ JSON error envelope: they come from the byte-range layer as plain text, which
 is what a media client reading `Content-Range` expects (RFC 9110). Every
 application error below uses the envelope.
 
+`Accept-Ranges`, `Content-Range`, `ETag`, `Last-Modified` and
+`Content-Disposition` are listed in `Access-Control-Expose-Headers`, so a
+cross-origin fetch can read them — CORS otherwise hides every response header
+outside the "simple" set, which would leave a page that talks to `:8000`
+directly able to receive a range and unable to see which range it got. Allowed
+origins come from `STRATICATE_CORS_ORIGINS` (default: the Vite dev server).
+
 ### Export
 
 `GET /jobs/{job_id}/export` transcodes a completed job's stems and returns them

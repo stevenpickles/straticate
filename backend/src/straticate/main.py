@@ -37,6 +37,29 @@ from straticate.telemetry import TelemetrySampler
 
 API_PREFIX = "/api/v1"
 
+CORS_EXPOSED_HEADERS = [
+    "Accept-Ranges",
+    "Content-Disposition",
+    "Content-Range",
+    "ETag",
+    "Last-Modified",
+]
+"""Response headers cross-origin JavaScript is allowed to read.
+
+The CORS default exposes only the handful of "simple" response headers, which
+does not include any of these — so without this list a cross-origin fetch of a
+stem or an export can *receive* the bytes and still be unable to see the
+``Content-Range`` telling it which bytes it got, the ``ETag``/``Last-Modified``
+it needs to make ``If-Range`` work, or the ``Content-Disposition`` naming the
+download. All five are part of the documented stem/export responses
+(``docs/contracts/rest-api.md``), so all five are exposed.
+
+Inert in normal development, where Vite proxies ``/api`` and the browser sees
+same-origin requests; it matters the moment a page fetches ``:8000`` directly,
+which is exactly what the Web Audio stem player does when it is not behind the
+dev proxy.
+"""
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -153,6 +176,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=CORS_EXPOSED_HEADERS,
     )
 
     register_error_handlers(app)

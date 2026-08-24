@@ -541,6 +541,36 @@ async def test_stem_response_headers(
     assert "last-modified" in response.headers
 
 
+async def test_stem_headers_are_readable_cross_origin(
+    results_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+) -> None:
+    """Every header the contract documents must be exposed to browser JS.
+
+    Without ``expose_headers`` a cross-origin fetch receives these headers and
+    the browser hides all of them: the player could read the bytes but not the
+    ``Content-Range`` describing which bytes, nor the validators ``If-Range``
+    needs.
+    """
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    response = await results_client.get(
+        stem_url(job_id, "vocals"),
+        headers={"Origin": "http://localhost:5173", "Range": "bytes=0-99"},
+    )
+
+    assert response.status_code == 206
+    exposed = {
+        name.strip().lower()
+        for name in response.headers["access-control-expose-headers"].split(",")
+    }
+    assert {
+        "accept-ranges",
+        "content-disposition",
+        "content-range",
+        "etag",
+        "last-modified",
+    } <= exposed
+
+
 def test_media_type_is_derived_from_the_file_suffix() -> None:
     """Not a constant in the handler: 022's formats only add a mapping."""
     assert stem_media_type(Path("vocals.wav")) == WAV_MEDIA_TYPE
