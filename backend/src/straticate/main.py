@@ -12,11 +12,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from straticate import __version__
-from straticate.api import audio, system, ws
+from straticate.api import audio, jobs, system, ws
 from straticate.api import models as models_api
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
 from straticate.errors import register_error_handlers
+from straticate.inference import SeparatorRegistry
 from straticate.jobs import EventHub, JobManager
 from straticate.logging import configure_logging
 from straticate.models import ModelCatalog
@@ -74,7 +75,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     Compute devices are detected here rather than in the lifespan: they cannot
     change during a run, and detection never raises (a failing probe only logs
-    a warning), so it cannot break startup.
+    a warning), so it cannot break startup. The separator registry is built
+    here for the same reason — it holds no per-run state, only the
+    architecture → builder map and the separator instances it lazily creates.
 
     Raises:
         ModelCatalogError: If ``settings.models_dir`` holds no valid model
@@ -93,6 +96,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     device_detector.refresh()
     app.state.device_detector = device_detector
 
+    app.state.separator_registry = SeparatorRegistry()
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -105,6 +110,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(system.router, prefix=API_PREFIX)
     app.include_router(audio.router, prefix=API_PREFIX)
     app.include_router(models_api.router, prefix=API_PREFIX)
+    app.include_router(jobs.router, prefix=API_PREFIX)
     app.include_router(ws.router, prefix=API_PREFIX)
 
     return app
