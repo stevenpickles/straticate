@@ -79,6 +79,45 @@ async def test_unhandled_exception_returns_internal_error(app: FastAPI) -> None:
     assert "RuntimeError" not in response.text
 
 
+async def test_internal_error_is_readable_cross_origin(app: FastAPI) -> None:
+    """A 500 must carry CORS headers, or the browser hides the envelope.
+
+    Asserting the body alone would pass even with the envelope produced in
+    Starlette's outermost ``ServerErrorMiddleware``, where it is invisible to a
+    cross-origin caller. The header assertion is the one that fails if the
+    envelope ever moves back outside ``CORSMiddleware``.
+    """
+
+    @app.get("/api/v1/crash-cors")
+    async def crash() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+        raise RuntimeError("boom")
+
+    origin = "http://localhost:5173"
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/crash-cors", headers={"Origin": origin})
+
+    assert response.status_code == 500
+    assert _envelope(response.json())["code"] == "internal_error"
+    assert response.headers["access-control-allow-origin"] == origin
+
+
+async def test_application_error_is_readable_cross_origin(app: FastAPI) -> None:
+    """The same guarantee for the handled errors clients branch on."""
+
+    @app.get("/api/v1/teapot-cors")
+    async def teapot() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
+        raise ApplicationError("teapot", "I'm a teapot.", status_code=418)
+
+    origin = "http://127.0.0.1:5173"
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/teapot-cors", headers={"Origin": origin})
+
+    assert response.status_code == 418
+    assert response.headers["access-control-allow-origin"] == origin
+
+
 def test_application_error_to_error_info_json_encodes_detail() -> None:
     exc = ApplicationError(
         "teapot",

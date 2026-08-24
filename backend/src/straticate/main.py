@@ -27,7 +27,7 @@ from straticate.api import audio, export, jobs, results, system, ws
 from straticate.api import models as models_api
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
-from straticate.errors import register_error_handlers
+from straticate.errors import ErrorEnvelopeMiddleware, register_error_handlers
 from straticate.inference import SeparatorRegistry
 from straticate.jobs import EventHub, JobManager
 from straticate.logging import configure_logging
@@ -139,6 +139,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.state.separator_registry = SeparatorRegistry()
 
+    # Middleware order matters and reads backwards: ``add_middleware``
+    # *prepends*, so the LAST one added is the OUTERMOST layer. CORS must be
+    # outermost of the two, so that the envelope middleware's 500 response
+    # travels back out through it and arrives with
+    # ``Access-Control-Allow-Origin``. Reversing these two lines silently
+    # restores the bug they exist to fix — hence the test in
+    # ``tests/test_errors.py`` that sends an ``Origin`` at a route that raises.
+    app.add_middleware(ErrorEnvelopeMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
