@@ -12,6 +12,10 @@
  * (which the `Job` schema does not carry) lives in {@link JobProgressDetail},
  * and the newest `runtime_metrics` payload is stored verbatim for the
  * telemetry panel (feature 020).
+ *
+ * The store also holds the state of the user's cancel request
+ * ({@link CancelRequestState}), which outlives the HTTP call: cancelling is
+ * a request, and the job only really stops when a terminal state arrives.
  */
 import {
   createContext,
@@ -61,6 +65,33 @@ export interface JobProgressDetail {
   readonly audioTotalSeconds: number
 }
 
+/**
+ * State of the user's cancel request for the tracked job.
+ *
+ * Cancellation is a *request*, not a stop: `POST /jobs/{id}/cancel` may
+ * return a job that is still in a processing state, and the authoritative
+ * transition arrives as a `job_cancelled` event. `requesting` therefore
+ * covers the whole wait — from the click until the job reaches a terminal
+ * state — so the UI can show a "cancelling" affordance throughout.
+ */
+export type CancelRequestState =
+  | {
+      /** No cancellation has been requested (or the last one settled). */
+      readonly status: 'idle'
+    }
+  | {
+      /** A cancellation was requested and the job has not stopped yet. */
+      readonly status: 'requesting'
+    }
+  | {
+      /** The cancel request itself failed; the user may retry. */
+      readonly status: 'error'
+      /** Machine-readable code from the backend error envelope. */
+      readonly code: string
+      /** Human-readable message from the backend error envelope. */
+      readonly message: string
+    }
+
 /** Shape of the tracked-job state. */
 export interface JobStateValue {
   /**
@@ -77,6 +108,11 @@ export interface JobStateValue {
   readonly cancelledAtStage: JobLifecycleState | null
   /** Status of the job event WebSocket. */
   readonly connection: ConnectionStatus
+  /**
+   * State of the user's cancel request. Reset when a different job is
+   * tracked, and cleared as soon as the job reaches a terminal state.
+   */
+  readonly cancel: CancelRequestState
 }
 
 /** Actions accepted by {@link jobReducer}. */
@@ -104,14 +140,31 @@ export type JobAction =
       readonly type: 'ws/status'
       readonly status: ConnectionStatus
     }
+  | {
+      /**
+       * A cancellation was requested for the tracked job. Ignored when no
+       * job is tracked or the tracked job is already terminal.
+       */
+      readonly type: 'cancel/requested'
+    }
+  | {
+      /** The cancel request failed; the message is shown and retryable. */
+      readonly type: 'cancel/failed'
+      readonly code: string
+      readonly message: string
+    }
 
-/** Initial state: no job tracked, socket closed. */
+/** Cancel slice at rest; shared so identity comparisons stay cheap. */
+const idleCancelRequest: CancelRequestState = { status: 'idle' }
+
+/** Initial state: no job tracked, socket closed, no cancellation requested. */
 export const initialJobState: JobStateValue = {
   job: null,
   progress: null,
   metrics: null,
   cancelledAtStage: null,
   connection: 'closed',
+  cancel: idleCancelRequest,
 }
 
 function trackJob(state: JobStateValue, job: Job): JobStateValue {
@@ -124,7 +177,22 @@ function trackJob(state: JobStateValue, job: Job): JobStateValue {
     progress: null,
     metrics: null,
     cancelledAtStage: null,
+    cancel: idleCancelRequest,
   }
+}
+
+/**
+ * Clear a pending cancel request once the job has stopped. A terminal job
+ * is the answer to the request, whatever the outcome — the wait is over, so
+ * neither the "cancelling" affordance nor a stale failure should survive it.
+ */
+function settleCancel(state: JobStateValue): JobStateValue {
+  if (state.cancel.status === 'idle' || state.job === null) {
+    return state
+  }
+  return isTerminalJobState(state.job.state)
+    ? { ...state, cancel: idleCancelRequest }
+    : state
 }
 
 function applyEvent(
@@ -192,15 +260,28 @@ export function jobReducer(
 ): JobStateValue {
   switch (action.type) {
     case 'job/track':
-      return trackJob(state, action.job)
+      return settleCancel(trackJob(state, action.job))
     case 'job/clear':
       return { ...initialJobState, connection: state.connection }
     case 'ws/event':
-      return applyEvent(state, action.event)
+      return settleCancel(applyEvent(state, action.event))
     case 'ws/status':
       return state.connection === action.status
         ? state
         : { ...state, connection: action.status }
+    case 'cancel/requested':
+      return state.job === null || isTerminalJobState(state.job.state)
+        ? state
+        : { ...state, cancel: { status: 'requesting' } }
+    case 'cancel/failed':
+      return {
+        ...state,
+        cancel: {
+          status: 'error',
+          code: action.code,
+          message: action.message,
+        },
+      }
   }
 }
 

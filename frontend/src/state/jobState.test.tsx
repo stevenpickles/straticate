@@ -37,6 +37,7 @@ describe('initial job state', () => {
       metrics: null,
       cancelledAtStage: null,
       connection: 'closed',
+      cancel: { status: 'idle' },
     })
   })
 })
@@ -288,6 +289,105 @@ describe('jobReducer WebSocket events', () => {
         started_at: '2026-08-23T12:00:05Z',
       }),
     ).toBe(initialJobState)
+  })
+})
+
+describe('jobReducer cancel slice', () => {
+  function requesting(): JobStateValue {
+    return jobReducer(tracked(), { type: 'cancel/requested' })
+  }
+
+  it('records a requested cancellation', () => {
+    expect(requesting().cancel).toEqual({ status: 'requesting' })
+  })
+
+  it('ignores a request while nothing is tracked', () => {
+    expect(jobReducer(initialJobState, { type: 'cancel/requested' })).toBe(
+      initialJobState,
+    )
+  })
+
+  it('ignores a request for an already terminal job', () => {
+    const state = jobReducer(initialJobState, {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'completed' },
+    })
+    expect(jobReducer(state, { type: 'cancel/requested' })).toBe(state)
+  })
+
+  it('records a failed cancel request with its envelope', () => {
+    const state = jobReducer(requesting(), {
+      type: 'cancel/failed',
+      code: 'job_not_found',
+      message: 'No such job.',
+    })
+    expect(state.cancel).toEqual({
+      status: 'error',
+      code: 'job_not_found',
+      message: 'No such job.',
+    })
+  })
+
+  it('keeps requesting while the cancel response is still a processing state', () => {
+    const state = jobReducer(requesting(), {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'separating' },
+    })
+    expect(state.cancel).toEqual({ status: 'requesting' })
+  })
+
+  it('settles on the authoritative job_cancelled event', () => {
+    const state = apply(requesting(), {
+      type: 'job_cancelled',
+      job_id: sampleJobId,
+      stage_at_cancellation: 'separating',
+    })
+    expect(state.cancel).toEqual({ status: 'idle' })
+    expect(state.cancelledAtStage).toBe('separating')
+  })
+
+  it('settles on any terminal transition, including a race with completion', () => {
+    const completed = apply(requesting(), {
+      type: 'job_completed',
+      job_id: sampleJobId,
+      result: sampleResult,
+    })
+    expect(completed.cancel).toEqual({ status: 'idle' })
+
+    const failed = apply(requesting(), {
+      type: 'job_failed',
+      job_id: sampleJobId,
+      error: { code: 'cuda_out_of_memory', message: 'Out of memory.' },
+    })
+    expect(failed.cancel).toEqual({ status: 'idle' })
+  })
+
+  it('clears a cancel failure once the job reaches a terminal state', () => {
+    const errored = jobReducer(requesting(), {
+      type: 'cancel/failed',
+      code: 'service_unavailable',
+      message: 'Shutting down.',
+    })
+    const state = apply(errored, {
+      type: 'job_failed',
+      job_id: sampleJobId,
+      error: { code: 'cuda_out_of_memory', message: 'Out of memory.' },
+    })
+    expect(state.cancel).toEqual({ status: 'idle' })
+  })
+
+  it('resets when a different job is tracked', () => {
+    const state = jobReducer(requesting(), {
+      type: 'job/track',
+      job: { ...sampleJob, id: otherJobId },
+    })
+    expect(state.cancel).toEqual({ status: 'idle' })
+  })
+
+  it('is cleared by job/clear', () => {
+    expect(jobReducer(requesting(), { type: 'job/clear' }).cancel).toEqual({
+      status: 'idle',
+    })
   })
 })
 
