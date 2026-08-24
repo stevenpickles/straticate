@@ -113,7 +113,7 @@ is a new test tier rather than a deferred fix.
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
-| 029 | Skeleton hardening (deferred review findings)| PR OPEN | 004, 005   | `029-skeleton-hardening` | |
+| 029 | Skeleton hardening (deferred review findings)| PR OPEN | 004, 005   | `029-skeleton-hardening` | #29 |
 | 030 | Playwright E2E tier (fake separator)         | PLANNED | 024        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
