@@ -4,7 +4,7 @@ import logging
 from collections.abc import Iterator
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from straticate import main
@@ -78,8 +78,8 @@ def test_main_module_calls_serve() -> None:
 async def test_cors_origins_come_from_settings() -> None:
     settings = Settings(cors_origins=["https://studio.example"])
     app = main.create_app(settings)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         allowed = await client.get("/api/v1/health", headers={"Origin": "https://studio.example"})
         rejected = await client.get("/api/v1/health", headers={"Origin": "https://evil.example"})
 

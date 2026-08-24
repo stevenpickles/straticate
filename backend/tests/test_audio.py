@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -41,13 +41,13 @@ def app(settings: Settings) -> FastAPI:
     return create_app(settings)
 
 
-async def upload(client: httpx.AsyncClient, filename: str, content: bytes) -> httpx.Response:
+async def upload(client: httpx2.AsyncClient, filename: str, content: bytes) -> httpx2.Response:
     """POST ``content`` as a multipart upload named ``filename``."""
     return await client.post(AUDIO_URL, files={"file": (filename, content, "audio/wav")})
 
 
 async def test_upload_returns_probed_metadata(
-    client: httpx.AsyncClient, settings: Settings
+    client: httpx2.AsyncClient, settings: Settings
 ) -> None:
     wav = make_wav_bytes()
     response = await upload(client, "song.wav", wav)
@@ -70,7 +70,7 @@ async def test_upload_returns_probed_metadata(
     assert stored.stat().st_size == len(wav)
 
 
-async def test_upload_text_file_rejected(client: httpx.AsyncClient, settings: Settings) -> None:
+async def test_upload_text_file_rejected(client: httpx2.AsyncClient, settings: Settings) -> None:
     response = await upload(client, "notes.txt", b"this is not audio at all\n")
     assert response.status_code == 422
     body = response.json()
@@ -84,8 +84,8 @@ async def test_upload_text_file_rejected(client: httpx.AsyncClient, settings: Se
 async def test_upload_over_size_limit_rejected(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path / "data", max_upload_bytes=1024)
     app = create_app(settings)
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await upload(client, "song.wav", make_wav_bytes())
     assert response.status_code == 413
     body = response.json()
@@ -96,7 +96,7 @@ async def test_upload_over_size_limit_rejected(tmp_path: Path) -> None:
 
 
 async def test_probe_timeout_is_its_own_error_not_not_decodable(
-    client: httpx.AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+    client: httpx2.AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A wedged ffprobe is a 504 with its own code — never a wait, never a 500.
 
@@ -121,27 +121,27 @@ async def test_probe_timeout_is_its_own_error_not_not_decodable(
     assert not audio_root.exists() or not any(audio_root.iterdir())
 
 
-async def test_get_returns_uploaded_record(client: httpx.AsyncClient) -> None:
+async def test_get_returns_uploaded_record(client: httpx2.AsyncClient) -> None:
     uploaded = (await upload(client, "song.wav", make_wav_bytes())).json()
     response = await client.get(f"{AUDIO_URL}/{uploaded['id']}")
     assert response.status_code == 200
     assert response.json() == uploaded
 
 
-async def test_get_unknown_id_404(client: httpx.AsyncClient) -> None:
+async def test_get_unknown_id_404(client: httpx2.AsyncClient) -> None:
     response = await client.get(f"{AUDIO_URL}/01UNKNOWNULID0000000000000")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "audio_not_found"
 
 
-async def test_delete_unknown_id_404(client: httpx.AsyncClient) -> None:
+async def test_delete_unknown_id_404(client: httpx2.AsyncClient) -> None:
     response = await client.delete(f"{AUDIO_URL}/01UNKNOWNULID0000000000000")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "audio_not_found"
 
 
 async def test_delete_removes_record_and_files(
-    client: httpx.AsyncClient, settings: Settings
+    client: httpx2.AsyncClient, settings: Settings
 ) -> None:
     uploaded = (await upload(client, "song.wav", make_wav_bytes())).json()
     audio_dir = settings.data_dir / "audio" / uploaded["id"]
@@ -153,7 +153,7 @@ async def test_delete_removes_record_and_files(
     assert (await client.get(f"{AUDIO_URL}/{uploaded['id']}")).status_code == 404
 
 
-async def test_lying_extension_is_ignored(client: httpx.AsyncClient) -> None:
+async def test_lying_extension_is_ignored(client: httpx2.AsyncClient) -> None:
     response = await upload(client, "song.mp3", make_wav_bytes())
     assert response.status_code == 201
     metadata = response.json()["metadata"]

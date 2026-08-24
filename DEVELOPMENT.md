@@ -106,7 +106,7 @@ file directly.
 | Tier | Where | Runs in CI | Requires |
 | --- | --- | --- | --- |
 | Backend unit | `backend/tests/` (pytest, pytest-asyncio) | always | nothing external |
-| Backend API | pytest + httpx `ASGITransport` against the app | always | nothing external |
+| Backend API | pytest + httpx2 `ASGITransport` against the app | always | nothing external |
 | Audio tests | pytest, tiny generated fixtures in `testdata/` | always | FFmpeg |
 | Frontend unit/component | `frontend/` (Vitest + Testing Library) | always | nothing external |
 | E2E (fake separator) | Playwright — feature 030, not yet written | *(will be)* always | FFmpeg |
@@ -121,6 +121,11 @@ Principles:
 - WebSocket flows are tested with an in-process client against the real event
   hub; frontend tests consume recorded/mocked typed events.
 - Every job-state transition and cancellation path has a test.
+- **The backend suite runs clean.** A warning in the output is a finding, not
+  background noise: it is either fixed or filtered with a written reason. The
+  HTTP client is `httpx2` (Pydantic's successor to `httpx`) because
+  `starlette.testclient` deprecates the `httpx` shim; the two have the same
+  API, so the swap is an import rename.
 
 ## CI plan
 

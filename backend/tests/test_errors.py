@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-import httpx
+import httpx2
 from fastapi import FastAPI
 
 from straticate.errors import ApplicationError
@@ -20,7 +20,7 @@ def _envelope(body: dict[str, Any]) -> dict[str, Any]:
     return error
 
 
-async def test_unknown_route_returns_enveloped_404(client: httpx.AsyncClient) -> None:
+async def test_unknown_route_returns_enveloped_404(client: httpx2.AsyncClient) -> None:
     response = await client.get("/api/v1/nope")
     assert response.status_code == 404
     error = _envelope(response.json())
@@ -32,8 +32,8 @@ async def test_validation_error_returns_envelope(app: FastAPI) -> None:
     async def echo(value: int) -> dict[str, int]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
         return {"value": value}
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/echo", params={"value": "not-an-int"})
 
     assert response.status_code == 422
@@ -52,8 +52,8 @@ async def test_application_error_returns_envelope(app: FastAPI) -> None:
             detail={"hint": "short and stout"},
         )
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/boom")
 
     assert response.status_code == 418
@@ -68,8 +68,8 @@ async def test_unhandled_exception_returns_internal_error(app: FastAPI) -> None:
     async def crash() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]  # registered via decorator
         raise RuntimeError("secret traceback detail")
 
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/crash")
 
     assert response.status_code == 500
@@ -93,8 +93,8 @@ async def test_internal_error_is_readable_cross_origin(app: FastAPI) -> None:
         raise RuntimeError("boom")
 
     origin = "http://localhost:5173"
-    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/crash-cors", headers={"Origin": origin})
 
     assert response.status_code == 500
@@ -110,8 +110,8 @@ async def test_application_error_is_readable_cross_origin(app: FastAPI) -> None:
         raise ApplicationError("teapot", "I'm a teapot.", status_code=418)
 
     origin = "http://127.0.0.1:5173"
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/api/v1/teapot-cors", headers={"Origin": origin})
 
     assert response.status_code == 418

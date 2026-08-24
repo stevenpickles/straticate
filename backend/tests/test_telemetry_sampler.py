@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -891,8 +891,8 @@ async def test_a_real_job_publishes_contract_shaped_runtime_metrics(
 
     async with app.router.lifespan_context(app):
         cast(EventHub, app.state.event_hub).register(as_socket(socket))
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 JOBS_URL,
                 json={"audio_id": audio_id, "mode_id": "vocals", "quality_id": "balanced"},
@@ -961,8 +961,8 @@ async def test_telemetry_is_published_for_a_job_whose_first_stage_begins_immedia
 
     async with app.router.lifespan_context(app):
         cast(EventHub, app.state.event_hub).register(as_socket(socket))
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(
                 JOBS_URL,
                 json={"audio_id": audio_id, "mode_id": "vocals", "quality_id": "balanced"},

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -32,7 +32,7 @@ QUALITY_OPTION_KEYS = {"id", "display_name", "model_id"}
 
 
 @pytest.fixture
-async def synthetic_client(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
+async def synthetic_client(tmp_path: Path) -> AsyncIterator[httpx2.AsyncClient]:
     """A client for an app whose catalog carries inference-only manifest fields."""
     write_catalog(
         tmp_path,
@@ -50,12 +50,12 @@ async def synthetic_client(tmp_path: Path) -> AsyncIterator[httpx.AsyncClient]:
         ],
     )
     app: FastAPI = create_app(Settings(models_dir=tmp_path, data_dir=tmp_path / "data"))
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
         yield client
 
 
-async def test_list_models_returns_the_catalog(client: httpx.AsyncClient) -> None:
+async def test_list_models_returns_the_catalog(client: httpx2.AsyncClient) -> None:
     response = await client.get(MODELS_URL)
     assert response.status_code == 200
     body: list[dict[str, Any]] = response.json()
@@ -63,7 +63,7 @@ async def test_list_models_returns_the_catalog(client: httpx.AsyncClient) -> Non
     assert set(body[0]) == MODEL_KEYS
 
 
-async def test_get_model_returns_one_model(client: httpx.AsyncClient) -> None:
+async def test_get_model_returns_one_model(client: httpx2.AsyncClient) -> None:
     response = await client.get(f"{MODELS_URL}/fake-standard-001")
     assert response.status_code == 200
     body: dict[str, Any] = response.json()
@@ -73,7 +73,7 @@ async def test_get_model_returns_one_model(client: httpx.AsyncClient) -> None:
     assert body["quality_tier"] is None
 
 
-async def test_get_unknown_model_returns_the_error_envelope(client: httpx.AsyncClient) -> None:
+async def test_get_unknown_model_returns_the_error_envelope(client: httpx2.AsyncClient) -> None:
     response = await client.get(f"{MODELS_URL}/does-not-exist")
     assert response.status_code == 404
     error: dict[str, Any] = response.json()["error"]
@@ -81,7 +81,7 @@ async def test_get_unknown_model_returns_the_error_envelope(client: httpx.AsyncC
     assert "does-not-exist" in error["message"]
 
 
-async def test_separation_modes_are_derived_from_the_catalog(client: httpx.AsyncClient) -> None:
+async def test_separation_modes_are_derived_from_the_catalog(client: httpx2.AsyncClient) -> None:
     response = await client.get(MODES_URL)
     assert response.status_code == 200
     modes: list[dict[str, Any]] = response.json()
@@ -101,7 +101,7 @@ async def test_separation_modes_are_derived_from_the_catalog(client: httpx.Async
 
 
 async def test_separation_modes_expose_quality_tiers_not_inference_parameters(
-    synthetic_client: httpx.AsyncClient,
+    synthetic_client: httpx2.AsyncClient,
 ) -> None:
     response = await synthetic_client.get(MODES_URL)
     assert response.status_code == 200
@@ -112,7 +112,7 @@ async def test_separation_modes_expose_quality_tiers_not_inference_parameters(
 
 
 async def test_models_endpoint_hides_inference_parameters(
-    synthetic_client: httpx.AsyncClient,
+    synthetic_client: httpx2.AsyncClient,
 ) -> None:
     response = await synthetic_client.get(MODELS_URL)
     assert response.status_code == 200

@@ -10,7 +10,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 
 import straticate
 
@@ -37,7 +37,7 @@ def test_version_is_not_the_missing_distribution_fallback() -> None:
     assert straticate.__version__ != straticate.UNKNOWN_VERSION
 
 
-async def test_version_endpoint_serves_the_same_version(client: httpx.AsyncClient) -> None:
+async def test_version_endpoint_serves_the_same_version(client: httpx2.AsyncClient) -> None:
     response = await client.get("/api/v1/version")
     assert response.status_code == 200
     assert response.json() == {"version": _declared_version()}

@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn, cast
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -315,11 +315,11 @@ def export_app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture
-async def export_client(export_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+async def export_client(export_app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
     """A client for a running application (lifespan started on this loop)."""
     async with export_app.router.lifespan_context(export_app):
-        transport = httpx.ASGITransport(app=export_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        transport = httpx2.ASGITransport(app=export_app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
 
 
@@ -330,7 +330,7 @@ def audio_id(export_app: FastAPI) -> str:
 
 @pytest.fixture
 async def recorder(
-    export_client: httpx.AsyncClient, export_app: FastAPI
+    export_client: httpx2.AsyncClient, export_app: FastAPI
 ) -> AsyncIterator[EventRecorder]:
     """A listener on the running app's job manager (needs the lifespan)."""
     listener = EventRecorder()
@@ -362,14 +362,14 @@ def configuration(audio_id: str, **overrides: Any) -> dict[str, Any]:
     return body
 
 
-async def create_job(client: httpx.AsyncClient, **body: Any) -> str:
+async def create_job(client: httpx2.AsyncClient, **body: Any) -> str:
     response = await client.post(JOBS_URL, json=body)
     assert response.status_code == 201, response.text
     return cast(str, response.json()["id"])
 
 
 async def run_to_completion(
-    client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, mode_id: str = "vocals"
+    client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, mode_id: str = "vocals"
 ) -> str:
     """Create a job with the real fake separator and await its completion."""
     job_id = await create_job(client, **configuration(audio_id, mode_id=mode_id))
@@ -383,12 +383,12 @@ def export_url(job_id: str) -> str:
 
 
 async def export(
-    client: httpx.AsyncClient,
+    client: httpx2.AsyncClient,
     job_id: str,
     *,
     export_format: ExportFormat | str | None = None,
     stems: str | None = None,
-) -> httpx.Response:
+) -> httpx2.Response:
     params: dict[str, str] = {}
     if export_format is not None:
         params["format"] = str(export_format)
@@ -397,7 +397,7 @@ async def export(
     return await client.get(export_url(job_id), params=params)
 
 
-def assert_envelope(response: httpx.Response, code: str, status: int) -> dict[str, Any]:
+def assert_envelope(response: httpx2.Response, code: str, status: int) -> dict[str, Any]:
     """Assert the standard error envelope and return the error object."""
     assert response.status_code == status, response.text
     body: dict[str, Any] = response.json()
@@ -409,14 +409,14 @@ def assert_envelope(response: httpx.Response, code: str, status: int) -> dict[st
     return error
 
 
-def zip_entries(response: httpx.Response) -> dict[str, bytes]:
+def zip_entries(response: httpx2.Response) -> dict[str, bytes]:
     """Read the response body as a zip and return ``{entry name: bytes}``."""
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert archive.testzip() is None, "the archive is corrupt"
         return {name: archive.read(name) for name in archive.namelist()}
 
 
-def disposition_filename(response: httpx.Response) -> str:
+def disposition_filename(response: httpx2.Response) -> str:
     """Extract the ``filename`` from the response's ``Content-Disposition``."""
     header = response.headers["content-disposition"]
     assert header.startswith("attachment;"), header
@@ -447,7 +447,7 @@ async def assert_audio(
 
 @pytest.mark.parametrize(("fmt", "codec", "bit_depth", "suffix", "media_type"), FORMAT_MATRIX)
 async def test_every_format_produces_audio_a_decoder_accepts(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     tmp_path: Path,
@@ -476,7 +476,7 @@ async def test_every_format_produces_audio_a_decoder_accepts(
 
 @pytest.mark.parametrize(("fmt", "codec", "bit_depth", "suffix", "media_type"), FORMAT_MATRIX)
 async def test_single_stem_export_is_the_bare_audio_file(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     tmp_path: Path,
@@ -501,7 +501,7 @@ async def test_single_stem_export_is_the_bare_audio_file(
 
 
 async def test_the_default_format_is_wav_pcm24(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, tmp_path: Path
 ) -> None:
     job_id = await run_to_completion(export_client, recorder, audio_id)
 
@@ -512,7 +512,7 @@ async def test_the_default_format_is_wav_pcm24(
 
 
 async def test_an_unknown_format_is_a_validation_error(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """No invented code: an unknown enum value is FastAPI's standard 422."""
     job_id = await run_to_completion(export_client, recorder, audio_id)
@@ -531,7 +531,7 @@ async def test_an_unknown_format_is_a_validation_error(
     [("vocals", VOCALS_STEMS), ("standard_stems", STANDARD_STEMS)],
 )
 async def test_omitting_stems_exports_every_stem_of_the_result(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     mode_id: str,
@@ -551,7 +551,7 @@ async def test_omitting_stems_exports_every_stem_of_the_result(
 
 
 async def test_a_subset_of_more_than_one_stem_is_a_zip_of_exactly_those(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
 
@@ -561,7 +561,7 @@ async def test_a_subset_of_more_than_one_stem_is_a_zip_of_exactly_those(
 
 
 async def test_the_stems_in_the_archive_are_mutually_distinct(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """Four real stems, four different files — the export is per-stem work."""
     job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
@@ -572,7 +572,7 @@ async def test_the_stems_in_the_archive_are_mutually_distinct(
 
 
 async def test_stem_order_and_duplicates_do_not_change_the_export(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """The selection is a set, resolved into the result's own order."""
     job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
@@ -584,7 +584,7 @@ async def test_stem_order_and_duplicates_do_not_change_the_export(
 
 
 async def test_a_repeated_single_stem_selection_is_still_a_single_file(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """``vocals,vocals`` is one stem, so it is the bare file, not an archive."""
     job_id = await run_to_completion(export_client, recorder, audio_id)
@@ -596,7 +596,7 @@ async def test_a_repeated_single_stem_selection_is_still_a_single_file(
 
 
 async def test_whitespace_around_stem_names_is_tolerated(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(export_client, recorder, audio_id)
 
@@ -606,7 +606,7 @@ async def test_whitespace_around_stem_names_is_tolerated(
 
 
 async def test_a_single_stem_export_carries_no_manifest(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """A documented choice, asserted so it cannot regress silently."""
     job_id = await run_to_completion(export_client, recorder, audio_id)
@@ -619,7 +619,7 @@ async def test_a_single_stem_export_carries_no_manifest(
 
 
 async def test_the_manifest_embeds_the_separation_result_verbatim(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
 
@@ -640,7 +640,7 @@ async def test_the_manifest_embeds_the_separation_result_verbatim(
 
 
 async def test_the_manifest_exported_at_is_timezone_aware(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(export_client, recorder, audio_id)
 
@@ -651,7 +651,7 @@ async def test_the_manifest_exported_at_is_timezone_aware(
 
 
 async def test_the_manifest_lists_only_the_exported_stems(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     """``stems`` is what is in the archive; ``result.stems`` is the whole job."""
     job_id = await run_to_completion(export_client, recorder, audio_id, "standard_stems")
@@ -666,7 +666,7 @@ async def test_the_manifest_lists_only_the_exported_stems(
 
 
 async def test_export_of_an_unknown_job_returns_job_not_found(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
 ) -> None:
     error = assert_envelope(await export(export_client, "01NOTAJOB"), "job_not_found", 404)
     assert error["detail"] == {"job_id": "01NOTAJOB"}
@@ -682,7 +682,7 @@ async def test_export_of_an_unknown_job_returns_job_not_found(
     ],
 )
 async def test_export_of_a_running_job_returns_result_not_available(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -703,7 +703,7 @@ async def test_export_of_a_running_job_returns_result_not_available(
 
 
 async def test_export_of_a_cancelled_job_returns_result_not_available(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -727,7 +727,7 @@ async def test_export_of_a_cancelled_job_returns_result_not_available(
 
 
 async def test_export_of_a_failed_job_returns_result_not_available(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -746,7 +746,7 @@ async def test_export_of_a_failed_job_returns_result_not_available(
 
 
 async def test_an_unknown_stem_returns_stem_not_found(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     job_id = await run_to_completion(export_client, recorder, audio_id)
 
@@ -779,7 +779,7 @@ async def test_an_unknown_stem_returns_stem_not_found(
     ],
 )
 async def test_traversal_attempts_are_a_clean_stem_not_found(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, stems: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, stems: str
 ) -> None:
     """The result is the only authority, so these are simply not stem names."""
     job_id = await run_to_completion(export_client, recorder, audio_id)
@@ -790,7 +790,7 @@ async def test_traversal_attempts_are_a_clean_stem_not_found(
 
 @pytest.mark.parametrize("stems", ["", " ", "   ", "\t"])
 async def test_a_blank_stems_value_is_a_validation_error(
-    export_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str, stems: str
+    export_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str, stems: str
 ) -> None:
     """Omitting ``stems`` means "all"; supplying nothing is a client bug."""
     job_id = await run_to_completion(export_client, recorder, audio_id)
@@ -802,7 +802,7 @@ async def test_a_blank_stems_value_is_a_validation_error(
 
 
 async def test_a_deleted_stem_file_returns_stem_file_missing(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -820,7 +820,7 @@ async def test_a_deleted_stem_file_returns_stem_file_missing(
 
 
 async def test_an_ffmpeg_failure_is_export_failed(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -842,7 +842,7 @@ async def test_an_ffmpeg_failure_is_export_failed(
 
 
 async def test_an_ffmpeg_timeout_is_export_timed_out(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -874,7 +874,7 @@ async def test_an_ffmpeg_timeout_is_export_timed_out(
 
 
 async def test_a_real_ffmpeg_failure_is_export_failed(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -890,7 +890,7 @@ async def test_a_real_ffmpeg_failure_is_export_failed(
 
 
 async def test_an_export_failure_never_leaks_server_paths_or_ffmpeg_stderr(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -918,7 +918,7 @@ async def test_an_export_failure_never_leaks_server_paths_or_ffmpeg_stderr(
 
 
 async def test_a_failed_export_leaves_no_artifact_behind(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -945,7 +945,7 @@ async def test_a_failed_export_leaves_no_artifact_behind(
 
 
 async def test_a_repeated_identical_export_serves_the_cached_artifact(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     spy: TranscodeSpy,
@@ -964,7 +964,7 @@ async def test_a_repeated_identical_export_serves_the_cached_artifact(
 
 
 async def test_the_cache_key_covers_the_format_and_the_selection(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     spy: TranscodeSpy,
@@ -984,7 +984,7 @@ async def test_the_cache_key_covers_the_format_and_the_selection(
 
 
 async def test_artifacts_land_in_the_jobs_export_directory(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -1001,7 +1001,7 @@ async def test_artifacts_land_in_the_jobs_export_directory(
 
 
 async def test_a_stale_part_file_is_never_served(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -1041,7 +1041,7 @@ def blocking_spy(monkeypatch: pytest.MonkeyPatch) -> Iterator[TranscodeSpy]:
 
 
 async def test_other_requests_are_served_while_an_export_is_in_flight(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     blocking_spy: TranscodeSpy,
@@ -1071,7 +1071,7 @@ async def test_other_requests_are_served_while_an_export_is_in_flight(
 
 
 async def test_the_job_worker_keeps_running_during_an_export(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     blocking_spy: TranscodeSpy,
@@ -1139,7 +1139,7 @@ def assert_no_build_residue(exports: Path) -> None:
 
 @pytest.mark.parametrize(("stems", "archive"), [("vocals", False), (None, True)])
 async def test_a_cancelled_export_leaves_no_part_file_behind(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -1182,7 +1182,7 @@ async def test_a_cancelled_export_leaves_no_part_file_behind(
 
 
 async def test_concurrent_identical_exports_share_one_build(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
@@ -1219,7 +1219,7 @@ async def test_concurrent_identical_exports_share_one_build(
 
 
 async def test_the_build_lock_registry_does_not_grow(
-    export_client: httpx.AsyncClient, export_app: FastAPI, recorder: EventRecorder, audio_id: str
+    export_client: httpx2.AsyncClient, export_app: FastAPI, recorder: EventRecorder, audio_id: str
 ) -> None:
     """Entries are reference-counted, so a long-lived server does not leak."""
     probe = ContentionProbe()
@@ -1235,7 +1235,7 @@ async def test_the_build_lock_registry_does_not_grow(
 
 
 async def test_a_build_does_not_clobber_an_artifact_that_is_being_served(
-    export_client: httpx.AsyncClient,
+    export_client: httpx2.AsyncClient,
     export_app: FastAPI,
     recorder: EventRecorder,
     audio_id: str,
