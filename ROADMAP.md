@@ -111,7 +111,7 @@ Deferred review findings from PRs #5, #8, #17 and #20 are tracked as feature
 | 019 | Runtime telemetry sampler + metrics events   | MERGED  | 013, 018   | `019-telemetry-sampler` | #21 |
 | 020 | Telemetry panel UI (model/GPU/processing)    | MERGED  | 011, 016, 019* | `020-telemetry-panel` | #22 |
 | 021 | Result management + stem serving             | MERGED  | 014, 015   | `021-result-serving` | #20 |
-| 022 | Stem export (WAV24/float32/FLAC)             | PLANNED | 021        | | |
+| 022 | Stem export (WAV24/float32/FLAC)             | PR OPEN | 021        | `022-stem-export` | #25 |
 | 023 | Stem player UI (sync playback, solo, mute)   | PLANNED | 017, 021*  | | |
 | 024 | Export UI                                    | PLANNED | 022*, 023  | | |
 | 025 | Model download manager (SHA-256, atomic)     | PLANNED | 010        | | |
