@@ -84,28 +84,40 @@ async def create_job(
 
     References are resolved in the order audio → model → device → separator, so
     the first thing that cannot be resolved is what the client is told about.
-    The configuration recorded on the job is a copy with ``device_id`` set to
-    the **resolved** device, so ``Job.configuration.device_id`` is always
-    populated — in responses and in every event — even when the request omitted
-    it.
+    The device is resolved *with* the model, because ``Model.capabilities`` says
+    which compute backends the weights run on and a pairing that cannot work is
+    better refused here than discovered mid-job (see
+    :func:`~straticate.jobs.resolution.resolve_device`). The configuration
+    recorded on the job is a copy with ``device_id`` set to the **resolved**
+    device, so ``Job.configuration.device_id`` is always populated — in
+    responses and in every event — even when the request omitted it.
+
+    **Building the separator is awaited, not called.** A real inference backend
+    reads hundreds of megabytes of weights on a cache miss;
+    :meth:`~straticate.inference.registry.SeparatorRegistry.aget` runs that in a
+    worker thread so the event loop keeps serving requests, dispatching job
+    events and pushing WebSocket frames while it happens. The ``await`` sits
+    *before* ``submit`` deliberately: what must stay atomic is submit → sampler
+    registration, not resolution → submit.
 
     The separator is handed to the telemetry sampler (feature 019) **directly
     after** ``submit`` returns, with no ``await`` in between: the job ID does
     not exist until then, and any suspension point between the two would let
     the manager's worker start the job — and emit ``job_started`` — before the
-    sampler knew which separator to poll. This handler is already required to
-    be ``await``-free between resolution and submit (feature 015), so the
-    registration simply joins that atomic block.
+    sampler knew which separator to poll.
 
     Errors (see ``docs/contracts/rest-api.md``): ``audio_not_found`` (404),
     ``separation_mode_not_found`` (404), ``quality_option_not_found`` (404),
-    ``device_not_found`` (404), ``separator_unavailable`` (501),
-    ``service_unavailable`` (503).
+    ``device_not_found`` (404), ``model_device_unsupported`` (409),
+    ``model_weights_missing`` (409), ``separator_unavailable`` (501),
+    ``service_unavailable`` (503) — and, because building the separator happens
+    here, the two deployment faults that build can report:
+    ``model_weights_invalid`` (500) and ``model_parameters_invalid`` (500).
     """
     _record, input_path = resolve_audio(store, configuration.audio_id)
     model = resolve_model(catalog, configuration.mode_id, configuration.quality_id)
-    device = resolve_device(detector, configuration.device_id)
-    separator = registry.get(model)
+    device = resolve_device(detector, configuration.device_id, model=model)
+    separator = await registry.aget(model)
     executor = SeparatorJobExecutor(
         separator,
         input_path=input_path,

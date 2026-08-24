@@ -13,9 +13,13 @@ lives here:
   cancellation, fake GPU statistics and real playable placeholder stems.
 - :class:`SeparatorJobExecutor` — the thin adapter that makes any separator a
   :class:`straticate.jobs.JobExecutor`.
+- :class:`RoFormerSeparator` — the first real inference backend (feature 026):
+  a Mel-Band RoFormer running vendored architecture code over weights feature
+  025 installed, with real chunk-grained progress and real device telemetry.
 - :class:`SeparatorRegistry` — the architecture-keyed seam that turns a catalog
   :class:`~straticate.schemas.Model` into a separator (feature 015 resolves a
-  job's model through it; feature 026 registers a real builder in it).
+  job's model through it; a real backend is built off the event loop through
+  :meth:`SeparatorRegistry.aget`).
 - :mod:`straticate.inference.layout` — where a job's stems are written.
 
 Nothing in this package leaks PyTorch, tensors, or architecture-specific
@@ -47,11 +51,18 @@ from straticate.inference.fake import (
 from straticate.inference.layout import job_output_dir, job_stems_dir, stem_path
 from straticate.inference.pcm import AudioDecodeError, PcmAudio, decode_to_pcm, write_wav
 from straticate.inference.registry import (
+    InferenceParameterSource,
     SeparatorBuilder,
     SeparatorRegistry,
     default_separator_builders,
     fake_separator_builder,
+    roformer_separator_builder,
     separator_info_from_model,
+)
+from straticate.inference.roformer import (
+    ROFORMER_ARCHITECTURE,
+    RoFormerParameters,
+    RoFormerSeparator,
 )
 
 __all__ = [
@@ -59,14 +70,18 @@ __all__ = [
     "FAKE_SEPARATOR_INFOS",
     "FAKE_STANDARD_INFO",
     "FAKE_VOCALS_INFO",
+    "ROFORMER_ARCHITECTURE",
     "STEM_NAME_PATTERN",
     "AudioDecodeError",
     "DeviceStats",
     "FakeDeviceProfile",
     "FakeSeparator",
+    "InferenceParameterSource",
     "PcmAudio",
     "ProcessingStats",
     "ProgressCallback",
+    "RoFormerParameters",
+    "RoFormerSeparator",
     "SeparationProgress",
     "Separator",
     "SeparatorBuilder",
@@ -82,6 +97,7 @@ __all__ = [
     "fake_separator_info_for_mode",
     "job_output_dir",
     "job_stems_dir",
+    "roformer_separator_builder",
     "separator_info_from_model",
     "stem_path",
     "write_wav",

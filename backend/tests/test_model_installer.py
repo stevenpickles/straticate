@@ -256,21 +256,41 @@ async def test_a_model_without_an_artifact_reports_installed(build: Builder) -> 
     assert installation["error"] is None
 
 
-async def test_the_repository_catalog_is_entirely_installed(
+async def test_the_repository_catalog_separates_built_ins_from_downloads(
     client: httpx2.AsyncClient,
 ) -> None:
-    """Every built-in fake model is ready; none is offered as a download."""
+    """Built-in fakes are ready; the real model is offered as a download.
+
+    Since feature 026 the repository catalog holds both kinds, which is exactly
+    the distinction this field exists to make: a client can tell "offered" from
+    "ready" without trying to run a job and failing.
+    """
     response = await client.get(MODELS_URL)
     assert response.status_code == 200
-    for model in cast(list[dict[str, Any]], response.json()):
-        assert model["installation"] == {
+    by_id = {model["id"]: model for model in cast(list[dict[str, Any]], response.json())}
+
+    for model_id in ("fake-vocals-001", "fake-standard-001"):
+        assert by_id[model_id]["installation"] == {
             "state": "installed",
             "requires_download": False,
             "total_bytes": None,
             "downloaded_bytes": None,
             "progress": None,
             "error": None,
-        }, model["id"]
+        }, model_id
+
+    real = by_id["vocals-hq-001"]
+    installation = real["installation"]
+    assert installation["requires_download"] is True
+    assert installation["total_bytes"] > 0
+    # Weights are never committed, so a fresh checkout has none installed; a
+    # developer who installed them locally must not fail this test either.
+    assert installation["state"] in {"available", "installed"}
+    assert installation["downloaded_bytes"] is None
+    assert installation["error"] is None
+    # The private artifact block never rides along on a response.
+    assert "artifact" not in real
+    assert real["licensing"]["weights_license"] == "MIT"
 
 
 async def test_a_built_in_model_cannot_be_installed(build: Builder) -> None:

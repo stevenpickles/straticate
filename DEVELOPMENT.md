@@ -9,7 +9,8 @@
 - **FFmpeg** (with `ffprobe`) on `PATH`
 - Git
 - Optional: NVIDIA GPU + CUDA drivers (never required for development or
-  normal tests — the fake separator covers everything)
+  normal tests — the fake separator covers everything, and PyTorch installs as
+  its CPU build by default; see *PyTorch and CUDA* below)
 
 ## Backend setup
 
@@ -50,6 +51,71 @@ uv run pytest
 ```
 
 Auto-format: `uv run ruff format .`
+
+## PyTorch and CUDA
+
+`uv sync` installs **the CPU build of PyTorch**, deliberately.
+`backend/pyproject.toml` pins `torch` to PyTorch's own CPU wheel index:
+
+```toml
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+```
+
+The default PyPI `torch` wheel for Linux bundles the CUDA runtime — several
+gigabytes, downloaded on every CI run, for a job that has no GPU. The CPU wheel
+is a fraction of that and is the right default three times over: for CI, for
+development on a CPU-only machine, and for macOS/Windows, where the PyPI wheel
+is CPU-only anyway. `explicit = true` means *only* `torch` comes from that index;
+everything else still resolves from PyPI.
+
+**To run on an NVIDIA GPU**, swap that one wheel for a CUDA build after syncing.
+Nothing else changes — no code, no settings, no API, no schema. Detection
+(feature 018) starts reporting CUDA devices and jobs resolve to them
+automatically:
+
+```bash
+cd backend
+uv sync
+uv pip install --reinstall-package torch   --index-url https://download.pytorch.org/whl/cu126 torch
+```
+
+Substitute the CUDA version your driver supports (`cu121`, `cu124`, `cu126`, …);
+`nvidia-smi` reports the maximum.
+
+Two notes on why it is a second command rather than a flag on the first.
+Redirecting the *named* index (`uv sync --index pytorch-cpu=…/cu126`) loses its
+`explicit = true`, so unrelated packages start resolving from PyTorch's index
+and the lock fails; and `uv sync` re-pins `torch` from the lock file, so **a
+later `uv sync` puts the CPU build back** and this command has to be repeated.
+That is a fair trade for a default that keeps CI lean, and it is one line in a
+setup script.
+
+Confirm which build is installed:
+
+```bash
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+curl localhost:8000/api/v1/system/devices
+```
+
+### Model weights
+
+Weights are never committed (ARCHITECTURE.md §9) and never downloaded by tests.
+Install them through the running application:
+
+```bash
+curl -X POST localhost:8000/api/v1/models/vocals-hq-001/install
+curl localhost:8000/api/v1/models/vocals-hq-001    # installation.state / .progress
+```
+
+The artifact is verified against the SHA-256 pinned in `models/catalog.json`
+before it is published into `models/weights/{model_id}/weights.bin`. The
+high-quality vocals model is ~913 MB.
 
 ## Frontend setup
 
@@ -110,12 +176,18 @@ file directly.
 | Audio tests | pytest, tiny generated fixtures in `testdata/` | always | FFmpeg |
 | Frontend unit/component | `frontend/` (Vitest + Testing Library) | always | nothing external |
 | E2E (fake separator) | Playwright — feature 030, not yet written | *(will be)* always | FFmpeg |
-| GPU/model integration | separate suite, manually triggered | on demand | CUDA GPU, model downloads |
+| GPU/model integration | `backend/tests/test_roformer_integration.py` (`-m integration`) | never (opt-in) | installed weights, and a GPU for the `gpu` tests |
 
 Principles:
 
 - Normal CI never needs CUDA, a GPU, or model downloads — jobs run against the
-  fake separator.
+  fake separator, and the real separator's plumbing is tested against a
+  synthetic ~20 000-parameter checkpoint built at test time
+  (`backend/tests/roformer_fixtures.py`).
+- **The real-model tier is opt-in.** `backend/pyproject.toml` sets
+  `addopts = "-m 'not integration'"`, so a plain `pytest` deselects it; run it
+  with `uv run pytest -m integration` once the weights are installed. Its tests
+  skip with an explanatory message when their prerequisites are missing.
 - Audio fixtures are generated (sine sweeps, noise bursts) and seconds long;
   never commit copyrighted or large audio.
 - WebSocket flows are tested with an in-process client against the real event
@@ -155,8 +227,10 @@ is when the install should be added — not before, where it would be a minute o
 CI spent on nothing.
 
 A later `integration-gpu` workflow (manual `workflow_dispatch`, self-hosted or
-skipped by default) covers real-model validation. CI must not download ML
-models.
+skipped by default) covers real-model validation: it would install the weights
+through the model manager and run `pytest -m integration`. CI must not download
+models, and the CPU-wheel pin above is what keeps the backend job's `uv sync`
+from growing by gigabytes now that `torch` is a runtime dependency.
 
 ## Conventions
 
