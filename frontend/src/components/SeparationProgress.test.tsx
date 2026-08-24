@@ -3,6 +3,12 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SeparationProgress } from './SeparationProgress'
 import {
+  AppStateProvider,
+  initialAppState,
+  useAppState,
+  type AppState,
+} from '../state/appState'
+import {
   JobStateProvider,
   initialJobState,
   useJobDispatch,
@@ -12,7 +18,12 @@ import {
 import { JobEventBridge } from '../ws/JobEventBridge'
 import { JobEventClient } from '../ws/client'
 import { FakeScheduler, FakeWebSocketFactory } from '../test/mockWebSocket'
-import { sampleJob, sampleJobId, sampleResult } from '../test/fixtures'
+import {
+  sampleAudioFile,
+  sampleJob,
+  sampleJobId,
+  sampleResult,
+} from '../test/fixtures'
 import type { Job, JobState, WebSocketEvent } from '../api/types'
 
 const silentLogger = { warn: vi.fn() }
@@ -71,6 +82,26 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
     resolve = r
   })
   return { promise, resolve }
+}
+
+/**
+ * Application state as it stands once a job is running: a file uploaded and
+ * the workflow in the `separate` phase, which is what the routes out of this
+ * panel (feature 023) act on.
+ */
+function appStateIn(overrides: Partial<AppState> = {}): AppState {
+  return {
+    ...initialAppState,
+    phase: 'separate',
+    upload: { status: 'uploaded', file: sampleAudioFile },
+    ...overrides,
+  }
+}
+
+/** Surfaces the current workflow phase. */
+function WorkflowPhase() {
+  const { phase } = useAppState()
+  return <p data-testid="workflow-phase">{phase}</p>
 }
 
 /** Surfaces the tracked job id, and tracks another job on click. */
@@ -136,11 +167,13 @@ function cancelRequests(
  */
 async function renderLive(jobState: Partial<JobStateValue> = {}) {
   const view = render(
-    <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
-      <JobEventBridge client={client} />
-      <SeparationProgress />
-      <TrackOther />
-    </JobStateProvider>,
+    <AppStateProvider initialState={appStateIn()}>
+      <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
+        <JobEventBridge client={client} />
+        <SeparationProgress />
+        <TrackOther />
+      </JobStateProvider>
+    </AppStateProvider>,
   )
   await act(async () => {
     sockets.last.emitOpen()
@@ -149,13 +182,19 @@ async function renderLive(jobState: Partial<JobStateValue> = {}) {
 }
 
 /** Render the panel over a fixed store state, without a socket. */
-function renderStatic(jobState: Partial<JobStateValue> = {}) {
+function renderStatic(
+  jobState: Partial<JobStateValue> = {},
+  appState: Partial<AppState> = {},
+) {
   return render(
-    <JobStateProvider
-      initialState={{ ...initialJobState, connection: 'open', ...jobState }}
-    >
-      <SeparationProgress />
-    </JobStateProvider>,
+    <AppStateProvider initialState={appStateIn(appState)}>
+      <JobStateProvider
+        initialState={{ ...initialJobState, connection: 'open', ...jobState }}
+      >
+        <SeparationProgress />
+        <WorkflowPhase />
+      </JobStateProvider>
+    </AppStateProvider>,
   )
 }
 
@@ -276,7 +315,7 @@ describe('SeparationProgress live progress', () => {
 })
 
 describe('SeparationProgress terminal states', () => {
-  it('reports a completed job and hands off to the results UI', () => {
+  it('reports a completed job and offers the route into the results', () => {
     renderStatic({
       job: jobIn('completed', { progress: 1, result: sampleResult }),
     })
@@ -285,9 +324,8 @@ describe('SeparationProgress terminal states', () => {
       screen.getByText(/Separation complete — 2 stems are ready\./),
     ).toBeInTheDocument()
     expect(
-      screen.getByText(/Playback and export arrive with the results UI\./),
+      screen.getByRole('button', { name: 'View results' }),
     ).toBeInTheDocument()
-    expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 
   it('reports the stage a cancelled job was stopped at', () => {
@@ -326,9 +364,69 @@ describe('SeparationProgress terminal states', () => {
     'offers no cancel button once the job is %s',
     (state) => {
       renderStatic({ job: jobIn(state) })
-      expect(screen.queryByRole('button')).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: /Cancel/ }),
+      ).not.toBeInTheDocument()
     },
   )
+})
+
+describe('SeparationProgress routes out of the separate phase', () => {
+  it('advances the workflow to inspect when the results are opened', async () => {
+    renderStatic({
+      job: jobIn('completed', { progress: 1, result: sampleResult }),
+    })
+    expect(screen.getByTestId('workflow-phase')).toHaveTextContent('separate')
+
+    await userEvent.click(screen.getByRole('button', { name: 'View results' }))
+
+    expect(screen.getByTestId('workflow-phase')).toHaveTextContent('inspect')
+  })
+
+  it.each<JobState>(['completed', 'cancelled', 'failed'])(
+    'offers to start another separation once the job is %s',
+    (state) => {
+      renderStatic({ job: jobIn(state) })
+      expect(
+        screen.getByRole('button', { name: 'Start another separation' }),
+      ).toBeInTheDocument()
+    },
+  )
+
+  it.each<JobState>(['queued', 'separating'])(
+    'offers no route out while the job is %s',
+    (state) => {
+      renderStatic({ job: jobIn(state) })
+      expect(
+        screen.queryByRole('button', { name: 'View results' }),
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'Start another separation' }),
+      ).not.toBeInTheDocument()
+    },
+  )
+
+  it('offers no results route for a cancelled or failed job', () => {
+    renderStatic({ job: jobIn('failed') })
+    expect(
+      screen.queryByRole('button', { name: 'View results' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('clears the tracked job and returns to configure', async () => {
+    renderStatic({
+      job: jobIn('completed', { progress: 1, result: sampleResult }),
+    })
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+
+    expect(screen.getByTestId('workflow-phase')).toHaveTextContent('configure')
+    expect(
+      screen.getByText('No separation job is being tracked.'),
+    ).toBeInTheDocument()
+  })
 })
 
 describe('SeparationProgress cancellation', () => {

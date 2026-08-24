@@ -192,6 +192,27 @@ export type AppAction =
       readonly code: string
       readonly message: string
     }
+  | {
+      /**
+       * The user asked to listen to a completed job's stems: advances the
+       * workflow from `separate` to `inspect`. Ignored from any other phase
+       * (there is nothing to inspect before a job has run).
+       */
+      readonly type: 'results/inspect'
+    }
+  | {
+      /**
+       * The user asked to separate again: returns the workflow to `configure`
+       * with the upload and the loaded catalog intact, and clears any stale
+       * create-request error. With no uploaded file it falls back to `select`
+       * rather than doing nothing — it is the escape hatch out of a finished
+       * job, so it must always land somewhere the user can act.
+       *
+       * The tracked job is a separate store: whoever dispatches this also
+       * dispatches `job/clear` (see `state/jobState.tsx`).
+       */
+      readonly type: 'results/startAnother'
+    }
 
 /** Initial state of the configure slice: nothing loaded, nothing selected. */
 export const initialConfigureState: ConfigureState = {
@@ -343,6 +364,21 @@ export function appReducer(state: AppState, action: AppAction): AppState {
             message: action.message,
           },
         },
+      }
+    case 'results/inspect':
+      return state.phase === 'separate' || state.phase === 'inspect'
+        ? { ...state, phase: 'inspect' }
+        : state
+    case 'results/startAnother':
+      return {
+        ...state,
+        // Always a transition, never a no-op: its dispatcher pairs it with an
+        // unconditional `job/clear`, and if only one of the two applied the
+        // user would be left on a phase whose job had vanished, with no
+        // control left to escape it. Without an uploaded file there is
+        // nothing to configure, so the honest destination is file selection.
+        phase: state.upload.status === 'uploaded' ? 'configure' : 'select',
+        configure: { ...state.configure, create: { status: 'idle' } },
       }
   }
 }
