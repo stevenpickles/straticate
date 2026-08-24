@@ -105,6 +105,52 @@ export const sampleRuntimeMetrics: RuntimeMetricsEvent = {
 }
 
 /**
+ * A `runtime_metrics` payload from the development fake separator
+ * (feature 014). Its device block is honestly labelled `backend: "fake"` —
+ * `backend` is an open set (ARCHITECTURE.md §10), so the panel must render
+ * it exactly like any other device and never assume "device" means "GPU".
+ */
+export const sampleFakeDeviceRuntimeMetrics: RuntimeMetricsEvent = {
+  type: 'runtime_metrics',
+  job_id: sampleJobId,
+  model: {
+    id: 'fake-vocals-001',
+    display_name: 'Fake Vocals (development)',
+    architecture: 'fake',
+    version: '1.0',
+    separation_mode: 'vocals',
+    stem_count: 2,
+  },
+  gpu: {
+    device_id: 'fake:0',
+    name: 'Straticate Fake Accelerator',
+    backend: 'fake',
+    memory_allocated_bytes: 1503238553,
+    memory_peak_bytes: 1610612736,
+    memory_total_bytes: 8589934592,
+    utilization: 0.42,
+    temperature_celsius: 48,
+  },
+  processing: {
+    stage: 'loading_model',
+    chunks_completed: 0,
+    chunks_total: 46,
+    elapsed_seconds: 0.4,
+    audio_processed_seconds: 0,
+    realtime_factor: 0.5,
+  },
+}
+
+/**
+ * A `runtime_metrics` payload from a run with no compute device: the whole
+ * `gpu` block is null (the "running on CPU" shape).
+ */
+export const sampleCpuRuntimeMetrics: RuntimeMetricsEvent = {
+  ...sampleRuntimeMetrics,
+  gpu: null,
+}
+
+/**
  * Representative `GET /separation-modes` payload covering the shapes the
  * configure UI has to handle: a two-stem mode with several quality tiers
  * and a four-stem mode served by a single model (one tier).
