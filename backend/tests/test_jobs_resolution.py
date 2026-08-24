@@ -76,7 +76,7 @@ def catalog() -> ModelCatalog:
 def register_audio(store: AudioStore, *, filename: str = "song.wav") -> tuple[str, Path]:
     """Register an audio record with a real (empty) file on disk."""
     audio_id = store.new_id()
-    path = store.original_path(audio_id, filename)
+    path = store.prepare_original_path(audio_id, filename)
     path.write_bytes(b"not really audio, but it exists")
     store.register(
         AudioFile(
@@ -184,6 +184,42 @@ def test_resolve_audio_rejects_a_registered_record_whose_file_is_gone(tmp_path: 
         resolve_audio(store, audio_id)
     assert excinfo.value.code == "audio_not_found"
     assert excinfo.value.status_code == 404
+
+
+def test_resolve_audio_creates_nothing_on_disk(tmp_path: Path) -> None:
+    """The resolvers are documented as pure; a lookup must leave no trace.
+
+    ``AudioStore.original_path`` used to ``mkdir`` unconditionally, so probing
+    for audio that was not there recreated an empty
+    ``{data_dir}/audio/{audio_id}/`` and *then* returned 404 — an orphan
+    directory per failed lookup, on a read-only path.
+    """
+    store = AudioStore(tmp_path)
+    audio_id, path = register_audio(store)
+    path.unlink()
+    path.parent.rmdir()
+    before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
+
+    with pytest.raises(ApplicationError):
+        resolve_audio(store, audio_id)
+    with pytest.raises(ApplicationError):
+        resolve_audio(store, "01NEVER-REGISTERED")
+
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == before
+
+
+def test_original_path_is_pure_and_prepare_creates_the_directory(tmp_path: Path) -> None:
+    store = AudioStore(tmp_path)
+    audio_id = store.new_id()
+
+    path = store.original_path(audio_id, "song.wav")
+    assert not path.parent.exists()
+    assert list(tmp_path.iterdir()) == []
+
+    prepared = store.prepare_original_path(audio_id, "song.wav")
+    assert prepared == path
+    assert prepared.parent.is_dir()
+    assert not prepared.exists(), "the directory is created, the file is not"
 
 
 # -- device resolution ------------------------------------------------------

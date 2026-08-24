@@ -55,7 +55,7 @@ async def _save_upload(file: UploadFile, store: AudioStore, audio_id: str, limit
             exceeds ``limit``; the partial file is left for the caller's
             cleanup handler to remove.
     """
-    destination = store.original_path(audio_id, file.filename or "")
+    destination = store.prepare_original_path(audio_id, file.filename or "")
     size = 0
     with destination.open("wb") as out:
         while chunk := await file.read(_CHUNK_SIZE):

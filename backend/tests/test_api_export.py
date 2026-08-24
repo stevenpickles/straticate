@@ -286,7 +286,7 @@ def register_audio(app: FastAPI, *, seconds: float = SOURCE_SECONDS) -> str:
     """Write a real tone WAV into the app's audio store and register it."""
     store = app.state.audio_store
     audio_id = cast(str, store.new_id())
-    path = cast(Path, store.original_path(audio_id, "song.wav"))
+    path = cast(Path, store.prepare_original_path(audio_id, "song.wav"))
     write_tone_wav(path, seconds=seconds, channels=SOURCE_CHANNELS, sample_rate=SOURCE_SAMPLE_RATE)
     store.register(
         AudioFile(

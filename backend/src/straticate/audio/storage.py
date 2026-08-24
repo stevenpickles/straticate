@@ -32,10 +32,20 @@ def _sanitized_suffix(filename: str) -> str:
 class AudioStore:
     """Owns uploaded audio files on disk and their in-memory records.
 
+    **Reading a path never writes to the filesystem.** The store offers two
+    path accessors and the difference is the whole point of the split:
+    :meth:`original_path` computes a path and touches nothing, while
+    :meth:`prepare_original_path` creates the directory because a writer is
+    about to use it. Before the split there was only the creating form, so a
+    read-only lookup of an upload whose file had vanished
+    (:func:`straticate.jobs.resolution.resolve_audio`, documented as pure)
+    recreated an empty ``{data_dir}/audio/{audio_id}/`` and *then* reported
+    404 — leaving an orphan directory behind on every such probe.
+
     Args:
         data_dir: Application data directory (``Settings.data_dir``). The
             store writes beneath ``{data_dir}/audio``; directories are
-            created lazily on first use.
+            created lazily, by :meth:`prepare_original_path` only.
     """
 
     def __init__(self, data_dir: Path) -> None:
@@ -49,13 +59,26 @@ class AudioStore:
     def original_path(self, audio_id: str, filename: str) -> Path:
         """Return the on-disk path for an upload's original media.
 
-        Creates the ``{data_dir}/audio/{audio_id}`` directory if needed. The
-        file is always named ``original`` plus a sanitized copy of the
-        client filename's extension (purely cosmetic).
+        **Pure**: the path is computed, and neither it nor its directory is
+        created. The returned path may therefore not exist — callers that need
+        the file check for it, which is exactly what a reader wants. Use
+        :meth:`prepare_original_path` when about to write.
+
+        The file is always named ``original`` plus a sanitized copy of the
+        client filename's extension (purely cosmetic — probing never trusts
+        it).
         """
-        directory = self._audio_root / audio_id
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory / f"original{_sanitized_suffix(filename)}"
+        return self._audio_root / audio_id / f"original{_sanitized_suffix(filename)}"
+
+    def prepare_original_path(self, audio_id: str, filename: str) -> Path:
+        """Return :meth:`original_path`, with its directory created.
+
+        The one place the store creates directories, called from the upload
+        write path. The file itself is not created.
+        """
+        path = self.original_path(audio_id, filename)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
 
     def register(self, record: AudioFile) -> None:
         """Add a validated upload to the registry."""
