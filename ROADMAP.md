@@ -37,11 +37,19 @@ model download, real chunk progress, real telemetry. Features 025–026.
 Fast + HQ vocal models, 4-stem model, capability-driven mode selection,
 production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
-## Current state (2026-08-23)
+## Current state (2026-08-24)
 
-Phases 0–5 are substantially merged into `dev`: features 001–010 and 012–014,
-016, and 018. **256 backend tests and 186 frontend tests**, all CI-enforced on
-every PR.
+Phases 0–5 are merged into `dev`: features 001–010, 012–016 and 018.
+**296 backend tests and 186 frontend tests**, all CI-enforced on every PR.
+
+**The two halves are joined.** Feature 015 landed the job REST endpoints, so
+the whole backend path works end to end and was verified against a real server
+(not just the ASGI test transport): upload → `POST /jobs` (201, returns
+immediately) → FIFO queue → `FakeSeparator` → real WebSocket events
+(`job_created → job_started → job_stage_changed → job_progress → job_completed`)
+→ four playable stems on disk. Cancelling mid-run returns while the job is still
+`separating`, emits `job_cancelled` with `stage_at_cancellation`, is idempotent,
+and leaves no partial stem behind.
 
 Working today:
 
@@ -49,26 +57,23 @@ Working today:
   generated TypeScript), audio upload/probe/delete, the model catalog serving
   capability-derived separation modes, compute-device detection (CUDA via an
   *optional* torch probe, CPU fallback; no torch dependency yet), the
-  asynchronous job manager, the WebSocket event hub, and the `Separator`
-  abstraction with a working `FakeSeparator`.
+  asynchronous job manager, the WebSocket event hub, the `Separator`
+  abstraction with a working `FakeSeparator`, and the job REST resource with
+  the architecture-keyed `SeparatorRegistry`.
 - **Frontend** — app shell, drag-drop/file-picker upload with progress, the
   audio metadata panel, and the typed job REST + WebSocket clients with
-  reconnect.
+  reconnect. **No UI yet starts a job** — that is 011.
 
-**Next up — 015 is the critical path.** `015` (job REST endpoints) is the last
-piece joining the halves: it resolves audio + model + device, builds a
-`SeparatorJobExecutor` (feature 014), submits it to the job manager (012), and
-lets events flow out through the hub (013) to the already-built frontend
-clients (016). It depends only on MERGED work.
+**Next up.** The remaining M1 work fans out in three waves, ordered by which
+features can hold disjoint file ownership rather than by feature number:
 
-Then, in parallel: **011** (mode/quality selection UI, consuming
-`/separation-modes`), **017** (progress UI + cancel), **019** (telemetry
-sampler — read the "what 019 must do" sections in the 013/014/018 feature
-docs), **020** (telemetry panel), and after 015: **021**/**022** (result
-serving + export) and **023**/**024** (stem player + export UI) → milestone
-**M1**.
-
-Deferred review findings from PRs #5 and #8 are tracked as feature **029**.
+- **Wave A** — **011** (mode/quality selection UI + the "separate" action),
+  **019** (telemetry sampler), **021** (result serving + stem streaming).
+- **Wave B** — **017** (progress UI + cancel), **020** (telemetry panel),
+  **022** (stem export). 017 and 020 need the phase scaffolding and the
+  per-component CSS convention that 011 introduces, which is why they follow it
+  rather than running beside it (matching the `011 → 017` edge in the graph).
+- **Wave C** — **023** (stem player) and **024** (export UI) → milestone **M1**.
 
 ## Feature ledger
 
@@ -88,7 +93,7 @@ Deferred review findings from PRs #5 and #8 are tracked as feature **029**.
 | 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |
 | 013 | WebSocket event hub + typed events           | MERGED  | 012        | `013-websocket-hub` | #13 |
 | 014 | Separator interface + FakeSeparator          | MERGED  | 012        | `014-fake-separator` | #15 |
-| 015 | Job REST endpoints (create/get/cancel/list)  | PR OPEN | 012, 014   | `015-job-endpoints` | #17 |
+| 015 | Job REST endpoints (create/get/cancel/list)  | MERGED  | 012, 014   | `015-job-endpoints` | #17 |
 | 016 | Frontend job + WebSocket clients             | MERGED  | 003, 005*  | `016-job-ws-clients` | #14 |
 | 017 | Progress UI + cancel + error handling        | PLANNED | 011, 016   | | |
 | 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
