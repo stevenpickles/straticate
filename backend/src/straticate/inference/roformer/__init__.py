@@ -17,6 +17,7 @@ from straticate.inference.roformer.separator import (
     DEFAULT_CHUNK_SAMPLES,
     DEFAULT_NUM_OVERLAP,
     ROFORMER_ARCHITECTURE,
+    NvmlProbe,
     RoFormerParameters,
     RoFormerSeparator,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "DEFAULT_CHUNK_SAMPLES",
     "DEFAULT_NUM_OVERLAP",
     "ROFORMER_ARCHITECTURE",
+    "NvmlProbe",
     "RoFormerParameters",
     "RoFormerSeparator",
 ]

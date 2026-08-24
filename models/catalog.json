@@ -82,6 +82,9 @@
         "inference": {
           "chunk_size": 352800,
           "num_overlap": 2
+        },
+        "output": {
+          "residual_stem": "instrumental"
         }
       }
     }

@@ -55,6 +55,8 @@ onto the loop, which is exactly why the contract puts that adapter there.
 from __future__ import annotations
 
 import asyncio
+import atexit
+import importlib
 import logging
 import math
 import time
@@ -177,11 +179,16 @@ class RoFormerParameters:
         chunk_samples: Samples per forward pass.
         num_overlap: How many windows cover each sample; windows advance by
             ``chunk_samples // num_overlap``.
+        residual_stem: Name of the advertised stem that is the mixture minus
+            everything the network emits, or ``None`` when the network emits
+            every advertised stem itself. Named rather than positional — see
+            :func:`_residual_stem_index`.
     """
 
     model: Mapping[str, Any]
     chunk_samples: int = DEFAULT_CHUNK_SAMPLES
     num_overlap: int = DEFAULT_NUM_OVERLAP
+    residual_stem: str | None = None
 
     @property
     def num_stems(self) -> int:
@@ -201,7 +208,8 @@ class RoFormerParameters:
 
             "default_inference_parameters": {
               "model":     { …the checkpoint's hyperparameters… },
-              "inference": { "chunk_size": 352800, "num_overlap": 2 }
+              "inference": { "chunk_size": 352800, "num_overlap": 2 },
+              "output":    { "residual_stem": "instrumental" }
             }
 
         Raises:
@@ -235,7 +243,19 @@ class RoFormerParameters:
         )
         chunk_samples = _positive_int(inference.get("chunk_size", DEFAULT_CHUNK_SAMPLES), model_id)
         num_overlap = _positive_int(inference.get("num_overlap", DEFAULT_NUM_OVERLAP), model_id)
-        return cls(model=normalized, chunk_samples=chunk_samples, num_overlap=num_overlap)
+        output_block = raw.get("output")
+        output = cast(Mapping[str, Any], output_block if isinstance(output_block, Mapping) else {})
+        residual = output.get("residual_stem")
+        if residual is not None and not isinstance(residual, str):
+            raise _parameters_invalid(
+                model_id, f"output.residual_stem must be a stem name, got {residual!r}"
+            )
+        return cls(
+            model=normalized,
+            chunk_samples=chunk_samples,
+            num_overlap=num_overlap,
+            residual_stem=residual,
+        )
 
 
 @dataclass(slots=True)
@@ -343,7 +363,7 @@ class RoFormerSeparator:
         return SeparatorRuntimeStats(
             job_id=run.job_id,
             model=self._info,
-            device=_device_stats(run.device),
+            device=device_stats(run.device),
             processing=ProcessingStats(
                 stage=run.stage,
                 chunks_completed=run.chunks_completed,
@@ -431,6 +451,12 @@ class RoFormerSeparator:
 
             _announce(stage_callback, JobState.SEPARATING)
             run.stage = JobState.SEPARATING
+            # Per **run**, not per device placement: ``max_memory_allocated`` is
+            # a per-device high-water mark that nothing else resets, so without
+            # this a ten-second track following a six-minute one would report
+            # the six-minute track's peak as its own. It resets to the *current*
+            # allocation, so the resident model still counts.
+            reset_peak_memory(device)
             estimates = await asyncio.to_thread(
                 self._run_chunks, source, run, progress_callback, cancellation_token, device
             )
@@ -504,8 +530,6 @@ class RoFormerSeparator:
             return
         self._model.to(device)
         self._loaded_device = device
-        if device.type == "cuda":
-            torch.cuda.reset_peak_memory_stats(device)
 
     def _run_chunks(
         self,
@@ -604,6 +628,11 @@ class RoFormerSeparator:
         minus it. Doing that subtraction in the float domain — before
         quantization — is what makes ``vocals + instrumental`` reconstruct the
         mixture instead of accumulating two rounding errors.
+
+        The residual is inserted at the position the catalog gave it (see
+        :func:`_residual_stem_index`), so the list returned here lines up with
+        :attr:`SeparatorInfo.stems` index for index — which is what
+        :meth:`_encode` then relies on when it zips the two together.
         """
         parameters = self._parameters
         mixture = pcm_to_tensor(source, parameters.audio_channels)
@@ -704,28 +733,72 @@ def _load_model(
 
 
 def _residual_stem_index(info: SeparatorInfo, parameters: RoFormerParameters) -> int | None:
-    """Which advertised stem (if any) is the mixture minus the network's output.
+    """Position of the advertised stem that is the mixture minus the network's output.
 
-    A vocals model emits one stem and the catalog advertises two: the second is
-    ``mixture - vocals``. The rule is derived, not configured — the catalog
-    already states both ``stems`` and (through the hyperparameters)
-    ``num_stems``, and a third place to say the same thing is a third place for
-    them to disagree.
+    A vocals model emits one stem and the catalog advertises two: the other is
+    ``mixture - vocals``. *Which* other one must be **named**, in the catalog's
+    ``default_inference_parameters.output.residual_stem``, and not inferred from
+    position.
+
+    The tempting inference — "the residual is the last advertised stem" — is
+    unsound, and silently so. The manifest schema imposes no order on ``stems``,
+    and this architecture's whole promise is that another checkpoint is a pure
+    data edit; an entry written as ``"stems": ["instrumental", "vocals"]`` would
+    then have had the network's vocals written to ``instrumental.wav`` and the
+    residual to ``vocals.wav``, with nothing anywhere reporting a problem.
+    Silently wrong audio is the worst thing this module could produce, so the
+    fact is declared and every other shape is refused.
+
+    The remaining stems map to the network's outputs in advertised order. For a
+    one-output model that is fully determined; for a multi-output one it is the
+    same ordering contract the ``advertised == produced`` case already has, and
+    the catalog entry is where the author states it.
 
     Raises:
         ApplicationError: ``model_parameters_invalid`` (500) when the stem list
-            and the network's output count cannot be reconciled.
+            and the network's output count cannot be reconciled, when a residual
+            is implied but not named, when a residual is named that the model
+            does not advertise, or when one is named that is not needed.
     """
     advertised = len(info.stems)
     produced = parameters.num_stems
+    named = parameters.residual_stem
+
     if advertised == produced:
+        if named is not None:
+            raise _parameters_invalid(
+                info.model_id,
+                (
+                    f"output.residual_stem is {named!r}, but the network emits all "
+                    f"{produced} advertised stems, so none is a residual"
+                ),
+            )
         return None
-    if advertised == produced + 1:
-        return advertised - 1
-    raise _parameters_invalid(
-        info.model_id,
-        f"the catalog advertises {advertised} stems but the network produces {produced}",
-    )
+
+    if advertised != produced + 1:
+        raise _parameters_invalid(
+            info.model_id,
+            f"the catalog advertises {advertised} stems but the network produces {produced}",
+        )
+
+    if named is None:
+        raise _parameters_invalid(
+            info.model_id,
+            (
+                f"the network produces {produced} of the {advertised} advertised stems, "
+                f"so output.residual_stem must name the one derived by subtraction "
+                f"(one of {', '.join(info.stems)})"
+            ),
+        )
+    if named not in info.stems:
+        raise _parameters_invalid(
+            info.model_id,
+            (
+                f"output.residual_stem is {named!r}, which this model does not "
+                f"advertise (stems: {', '.join(info.stems)})"
+            ),
+        )
+    return info.stems.index(named)
 
 
 def _parameters_invalid(model_id: str, reason: str) -> ApplicationError:
@@ -805,53 +878,136 @@ class _CudaDevicePropertiesLike(Protocol):
     total_memory: int
 
 
-def _device_stats(device: torch.device) -> DeviceStats | None:
+def cuda_namespace() -> Any:
+    """The ``torch.cuda`` namespace, as ``Any``.
+
+    Two jobs in one small function. It is where torch's unannotated CUDA
+    members are reached (strict mode reports them as partially unknown, and
+    :mod:`straticate.system.devices` narrows the same way), and it is the single
+    seam a test replaces to exercise the CUDA telemetry path on a host with no
+    GPU — which is the only way any of this gets covered until real hardware
+    runs it.
+    """
+    return torch.cuda
+
+
+def reset_peak_memory(device: torch.device) -> None:
+    """Start a fresh peak-memory measurement for ``device``; a no-op off CUDA.
+
+    ``torch.cuda.max_memory_allocated`` is a **per-device high-water mark that
+    only an explicit reset clears**, so this belongs once per separation. It
+    resets the peak to the currently allocated figure rather than to zero, so
+    the resident network still counts towards the run's peak.
+    """
+    if device.type != "cuda":
+        return
+    cuda_namespace().reset_peak_memory_stats(device)
+
+
+def device_stats(device: torch.device) -> DeviceStats | None:
     """Real device telemetry, or ``None`` on CPU (the contract's ``gpu: null``).
 
     ARCHITECTURE.md §12 lists utilization and temperature as NVML-sourced and
     **optional**; they stay ``None`` unless an NVML binding happens to be
     importable, so nothing here can make basic operation depend on it.
     """
-    if device.type != "cuda" or not torch.cuda.is_available():
+    cuda = cuda_namespace()
+    if device.type != "cuda" or not cuda.is_available():
         return None
     index = device.index or 0
-    # ``torch.cuda.get_device_properties`` has no return annotation, so it is
-    # reached through ``Any`` and immediately narrowed onto the protocol above.
-    cuda: Any = torch.cuda
     properties = cast(_CudaDevicePropertiesLike, cuda.get_device_properties(index))
-    utilization, temperature = _nvml_sample(index)
+    utilization, temperature = _NVML.sample(index)
     return DeviceStats(
         device_id=f"cuda:{index}",
         name=str(properties.name),
         backend="cuda",
-        memory_allocated_bytes=int(torch.cuda.memory_allocated(index)),
-        memory_peak_bytes=int(torch.cuda.max_memory_allocated(index)),
+        memory_allocated_bytes=int(cuda.memory_allocated(index)),
+        memory_peak_bytes=int(cuda.max_memory_allocated(index)),
         memory_total_bytes=int(properties.total_memory),
         utilization=utilization,
         temperature_celsius=temperature,
     )
 
 
-def _nvml_sample(index: int) -> tuple[float | None, float | None]:
-    """Utilization (0..1) and temperature in °C from NVML, or ``(None, None)``.
+class NvmlProbe:
+    """Optional NVML utilization/temperature, initialised **at most once**.
 
-    Entirely best-effort. NVML is not a declared dependency and never becomes
-    one; if the binding is absent, or the driver refuses, the two optional
-    fields simply stay empty and every other number in the snapshot is
-    unaffected.
+    NVML is not a dependency and never becomes one (ARCHITECTURE.md §12: basic
+    operation must never require it). But it is sampled from
+    :meth:`RoFormerSeparator.runtime_stats`, which
+    :class:`straticate.telemetry.TelemetrySampler` calls **directly on the event
+    loop** — deliberately, because :mod:`straticate.inference.base` promises that
+    ``runtime_stats()`` "must be a cheap, non-blocking snapshot".
+
+    An ``nvmlInit()``/``nvmlShutdown()`` pair per sample is not that: it is tens
+    of milliseconds of driver setup and teardown, once a second, for the whole
+    length of a job, in front of every WebSocket frame, job event and HTTP
+    request the loop owes somebody. So the binding is loaded and initialised
+    lazily on the first sample, the device handles are cached, and shutdown is
+    left to :mod:`atexit` — which is how a long-running NVML consumer is meant
+    to behave anyway. What remains per sample is two driver queries.
+
+    A failure at any point is absorbed: the two optional fields stay ``None``
+    and every other number in the snapshot is unaffected. A failure to *load*
+    is remembered, so an absent binding costs one failed import per process
+    rather than one per sample.
     """
-    try:  # pragma: no cover - exercised only where an NVML binding exists
-        nvml: Any = __import__("pynvml")
-        nvml.nvmlInit()
-        try:
-            handle = nvml.nvmlDeviceGetHandleByIndex(index)
-            rates = nvml.nvmlDeviceGetUtilizationRates(handle)
-            celsius = nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU)
+
+    __slots__ = ("_handles", "_module", "_unavailable")
+
+    def __init__(self) -> None:
+        self._module: Any | None = None
+        self._handles: dict[int, Any] = {}
+        self._unavailable = False
+
+    def sample(self, index: int) -> tuple[float | None, float | None]:
+        """Utilization (0..1) and temperature in °C, or ``(None, None)``."""
+        module = self._load()
+        if module is None:
+            return None, None
+        try:  # pragma: no cover - needs a real NVML binding and driver
+            handle = self._handles.get(index)
+            if handle is None:
+                handle = module.nvmlDeviceGetHandleByIndex(index)
+                self._handles[index] = handle
+            rates = module.nvmlDeviceGetUtilizationRates(handle)
+            celsius = module.nvmlDeviceGetTemperature(handle, module.NVML_TEMPERATURE_GPU)
             return round(float(rates.gpu) / 100.0, 3), float(celsius)
-        finally:
-            nvml.nvmlShutdown()
-    except Exception:
-        return None, None
+        except Exception:
+            self._handles.pop(index, None)
+            return None, None
+
+    def _load(self) -> Any | None:
+        """Import and initialise NVML once, or remember that it is unusable."""
+        if self._module is not None:
+            return self._module
+        if self._unavailable:
+            return None
+        try:
+            module: Any = importlib.import_module("pynvml")
+            module.nvmlInit()
+        except Exception:
+            logger.debug("NVML is unavailable; GPU utilization and temperature stay empty.")
+            self._unavailable = True
+            return None
+        atexit.register(self._shutdown)
+        self._module = module
+        return module
+
+    def _shutdown(self) -> None:
+        """Release NVML at interpreter exit. Never raises."""
+        module, self._module = self._module, None
+        self._handles.clear()
+        if module is None:
+            return
+        try:  # pragma: no cover - only runs at interpreter exit on an NVML host
+            module.nvmlShutdown()
+        except Exception:
+            logger.debug("NVML shutdown failed; ignoring at teardown.")
+
+
+_NVML = NvmlProbe()
+"""Process-wide NVML probe. Replaced wholesale in tests; never re-created here."""
 
 
 # --------------------------------------------------------------------------
@@ -959,6 +1115,7 @@ __all__ = [
     "DEFAULT_CHUNK_SAMPLES",
     "DEFAULT_NUM_OVERLAP",
     "ROFORMER_ARCHITECTURE",
+    "NvmlProbe",
     "RoFormerParameters",
     "RoFormerSeparator",
 ]
