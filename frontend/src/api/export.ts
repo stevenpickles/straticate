@@ -5,7 +5,8 @@
  * The route transcodes a completed job's stems and answers with a download.
  * Two optional query parameters decide what comes back:
  *
- * - `format` — one of {@link ExportFormat}; `wav_pcm24` when omitted.
+ * - `format` — one of `ExportFormat` (aliased in `api/types.ts` from the
+ *   generated OpenAPI document); `wav_pcm24` when omitted.
  * - `stems` — a comma-separated selection, validated against the job's
  *   `SeparationResult.stems`. **Omitting it is how you ask for every stem**;
  *   a present-but-empty `stems=` is a `validation_error` 422, which is why
@@ -24,18 +25,9 @@
  */
 
 import { ApiError, API_BASE, errorBodyFromText } from './client'
-import type { components } from './generated/api'
+import type { ExportFormat } from './types'
 
-/**
- * Audio format an export is encoded to.
- *
- * Aliased from the generated OpenAPI types here rather than in `api/types.ts`
- * so that no module outside `src/api` reaches into the generated file, and no
- * hand-written copy of the backend's enum exists anywhere.
- */
-export type ExportFormat = components['schemas']['ExportFormat']
-
-/** How one {@link ExportFormat} is offered to the user. */
+/** How one `ExportFormat` is offered to the user. */
 export interface ExportFormatOption {
   /** Contract value sent as the `format` query parameter. */
   readonly id: ExportFormat
@@ -52,7 +44,7 @@ export interface ExportFormatOption {
 }
 
 /**
- * Every export format, keyed by the generated {@link ExportFormat} union.
+ * Every export format, keyed by the generated `ExportFormat` union.
  *
  * The union is a *type*, so it cannot be enumerated at runtime; keying a
  * `Record` by it is what makes this table exhaustive in both directions.
@@ -232,10 +224,23 @@ function fallbackFilename(jobId: string, selection: ExportSelection): string {
 }
 
 /**
+ * Delay before an object URL is revoked, in milliseconds.
+ *
+ * Zero is enough: what matters is that the revoke lands in a *later task* than
+ * the click, not that it waits a particular length of time. Revoking in the
+ * same task is what Safari and older Firefox can read as "this blob is gone"
+ * before the download has been handed to the browser's download manager, which
+ * aborts the save while the promise still resolves — a success message and no
+ * file. MDN and FileSaver.js both defer for the same reason (FileSaver waits
+ * much longer, which only postpones freeing the blob).
+ */
+const OBJECT_URL_REVOKE_DELAY_MS = 0
+
+/**
  * Hand a downloaded blob to the browser under `filename`.
  *
- * The object URL is revoked in a `finally`, so a click that throws does not
- * leak the blob for the lifetime of the document.
+ * The revoke is scheduled in a `finally`, so a click that throws does not leak
+ * the blob for the lifetime of the document either.
  */
 function saveBlob(blob: Blob, filename: string): void {
   const objectUrl = URL.createObjectURL(blob)
@@ -252,7 +257,9 @@ function saveBlob(blob: Blob, filename: string): void {
       anchor.remove()
     }
   } finally {
-    URL.revokeObjectURL(objectUrl)
+    setTimeout(() => {
+      URL.revokeObjectURL(objectUrl)
+    }, OBJECT_URL_REVOKE_DELAY_MS)
   }
 }
 

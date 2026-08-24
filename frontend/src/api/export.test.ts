@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { waitFor } from '@testing-library/react'
 import { ApiError } from './client'
 import {
   DEFAULT_EXPORT_FORMAT,
@@ -7,8 +8,8 @@ import {
   exportFormatOption,
   exportUrl,
   filenameFromContentDisposition,
-  type ExportFormat,
 } from './export'
+import type { ExportFormat } from './types'
 import { sampleJobId } from '../test/fixtures'
 
 const twoStems = ['vocals', 'instrumental']
@@ -83,7 +84,10 @@ beforeEach(() => {
   })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // Revokes are deferred by a task, so let any still-pending one land against
+  // this test's mocks rather than the next test's.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
   delete objectUrls.createObjectURL
   delete objectUrls.revokeObjectURL
   vi.unstubAllGlobals()
@@ -299,7 +303,26 @@ describe('downloadExport', () => {
     await downloadExport(sampleJobId, selection(twoStems, twoStems))
 
     expect(createObjectURL).toHaveBeenCalledTimes(1)
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    await waitFor(() => {
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    })
+  })
+
+  it('revokes the object URL in a later task than the save click', async () => {
+    stubFetch(blobResponse('zip-bytes'))
+
+    await downloadExport(sampleJobId, selection(twoStems, twoStems))
+
+    // Awaiting the download drains microtasks, so a revoke that had run in the
+    // click's own task would already show here. Safari and older Firefox abort
+    // a download whose object URL is revoked before the browser has taken it,
+    // which would resolve this promise with no file saved.
+    expect(clicked).toHaveLength(1)
+    expect(revokeObjectURL).not.toHaveBeenCalled()
+
+    await waitFor(() => {
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    })
   })
 
   it('removes the temporary anchor from the document', async () => {
@@ -318,7 +341,9 @@ describe('downloadExport', () => {
       downloadExport(sampleJobId, selection(twoStems, twoStems)),
     ).rejects.toThrow(/download blocked/)
 
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    await waitFor(() => {
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    })
     expect(document.querySelectorAll('a[download]')).toHaveLength(0)
   })
 

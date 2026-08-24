@@ -16,6 +16,9 @@ end to end in a browser.
 
 ## Scope
 
+- `frontend/src/api/types.ts` — one line: the `ExportFormat` alias, alongside
+  every other contract type. This is the only file outside 024's own modules
+  that changed.
 - `frontend/src/api/export.ts` — the typed client for
   `GET /api/v1/jobs/{job_id}/export`:
   - `exportUrl()` builds the URL. **A full selection omits the `stems`
@@ -32,7 +35,7 @@ end to end in a browser.
   - `filenameFromContentDisposition()` reads the server-offered filename
     (RFC 5987 `filename*` preferred, any path stripped), falling back to the
     contract's own naming when the header is absent.
-  - `ExportFormat` and the format table, keyed by the generated union.
+  - The format table, keyed by the `ExportFormat` union.
 - `frontend/src/components/ExportPanel.tsx` (+ `.css`) — replaces 023's
   placeholder: a checkbox per stem of `job.result.stems` (all ticked by
   default), a format `<select>`, an Export button with a pending state, a
@@ -47,8 +50,9 @@ end to end in a browser.
 - `frontend/src/components/{StemPlayer,Workspace,SeparationProgress,
   TelemetryPanel,SeparationOptions,DropZone,AudioSummary,Header}.tsx`,
   `frontend/src/state/**`, `frontend/src/audio/**`, `frontend/src/ws/**`,
-  `frontend/src/api/{client,jobs,stems,types}.ts`, `frontend/src/format.ts`,
-  `frontend/src/index.css` — read, never written. `Workspace.tsx` already
+  `frontend/src/api/{client,jobs,stems}.ts`, `frontend/src/format.ts`,
+  `frontend/src/index.css` — read, never written (`api/types.ts` gained the
+  one-line `ExportFormat` alias and nothing else). `Workspace.tsx` already
   mounts `<ExportPanel />` in the `inspect` phase, so no edit was needed there.
 - Export presets, download history, resumable or background downloads,
   exporting from a phase other than `inspect`, and any retention or cleanup of
@@ -57,6 +61,7 @@ end to end in a browser.
 ## Expected modules/files
 
 - `frontend/src/api/export.ts` · `export.test.ts`
+- `frontend/src/api/types.ts` (the `ExportFormat` alias only)
 - `frontend/src/components/ExportPanel.tsx` · `.css` · `.test.tsx`
 - `docs/features/024-export-ui.md` · `ROADMAP.md`
 
@@ -83,8 +88,8 @@ end to end in a browser.
 
 ## Required tests
 
-`frontend/src/api/export.test.ts` (32) and
-`frontend/src/components/ExportPanel.test.tsx` (31), Vitest + Testing Library,
+`frontend/src/api/export.test.ts` (33) and
+`frontend/src/components/ExportPanel.test.tsx` (36), Vitest + Testing Library,
 queried by accessible role and name, awaited with `findBy*`/`waitFor` and never
 a timer:
 
@@ -95,15 +100,19 @@ a timer:
   name, and the absent/empty cases.
 - Download — the exact URL fetched, the filename used, both fallback names, the
   reported size, `revokeObjectURL` called on success *and* when the save click
-  throws, no object URL created for a failed request, and a typed `ApiError`
-  for each documented code plus a non-JSON body.
+  throws, the revoke landing in a *later task* than the click, no object URL
+  created for a failed request, and a typed `ApiError` for each documented code
+  plus a non-JSON body.
 - Panel — two-stem and four-stem rendering, arbitrary stem names, deselecting
   everything disabling export, the "single file" vs "zip + separation.json"
   line, the format list and the honesty note, the exact request URL for a
   given selection and format, a double click downloading once, in-flight
   disabling, every error code's message with the button re-enabled, a network
-  failure, a retry after a failure, tracking a different job resetting the
-  panel, and the no-job / no-result states.
+  failure, a retry after a failure, the success/error line clearing when the
+  selection or format changes (but not mid-download), tracking a different job
+  resetting the panel *and staying reset through the next toggle*, the Export
+  button still working when the job changes mid-download, and the no-job /
+  no-result states.
 
 ## Notes / decisions
 
@@ -116,14 +125,11 @@ object into a type error until it is handled, and the picker, the format note
 and the fallback filename's extension all follow from that one edit. No list of
 format strings exists anywhere else, and the component never sees one.
 
-### `ExportFormat` is aliased in `api/export.ts`, not `api/types.ts`
+### `ExportFormat` is aliased in `api/types.ts`
 
-DEVELOPMENT.md says app code imports contract types from `api/types.ts` rather
-than from the generated file; this assignment lists `api/types.ts` as read-only.
-The alias therefore lives in `api/export.ts`, which is itself part of the API
-layer — so nothing *outside* `src/api` touches the generated file, and no
-hand-written copy of the backend's enum exists. A later feature that needs
-`ExportFormat` elsewhere can move the alias into `api/types.ts` in one line.
+DEVELOPMENT.md's rule holds: `api/types.ts` is the only module that imports
+from `./generated/api`, and everything else — `api/export.ts` and
+`ExportPanel.tsx` alike — imports the alias from there.
 
 ### `fetch` + blob rather than a plain link
 
@@ -135,16 +141,42 @@ user that the job was cancelled or that the transcode failed. Fetching lets the
 error envelope be read and explained, at the cost of buffering the export in
 memory (see the limitations).
 
+### The object URL is revoked a task later, not in the click's task
+
+Revoking immediately after `anchor.click()` is what Chrome tolerates and what
+Safari and older Firefox can read as "this blob is gone" before the download
+has been handed to the download manager — the promise resolves, the success
+line appears, and no file is written. The revoke is therefore scheduled with a
+zero-delay `setTimeout` (MDN's and FileSaver.js's approach; the delay length is
+irrelevant, landing in a later task is the point), still from a `finally` so a
+click that throws cannot leak the blob either.
+
 ### The panel state is keyed by job ID
 
 The selection is stored as the set of *deselected* stems, so "everything" is
 the default for any stem list, of any length, with no seeding step — and stem
 names never appear in the component. Both it and the download outcome are held
-in one state object stamped with the job it belongs to, and a render for a
-different job simply falls back to the defaults. That avoids a reset effect
-(and the cascading render React's lint rules rightly object to), and it means a
-download that settles after the user has moved on cannot write its result into
-the new job's panel.
+in one state object stamped with the job it belongs to, and *every* read of it
+— the render and every updater, through the shared `updateState` — falls back
+to the defaults when the stamp does not match the tracked job. Doing it in one
+place is deliberate: an updater that spread the stored state instead would
+resurrect the previous job's deselection on the first toggle after a switch and
+silently export a stem short. That avoids a reset effect (and the cascading
+render React's lint rules rightly object to), and a download that settles after
+the user has moved on cannot write its result into the new job's panel.
+
+The in-flight guard is stamped the same way: the ref holds the *job* a download
+was started for, not a boolean, so a download abandoned by a job change cannot
+leave the new job's Export button enabled-but-inert, and its `finally` releases
+only its own claim.
+
+### A changed selection or format clears the last outcome
+
+"Downloaded X." beside a different selection is a lie, and `stem_not_found`'s
+message asks the user to change their selection — which must not leave the same
+error on screen once they do. Both controls therefore reset the outcome to
+idle. A download still in flight is exempt: its pending line is still true and
+its button is still disabled.
 
 ### Selection order and the export cache
 
@@ -218,5 +250,9 @@ Known to be **outside** M1 as delivered:
   same phase and uses the tracked job's result instead of issuing a second
   request. If it is ever mounted somewhere the job record is not already
   complete, it will need `getSeparationResult()`.
+- **A download started for a job the user then leaves still saves.** The file
+  is what they asked for, so it is written; only the confirmation is
+  suppressed, because the panel now belongs to a different job. There is no
+  "your earlier export finished" notice anywhere.
 - **No export presets or history.** Each export is configured from scratch, and
   nothing remembers what was downloaded before.

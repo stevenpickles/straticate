@@ -41,6 +41,9 @@ export type SeparationResultMetrics =
   components['schemas']['SeparationResultMetrics']
 export type SeparationResult = components['schemas']['SeparationResult']
 
+// Export
+export type ExportFormat = components['schemas']['ExportFormat']
+
 // WebSocket events (discriminated on `type`)
 export type ModelInfo = components['schemas']['ModelInfo']
 export type GpuMetrics = components['schemas']['GpuMetrics']

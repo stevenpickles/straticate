@@ -99,7 +99,9 @@ beforeEach(() => {
   })
 })
 
-afterEach(() => {
+afterEach(async () => {
+  // Revokes are deferred by a task; let any pending one land here.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
   delete objectUrls.createObjectURL
   delete objectUrls.revokeObjectURL
   vi.unstubAllGlobals()
@@ -330,7 +332,10 @@ describe('ExportPanel download', () => {
     expect(
       await screen.findByText('Downloaded my-song-stems.zip.'),
     ).toBeInTheDocument()
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    // The revoke is deferred by a task so the browser can take the download.
+    await waitFor(() => {
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:straticate/export')
+    })
   })
 
   it('downloads once for a double click', async () => {
@@ -526,6 +531,78 @@ describe('ExportPanel errors', () => {
   })
 })
 
+describe('ExportPanel outcome staleness', () => {
+  it('clears a failure when the selection changes', async () => {
+    const user = userEvent.setup()
+    stubFetch(
+      errorResponse(404, 'stem_not_found', 'Unknown stem.', {
+        available_stems: twoStemNames,
+      }),
+    )
+    renderPanel(completedJob(fourStemNames))
+
+    await user.click(exportButton())
+    // The message asks the user to change the selection, so doing exactly
+    // that must not leave the same error on screen.
+    expect(await screen.findByRole('alert')).toBeInTheDocument()
+
+    await user.click(stemCheckbox('drums'))
+
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('clears a success when the selection changes', async () => {
+    const user = userEvent.setup()
+    stubFetch(exportResponse('all-stems.zip'))
+    renderPanel(completedJob(fourStemNames))
+
+    await user.click(exportButton())
+    expect(
+      await screen.findByText('Downloaded all-stems.zip.'),
+    ).toBeInTheDocument()
+
+    await user.click(stemCheckbox('drums'))
+
+    expect(screen.queryByText('Downloaded all-stems.zip.')).toBeNull()
+  })
+
+  it('clears a success when the format changes', async () => {
+    const user = userEvent.setup()
+    stubFetch(exportResponse('all-stems.zip'))
+    renderPanel(completedJob(twoStemNames))
+
+    await user.click(exportButton())
+    expect(
+      await screen.findByText('Downloaded all-stems.zip.'),
+    ).toBeInTheDocument()
+
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Format' }),
+      'flac',
+    )
+
+    expect(screen.queryByText('Downloaded all-stems.zip.')).toBeNull()
+  })
+
+  it('keeps the pending state when the selection changes mid-download', async () => {
+    const user = userEvent.setup()
+    const pending = deferredResponse()
+    stubFetch(pending.promise)
+    renderPanel(completedJob(fourStemNames))
+
+    await user.click(exportButton())
+    await user.click(stemCheckbox('drums'))
+
+    expect(screen.getByText('Preparing your download…')).toBeInTheDocument()
+    expect(exportButton()).toBeDisabled()
+
+    pending.settle(exportResponse('all-stems.zip'))
+    expect(
+      await screen.findByText('Downloaded all-stems.zip.'),
+    ).toBeInTheDocument()
+  })
+})
+
 describe('ExportPanel across jobs', () => {
   it('starts a different job from the defaults', async () => {
     const user = userEvent.setup()
@@ -559,6 +636,77 @@ describe('ExportPanel across jobs', () => {
       expect(stemCheckbox(name)).toBeChecked()
     }
     expect(screen.queryByText('Downloaded first.zip.')).toBeNull()
+
+    // The first interaction after the switch must not resurrect the previous
+    // job's deselection (`vocals`) or its download outcome — the user would
+    // otherwise get an export missing a stem they never unticked.
+    const fetchMock = stubFetch(exportResponse('second.zip'))
+    await user.click(stemCheckbox('bass'))
+
+    expect(stemCheckbox('vocals')).toBeChecked()
+    expect(stemCheckbox('drums')).toBeChecked()
+    expect(stemCheckbox('other')).toBeChecked()
+    expect(stemCheckbox('bass')).not.toBeChecked()
+    expect(screen.queryByText('Downloaded first.zip.')).toBeNull()
+
+    await user.click(exportButton())
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled()
+    })
+    expect(requestedUrl(fetchMock)).toBe(
+      '/api/v1/jobs/01SECONDJOBULID0000000000/export?format=wav_pcm24&stems=vocals,drums,other',
+    )
+  })
+
+  it('leaves the button working when the job changes mid-download', async () => {
+    const user = userEvent.setup()
+    const pending = deferredResponse()
+    const fetchMock = vi
+      .fn()
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(exportResponse('second.zip'))
+    vi.stubGlobal('fetch', fetchMock)
+    const first = completedJob(twoStemNames)
+    const second: Job = {
+      ...completedJob(fourStemNames),
+      id: '01SECONDJOBULID0000000000',
+    }
+    const { rerender } = render(
+      <JobStateProvider initialState={jobState(null)}>
+        <TrackedJob job={first} />
+        <ExportPanel />
+      </JobStateProvider>,
+    )
+
+    // The first export is still running (the first one of a format/selection
+    // runs FFmpeg) when the user starts another separation and comes back.
+    await user.click(exportButton())
+    expect(exportButton()).toBeDisabled()
+
+    rerender(
+      <JobStateProvider initialState={jobState(null)}>
+        <TrackedJob job={second} />
+        <ExportPanel />
+      </JobStateProvider>,
+    )
+
+    expect(exportButton()).toBeEnabled()
+    await user.click(exportButton())
+
+    expect(
+      await screen.findByText('Downloaded second.zip.'),
+    ).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      '/api/v1/jobs/01SECONDJOBULID0000000000/export?format=wav_pcm24',
+    )
+
+    // The abandoned download settles without writing into the new job's panel.
+    pending.settle(exportResponse('first.zip'))
+    await waitFor(() => {
+      expect(screen.queryByText('Downloaded first.zip.')).toBeNull()
+    })
   })
 })
 

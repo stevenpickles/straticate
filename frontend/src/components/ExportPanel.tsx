@@ -5,8 +5,8 @@ import {
   EXPORT_FORMAT_OPTIONS,
   downloadExport,
   exportFormatOption,
-  type ExportFormat,
 } from '../api/export'
+import type { ExportFormat } from '../api/types'
 import { useJobState } from '../state/jobState'
 import './ExportPanel.css'
 
@@ -130,8 +130,9 @@ function explainExportError(error: ErrorInfo): string {
  * Every checkbox comes from the tracked job's `SeparationResult.stems`, so a
  * two-stem and a four-stem job render through the same code and no stem name
  * or count appears here (AGENTS.md principle 6). The format options come from
- * the generated `ExportFormat` union by way of `api/export.ts`, so a format
- * the backend gains reaches the picker without a hand-written list.
+ * the generated `ExportFormat` union by way of `api/export.ts`'s exhaustive
+ * table, so a format the backend gains reaches the picker without a
+ * hand-written list.
  *
  * Selecting every stem sends no `stems` parameter at all — that is the
  * contract's way of asking for everything, and `stems=` would be a 422.
@@ -146,7 +147,12 @@ export function ExportPanel() {
 
   const [format, setFormat] = useState<ExportFormat>(DEFAULT_EXPORT_FORMAT)
   const [stored, setStored] = useState<PanelState>(initialPanelState)
-  const downloadingRef = useRef(false)
+  // The job a download is in flight for, or `null` when none is. Holding the
+  // *job*, not a boolean, is what stops a download started for a job the user
+  // has since left behind from blocking the new job's Export button: that
+  // download can no longer report into this panel, so it must not gate it
+  // either.
+  const downloadingJobRef = useRef<string | null>(null)
 
   // The panel state remembers which job it belongs to, so a different job is
   // back at the defaults — every stem selected, no stale success or failure —
@@ -155,18 +161,55 @@ export function ExportPanel() {
     stored.jobId === jobId ? stored : { ...initialPanelState, jobId }
   const { excluded, download } = state
 
+  /**
+   * Update the panel state for the tracked job, starting from the defaults
+   * whenever what is stored belongs to a different job — the same rule the
+   * render above applies, so an update can never resurrect the previous job's
+   * selection or its download outcome.
+   */
+  const updateState = useCallback(
+    (change: (current: PanelState) => PanelState) => {
+      setStored((current) =>
+        change(
+          current.jobId === jobId ? current : { ...initialPanelState, jobId },
+        ),
+      )
+    },
+    [jobId],
+  )
+
+  /**
+   * Changing what would be exported invalidates what was said about the last
+   * export: "Downloaded X." beside a different selection is misleading, and an
+   * error telling the user to change their selection must not survive them
+   * doing so. A download still in flight keeps its state — the button is
+   * disabled and its pending line is still true.
+   */
+  const clearOutcome = useCallback((current: PanelState): PanelState => {
+    return current.download.status === 'downloading'
+      ? current
+      : { ...current, download: { status: 'idle' } }
+  }, [])
+
   const toggleStem = useCallback(
     (name: string) => {
-      setStored((current) => {
-        const base = current.jobId === jobId ? current : { ...current, jobId }
-        const next = new Set(base.excluded)
+      updateState((current) => {
+        const next = new Set(current.excluded)
         if (!next.delete(name)) {
           next.add(name)
         }
-        return { ...base, jobId, excluded: next }
+        return clearOutcome({ ...current, excluded: next })
       })
     },
-    [jobId],
+    [updateState, clearOutcome],
+  )
+
+  const chooseFormat = useCallback(
+    (chosen: ExportFormat) => {
+      setFormat(chosen)
+      updateState(clearOutcome)
+    },
+    [updateState, clearOutcome],
   )
 
   const stemNames = stems?.map((stem) => stem.name) ?? []
@@ -177,10 +220,14 @@ export function ExportPanel() {
   const startDownload = () => {
     // The ref, not `download.status`, is what makes a double click a single
     // request: it flips synchronously, before React has re-rendered.
-    if (downloadingRef.current || jobId === null || selected.length === 0) {
+    if (
+      downloadingJobRef.current === jobId ||
+      jobId === null ||
+      selected.length === 0
+    ) {
       return
     }
-    downloadingRef.current = true
+    downloadingJobRef.current = jobId
     // A settled download only speaks for the job it was started for: the user
     // may have moved on to another one while it was in flight.
     const settle = (result: DownloadState) => {
@@ -188,7 +235,10 @@ export function ExportPanel() {
         current.jobId === jobId ? { ...current, download: result } : current,
       )
     }
-    setStored({ ...state, jobId, download: { status: 'downloading' } })
+    updateState((current) => ({
+      ...current,
+      download: { status: 'downloading' },
+    }))
     downloadExport(jobId, {
       format,
       stems: selected,
@@ -201,7 +251,11 @@ export function ExportPanel() {
         settle({ status: 'error', error: errorInfo(reason) })
       })
       .finally(() => {
-        downloadingRef.current = false
+        // Only release the claim this download made: a newer one for another
+        // job owns the ref by now and must keep it.
+        if (downloadingJobRef.current === jobId) {
+          downloadingJobRef.current = null
+        }
       })
   }
 
@@ -252,7 +306,7 @@ export function ExportPanel() {
             value={format}
             aria-describedby="export-format-note"
             onChange={(event) => {
-              setFormat(event.target.value as ExportFormat)
+              chooseFormat(event.target.value as ExportFormat)
             }}
           >
             {EXPORT_FORMAT_OPTIONS.map((option) => (
