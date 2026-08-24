@@ -4,6 +4,7 @@ import type {
   Job,
   RuntimeMetricsEvent,
   SeparationConfiguration,
+  SeparationMode,
   SeparationResult,
 } from '../api/types'
 
@@ -102,3 +103,36 @@ export const sampleRuntimeMetrics: RuntimeMetricsEvent = {
     realtime_factor: 7.9,
   },
 }
+
+/**
+ * Representative `GET /separation-modes` payload covering the shapes the
+ * configure UI has to handle: a two-stem mode with several quality tiers
+ * and a four-stem mode served by a single model (one tier).
+ */
+export const sampleSeparationModes: SeparationMode[] = [
+  {
+    id: 'vocals',
+    display_name: 'Vocal Isolation',
+    stems: ['vocals', 'instrumental'],
+    quality_options: [
+      { id: 'fast', display_name: 'Fast', model_id: 'vocals-fast-001' },
+      {
+        id: 'high_quality',
+        display_name: 'High Quality',
+        model_id: 'vocals-hq-001',
+      },
+    ],
+  },
+  {
+    id: 'standard_stems',
+    display_name: 'Standard Stems',
+    stems: ['vocals', 'drums', 'bass', 'other'],
+    quality_options: [
+      {
+        id: 'balanced',
+        display_name: 'Balanced',
+        model_id: 'standard-balanced-001',
+      },
+    ],
+  },
+]

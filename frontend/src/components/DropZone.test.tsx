@@ -3,13 +3,22 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Workspace } from './Workspace'
 import { AppStateProvider } from '../state/appState'
+import { JobStateProvider } from '../state/jobState'
 import { installMockXhr, lastXhr, MockXMLHttpRequest } from '../test/mockXhr'
-import { sampleAudioFile } from '../test/fixtures'
+import { sampleAudioFile, sampleSeparationModes } from '../test/fixtures'
+
+// Reaching the configure phase mounts SeparationOptions (feature 011),
+// which loads the mode catalog; this suite is about the drop zone.
+vi.mock('../api/modes', () => ({
+  listSeparationModes: vi.fn(() => Promise.resolve(sampleSeparationModes)),
+}))
 
 function renderWorkspace() {
   return render(
     <AppStateProvider>
-      <Workspace />
+      <JobStateProvider>
+        <Workspace />
+      </JobStateProvider>
     </AppStateProvider>,
   )
 }

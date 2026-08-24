@@ -1,3 +1,9 @@
+/*
+ * Global + app-shell styles only. A component introduced from feature 011
+ * onwards owns a sibling ComponentName.css imported by its own module
+ * (see docs/features/011-mode-selection-ui.md), which keeps this single
+ * global file out of every parallel branch's merge path.
+ */
 :root {
   color-scheme: dark;
 
@@ -251,14 +257,6 @@ body {
   color: var(--color-text);
   border-color: var(--color-accent);
   background-color: color-mix(in srgb, var(--color-accent) 12%, transparent);
-}
-
-.separation-options-placeholder {
-  width: min(28rem, 100%);
-  margin-top: 1rem;
-  padding: 1.25rem;
-  border: 1px dashed var(--color-border);
-  border-radius: 0.75rem;
 }
 
 .upload-progress {

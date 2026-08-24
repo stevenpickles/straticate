@@ -1,0 +1,6 @@
+/* Styles for SeparationProgress.tsx, imported by that module (feature 017). */
+
+.separation-progress {
+  width: min(28rem, 100%);
+  margin-top: 1rem;
+}
