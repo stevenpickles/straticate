@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from straticate import __version__
-from straticate.api import audio, jobs, results, system, ws
+from straticate.api import audio, export, jobs, results, system, ws
 from straticate.api import models as models_api
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
@@ -134,6 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(models_api.router, prefix=API_PREFIX)
     app.include_router(jobs.router, prefix=API_PREFIX)
     app.include_router(results.router, prefix=API_PREFIX)
+    app.include_router(export.router, prefix=API_PREFIX)
     app.include_router(ws.router, prefix=API_PREFIX)
 
     return app

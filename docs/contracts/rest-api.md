@@ -230,7 +230,7 @@ unresolvable one is what the client is told about.
 | --- | --- | --- | --- |
 | GET | `/jobs/{job_id}/result` | `SeparationResult` of a completed job | `200` |
 | GET | `/jobs/{job_id}/stems/{stem_name}` | Stream stem audio for preview (supports `Range`) | `200` / `206` |
-| GET | `/jobs/{job_id}/export?format=wav_pcm24&stems=vocals,instrumental` | Download stems in the requested format (zip when multiple), plus `separation.json` | *(feature 022 — not implemented)* |
+| GET | `/jobs/{job_id}/export?format=wav_pcm24&stems=vocals,instrumental` | Download stems in the requested format (zip when multiple), plus `separation.json` | `200` |
 
 `SeparationResult`:
 
@@ -246,8 +246,8 @@ unresolvable one is what the client is told about.
 }
 ```
 
-**A result exists only for a `completed` job.** Both routes read the same
-record: any other state — still processing, `cancelled` or `failed` — is a
+**A result exists only for a `completed` job.** All three routes read the same
+record through the same lookup: any other state — still processing, `cancelled` or `failed` — is a
 `409` `result_not_available` carrying the job's current `state` in `detail`,
 so a client can say *why* there is nothing to play without a second error code
 to branch on. `GET /jobs/{job_id}` remains the place to read the full record,
@@ -286,6 +286,78 @@ JSON error envelope: they come from the byte-range layer as plain text, which
 is what a media client reading `Content-Range` expects (RFC 9110). Every
 application error below uses the envelope.
 
+### Export
+
+`GET /jobs/{job_id}/export` transcodes a completed job's stems and returns them
+as a download. Two query parameters, both optional:
+
+| parameter | values | default |
+| --- | --- | --- |
+| `format` | `wav_pcm24` · `wav_float32` · `flac` | `wav_pcm24` |
+| `stems` | comma-separated stem names, e.g. `vocals,drums` | **every stem in the result** |
+
+`stems` is validated against `SeparationResult.stems`, exactly as
+`stem_name` is on the streaming route. Surrounding whitespace on each name is
+ignored, the selection is deduplicated and returned in the result's own order —
+so `drums,bass`, `bass,drums` and `bass,drums,bass` describe the same export —
+and any name the result does not list is a `stem_not_found` 404. A
+present-but-empty value (`?stems=`) is a `validation_error` 422: **omitting**
+the parameter is how you ask for all of them.
+
+**How many stems you asked for decides the response shape:**
+
+| selection | response | `Content-Type` | `Content-Disposition` |
+| --- | --- | --- | --- |
+| exactly one stem | the transcoded audio file itself | `audio/wav` or `audio/flac` (by suffix) | `attachment; filename="{job_id}-{format}-{stem}.{ext}"` |
+| more than one (including the default) | a zip: one file per stem, named `{stem}.{ext}`, plus `separation.json` | `application/zip` | `attachment; filename="{job_id}-{format}.zip"` |
+
+**A single-stem export therefore carries no `separation.json`.** That is a
+deliberate choice, not an oversight: the point of a one-stem export is to hand
+the user one file they can drop straight into a DAW, and wrapping it in a zip
+to carry a manifest would defeat that. A client that wants the manifest can ask
+for two or more stems, or read the same record from
+`GET /jobs/{job_id}/result`.
+
+`separation.json` — the job's `SeparationResult` verbatim under `result`,
+alongside the export's own metadata:
+
+```json
+{
+  "format": "wav_pcm24",
+  "model_id": "vocals-hq-001",
+  "stems": ["vocals", "instrumental"],
+  "exported_at": "2026-08-24T10:29:47.512345+00:00",
+  "result": {
+    "job_id": "01JOB...",
+    "model_id": "vocals-hq-001",
+    "stems": [
+      { "name": "vocals", "duration_seconds": 227.4, "sample_rate_hz": 44100, "channels": 2 },
+      { "name": "instrumental", "duration_seconds": 227.4, "sample_rate_hz": 44100, "channels": 2 }
+    ],
+    "metrics": { "processing_seconds": 29.0, "realtime_factor": 7.83 }
+  }
+}
+```
+
+`stems` lists what is actually in the archive (which may be a subset);
+`result.stems` lists everything the job produced. `result` is byte-for-byte the
+object `GET /jobs/{job_id}/result` serves, so it parses with the same
+`SeparationResult` type and no parallel contract exists.
+
+**Bit depth is honest.** The separator writes 16-bit PCM WAV, so `wav_pcm24`
+and `wav_float32` change the container encoding and add **no information** — a
+24-bit export does not recover detail the stems never had. Sample rate,
+channel count and duration are always the source's, unchanged. This note stops
+being true when a real separator (feature 026) produces higher-precision
+output; the formats exist now so the export path is complete and so a user
+whose downstream tools require 24-bit or float files gets them.
+
+Export artifacts are built once and cached under
+`{data_dir}/jobs/{job_id}/exports/`, keyed by format and the sorted stem list:
+a completed job's stems are immutable, so a repeated identical download is
+served straight from disk. Nothing ever deletes them (see feature 021's note:
+no retention policy exists yet).
+
 ### Error codes
 
 | code | status | when |
@@ -294,10 +366,10 @@ application error below uses the envelope.
 | `result_not_available` | 409 | the job exists but is not `completed`; `detail` carries `job_id` and the current `state` |
 | `stem_not_found` | 404 | the job's result lists no stem with that name; `detail` carries `available_stems` |
 | `stem_file_missing` | 404 | the result lists the stem but its file is gone from disk (an orphaned job directory from a previous process — job records are in-memory only) |
+| `export_failed` | 500 | *(export only)* a transcode or archive step failed; `detail` carries `job_id`, `format` and a `reason` |
+| `validation_error` | 422 | *(export only)* an unknown `format`, or a present-but-empty `stems` |
 
 A stem name that could not be a stem name at all (path traversal, an absolute
 path, a URL-encoded separator) is simply not in the result's stem list, so it
 comes back as a clean `stem_not_found` 404 — never a 500 and never a file from
-outside the job's stem directory.
-
-Export formats: `wav_pcm24` (default), `wav_float32`, `flac`.
+outside the job's stem directory. The same holds for a name inside `stems=`.
