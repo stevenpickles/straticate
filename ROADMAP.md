@@ -73,12 +73,13 @@ Working today: the complete `select -> configure -> separate -> inspect ->
 export` workflow, end to end, with no ML model.
 
 **Next up — M2 (features 025, 026).** Real HQ vocal separation on CUDA with CPU
-fallback, which needs the model download manager (025) first. Before that work
-starts, feature **029** is worth scheduling: it now carries deferred review
-findings from five PRs (#5, #8, #17, #20, #25), two of which are a single fix,
-and two more items are recorded there as work **026** must carry out. The
-Playwright E2E tier that DEVELOPMENT.md schedules "around M1" is also still
-unwritten and now has a workflow worth pinning down.
+fallback, which needs the model download manager (025) first. Feature **029**
+runs first and clears the way: it fixes the deferred review findings from five
+PRs (#5, #8, #17, #20, #25), and leaves two items recorded for **026** to carry
+out (separator construction on the event loop; `Model.capabilities` never
+consulted when resolving a device). The Playwright E2E tier that DEVELOPMENT.md
+once scheduled "around M1" is now feature **030**, split out of 029 because it
+is a new test tier rather than a deferred fix.
 
 ## Feature ledger
 
@@ -112,7 +113,8 @@ unwritten and now has a workflow worth pinning down.
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
-| 029 | Skeleton hardening (deferred #5 review finds)| PLANNED | 004, 005   | | |
+| 029 | Skeleton hardening (deferred review findings)| PR OPEN | 004, 005   | `029-skeleton-hardening` | |
+| 030 | Playwright E2E tier (fake separator)         | PLANNED | 024        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
