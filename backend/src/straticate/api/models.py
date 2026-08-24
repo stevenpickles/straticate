@@ -87,15 +87,21 @@ async def install_model(model_id: str, installer: InstallerDep) -> Model:
 
 @router.delete("/models/{model_id}/weights")
 async def remove_model_weights(model_id: str, installer: InstallerDep) -> Model:
-    """Delete a model's installed weights, returning it to ``available``.
+    """Delete a model's weights, returning it to ``available``.
+
+    **A running install is cancelled first**, and this is also how a download
+    that will not finish is escaped: the network bound is per-operation, not a
+    total budget, so a trickling host could otherwise hold a model in
+    ``downloading`` indefinitely. The cancelled download removes its own partial
+    file before this responds.
 
     Idempotent: removing weights that are not installed succeeds. The updated
     model is returned rather than ``204`` so the caller sees the state it just
     produced, as ``POST /jobs/{job_id}/cancel`` does. Errors:
     ``model_not_found`` (404), ``model_not_downloadable`` (409) for a built-in
-    model, ``model_busy`` (409) while an install is running.
+    model.
     """
-    return installer.remove(model_id)
+    return await installer.remove(model_id)
 
 
 @router.get("/separation-modes")

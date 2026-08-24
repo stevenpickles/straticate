@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import socket
 import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
@@ -42,10 +43,12 @@ from straticate.models import (
 from straticate.models.installer import (
     CHECKSUM_MISMATCH,
     CONNECTION_FAILED,
+    DEFAULT_CHUNK_BYTES,
     DOWNLOAD_FAILED,
     HTTP_STATUS,
     SIZE_EXCEEDED,
     SIZE_MISMATCH,
+    UNEXPECTED_ERROR,
 )
 from straticate.schemas import ModelInstallState
 from tests.test_model_catalog import make_model, write_catalog
@@ -128,7 +131,11 @@ class Builder:
         self._count = 0
 
     async def start(
-        self, models: list[dict[str, Any]], *, chunk_bytes: int | None = None
+        self,
+        models: list[dict[str, Any]],
+        *,
+        chunk_bytes: int | None = None,
+        client_factory: Callable[[], httpx2.AsyncClient] | None = None,
     ) -> Harness:
         """Build and start an app whose catalog holds ``models``."""
         self._count += 1
@@ -136,9 +143,12 @@ class Builder:
         models_dir.mkdir()
         write_catalog(models_dir, models)
         app = create_app(Settings(models_dir=models_dir, data_dir=self._tmp / "data"))
-        if chunk_bytes is not None:
+        if chunk_bytes is not None or client_factory is not None:
             app.state.model_installer = ModelInstaller(
-                app.state.model_catalog, models_dir, chunk_bytes=chunk_bytes
+                app.state.model_catalog,
+                models_dir,
+                chunk_bytes=chunk_bytes or DEFAULT_CHUNK_BYTES,
+                client_factory=client_factory,
             )
         await self._stack.enter_async_context(app.router.lifespan_context(app))
         client = await self._stack.enter_async_context(
@@ -155,16 +165,21 @@ class Builder:
         size_bytes: int | None = None,
         served: ServedArtifact | None = None,
         url: str | None = None,
+        path: str = ARTIFACT_PATH,
+        credentials: str = "",
         **overrides: Any,
     ) -> dict[str, Any]:
         """A catalog entry whose artifact this server will serve.
 
         ``sha`` and ``size_bytes`` default to the body's real digest and length,
         so a test only states the ones it is deliberately making wrong.
+        ``path`` may carry a query string and ``credentials`` a ``user:pass@``
+        prefix, which is how the credential-leak tests build a realistic
+        presigned URL.
         """
         download_url = url or self._server.serve(
-            ARTIFACT_PATH, served if served is not None else ServedArtifact(body=body)
-        )
+            path, served if served is not None else ServedArtifact(body=body)
+        ).replace("http://", f"http://{credentials}", 1)
         return make_model(
             model_id,
             artifact={
@@ -291,6 +306,41 @@ async def test_install_downloads_verifies_and_publishes(build: Builder) -> None:
     assert after["error"] is None
     assert harness.weights().read_bytes() == body
     assert not harness.partial().exists()
+
+
+async def test_the_artifact_is_fsynced_before_it_is_published(
+    build: Builder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``os.replace`` is atomic for the directory entry, not for the data.
+
+    Without an ``fsync`` a power loss shortly after a "successful" install can
+    leave a *published* ``weights.bin`` with a garbage tail — and nothing ever
+    re-hashes installed weights, so feature 026 would load it silently, forever.
+    """
+    calls: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def spy_fsync(fd: int) -> None:
+        calls.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(source: Any, destination: Any) -> None:
+        calls.append("replace")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+
+    body = blob(4096)
+    harness = await build.start([build.downloadable(body)])
+    assert (await harness.install()).status_code == 202
+    assert (await harness.settle())["state"] == "installed"
+
+    assert "replace" in calls, "the artifact was never published"
+    assert calls.index("fsync") < calls.index("replace"), (
+        f"the .part was published before it reached stable storage: {calls}"
+    )
+    assert harness.weights().read_bytes() == body
 
 
 async def test_the_models_list_reflects_what_is_on_disk(build: Builder) -> None:
@@ -442,8 +492,11 @@ async def test_a_checksum_mismatch_installs_nothing(build: Builder) -> None:
 
     assert installation["state"] == "failed"
     assert installation["error"]["code"] == CHECKSUM_MISMATCH
-    assert installation["error"]["detail"]["expected"] == wrong
-    assert installation["error"]["detail"]["actual"] == sha256(body)
+    # The pinned digest belongs to the private ``artifact`` block and stays off
+    # the wire; the digest that actually arrived is a fact about what happened.
+    assert installation["error"]["detail"] == {"model_id": MODEL_ID, "actual": sha256(body)}
+    listing = await harness.client.get(MODELS_URL)
+    assert wrong not in listing.text, "the pinned SHA-256 reached an API client"
     assert not harness.weights().exists()
     assert not harness.partial().exists()
 
@@ -459,7 +512,11 @@ async def test_an_http_error_page_is_never_installed(build: Builder) -> None:
 
     assert installation["state"] == "failed"
     assert installation["error"]["code"] == DOWNLOAD_FAILED
-    assert installation["error"]["detail"] == {"reason": HTTP_STATUS, "status_code": 410}
+    assert installation["error"]["detail"] == {
+        "model_id": MODEL_ID,
+        "reason": HTTP_STATUS,
+        "status_code": 410,
+    }
     assert not harness.weights().exists()
     assert not harness.partial().exists()
 
@@ -470,7 +527,11 @@ async def test_a_missing_artifact_is_a_download_failure(build: Builder) -> None:
     assert (await harness.install()).status_code == 202
     installation = await harness.settle()
     assert installation["state"] == "failed"
-    assert installation["error"]["detail"] == {"reason": HTTP_STATUS, "status_code": 404}
+    assert installation["error"]["detail"] == {
+        "model_id": MODEL_ID,
+        "reason": HTTP_STATUS,
+        "status_code": 404,
+    }
     assert not harness.weights().exists()
     assert not harness.partial().exists()
 
@@ -487,6 +548,7 @@ async def test_a_short_body_fails_and_leaves_nothing(build: Builder) -> None:
     assert installation["state"] == "failed"
     assert installation["error"]["code"] == DOWNLOAD_FAILED
     assert installation["error"]["detail"] == {
+        "model_id": MODEL_ID,
         "reason": SIZE_MISMATCH,
         "expected_bytes": 4096,
         "received_bytes": 1024,
@@ -527,6 +589,7 @@ async def test_a_declared_over_long_body_is_refused_before_it_is_read(
     assert installation["state"] == "failed"
     assert installation["error"]["code"] == DOWNLOAD_FAILED
     assert installation["error"]["detail"] == {
+        "model_id": MODEL_ID,
         "reason": SIZE_EXCEEDED,
         "expected_bytes": 1024,
         "declared_bytes": 8192,
@@ -550,7 +613,11 @@ async def test_a_length_less_over_long_body_is_stopped_mid_stream(
 
     assert installation["state"] == "failed"
     assert installation["error"]["code"] == DOWNLOAD_FAILED
-    assert installation["error"]["detail"] == {"reason": SIZE_EXCEEDED, "expected_bytes": 1024}
+    assert installation["error"]["detail"] == {
+        "model_id": MODEL_ID,
+        "reason": SIZE_EXCEEDED,
+        "expected_bytes": 1024,
+    }
     assert not harness.weights().exists()
     assert not harness.partial().exists()
 
@@ -566,19 +633,82 @@ async def test_a_connection_failure_fails_loudly(build: Builder) -> None:
 
     assert installation["state"] == "failed"
     assert installation["error"]["code"] == DOWNLOAD_FAILED
-    assert installation["error"]["detail"] == {"reason": CONNECTION_FAILED}
+    assert installation["error"]["detail"] == {"model_id": MODEL_ID, "reason": CONNECTION_FAILED}
     assert not harness.weights().exists()
     assert not harness.partial().exists()
 
 
-async def test_a_failure_message_never_leaks_url_credentials(build: Builder) -> None:
-    """A catalog is user-editable; an error message is user-pasteable."""
-    body = blob(64)
-    url = f"http://user:hunter2@127.0.0.1:{free_port()}{ARTIFACT_PATH}"
-    harness = await build.start([build.downloadable(body, url=url)])
+#: Every secret-shaped part of a download URL, in one string.
+SECRETS = ("hunter2", "deadbeefsignature", "topsecrettoken")
+
+CREDENTIALED_QUERY = "?X-Amz-Signature=deadbeefsignature&token=topsecrettoken"
+"""How large weights are actually hosted: the query string *is* the credential."""
+
+
+def assert_no_secret(text: str, where: str) -> None:
+    for secret in SECRETS:
+        assert secret not in text, f"{where} leaked {secret!r}"
+
+
+@pytest.mark.parametrize("failure", ["http_status", "checksum", "connection"])
+async def test_a_failure_never_leaks_the_download_url(build: Builder, failure: str) -> None:
+    """No part of the URL reaches a client — userinfo, query or path.
+
+    ``installation.error.message`` is returned by ``GET /models`` to every
+    caller, and weights are routinely served from presigned URLs whose query
+    string is the credential. The URL belongs in the server log, not here.
+    """
+    body = blob(512)
+    path = f"{ARTIFACT_PATH}{CREDENTIALED_QUERY}"
+    if failure == "connection":
+        url = f"http://user:hunter2@127.0.0.1:{free_port()}{path}"
+        entry = build.downloadable(body, url=url)
+    elif failure == "http_status":
+        entry = build.downloadable(
+            body, path=path, credentials="user:hunter2@", served=ServedArtifact(status=404)
+        )
+    else:
+        entry = build.downloadable(
+            body, path=path, credentials="user:hunter2@", sha=sha256(b"other")
+        )
+
+    harness = await build.start([entry])
     assert (await harness.install()).status_code == 202
     installation = await harness.settle()
-    assert "hunter2" not in installation["error"]["message"]
+
+    assert installation["state"] == "failed"
+    assert_no_secret(installation["error"]["message"], "the failure message")
+    assert_no_secret(str(installation["error"]["detail"]), "the failure detail")
+    assert_no_secret((await harness.client.get(MODELS_URL)).text, "GET /models")
+
+
+async def test_an_unclassified_error_is_reported_as_a_failure(build: Builder) -> None:
+    """An install that raises something unexpected must not read as "never tried".
+
+    The install runs detached from the request that started it, so an exception
+    this module does not classify has nowhere else to surface: without this the
+    task would die with an unretrieved exception and the model would flick back
+    to ``available``, telling a user who just clicked Install nothing at all.
+    """
+
+    def exploding_client() -> httpx2.AsyncClient:
+        raise RuntimeError("the HTTP client could not be constructed")
+
+    body = blob(256)
+    harness = await build.start([build.downloadable(body)], client_factory=exploding_client)
+
+    assert (await harness.install()).status_code == 202
+    installation = await harness.settle()
+
+    assert installation["state"] == "failed"
+    assert installation["error"]["code"] == DOWNLOAD_FAILED
+    assert installation["error"]["detail"] == {
+        "model_id": MODEL_ID,
+        "reason": UNEXPECTED_ERROR,
+    }
+    assert "could not be constructed" not in installation["error"]["message"]
+    assert not harness.weights().exists()
+    assert not harness.partial().exists()
 
 
 # -- concurrency -------------------------------------------------------------
@@ -601,17 +731,33 @@ async def test_a_second_install_is_rejected_rather_than_racing(build: Builder) -
     assert served.requests == 1, "the rejected request started a second download"
 
 
-async def test_weights_cannot_be_removed_while_an_install_runs(build: Builder) -> None:
-    body = blob(4096)
-    served = ServedArtifact(body=body, gate=threading.Event(), stall_after=512)
+async def test_removing_weights_cancels_a_running_install(build: Builder) -> None:
+    """The escape hatch from a download that will not finish.
+
+    The network bound is per-operation, not a total budget, so a host trickling
+    one byte per timeout window could otherwise hold a model in ``downloading``
+    until the process was restarted.
+    """
+    body = blob(8192)
+    served = ServedArtifact(body=body, gate=threading.Event(), stall_after=1024)
     harness = await build.start([build.downloadable(body, served=served)], chunk_bytes=128)
 
     assert (await harness.install()).status_code == 202
     await await_thread_event(served.started)
-    assert_envelope(await harness.remove(), "model_busy", 409)
 
+    removed = await asyncio.wait_for(harness.remove(), timeout=WAIT_TIMEOUT)
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["installation"]["state"] == "available"
+
+    # The cancelled download unlinked its own .part before the response.
+    assert not harness.partial().exists()
+    assert not harness.weights().exists()
+    assert (await harness.installation())["state"] == "available"
+
+    # And the model is installable again straight away.
     assert served.gate is not None
     served.gate.set()
+    assert (await harness.install()).status_code == 202
     assert (await harness.settle())["state"] == "installed"
 
 

@@ -219,13 +219,19 @@ export interface paths {
         post?: never;
         /**
          * Remove Model Weights
-         * @description Delete a model's installed weights, returning it to ``available``.
+         * @description Delete a model's weights, returning it to ``available``.
+         *
+         *     **A running install is cancelled first**, and this is also how a download
+         *     that will not finish is escaped: the network bound is per-operation, not a
+         *     total budget, so a trickling host could otherwise hold a model in
+         *     ``downloading`` indefinitely. The cancelled download removes its own partial
+         *     file before this responds.
          *
          *     Idempotent: removing weights that are not installed succeeds. The updated
          *     model is returned rather than ``204`` so the caller sees the state it just
          *     produced, as ``POST /jobs/{job_id}/cancel`` does. Errors:
          *     ``model_not_found`` (404), ``model_not_downloadable`` (409) for a built-in
-         *     model, ``model_busy`` (409) while an install is running.
+         *     model.
          */
         delete: operations["remove_model_weights_api_v1_models__model_id__weights_delete"];
         options?: never;

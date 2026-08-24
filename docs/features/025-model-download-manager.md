@@ -28,13 +28,15 @@ becomes installable.
   ID validated against the manifest's own pattern so it can never escape
   `models_dir`.
 - **`backend/src/straticate/models/installer.py`** — `ModelInstaller`: the
-  temporary-artifact → SHA-256 → atomic-rename pipeline, the in-flight install
-  registry, and the live installation state the routes serve.
+  temporary-artifact → SHA-256 → `fsync` → atomic-rename pipeline, the in-flight
+  install registry, and the live installation state the routes serve. Every
+  failure is recorded on the model (including unclassified ones), and no failure
+  message or `detail` carries the download URL or the pinned digest.
 - **`ModelArtifact` / `CatalogEntry`** in `models/catalog.py`: the catalog now
   *retains* the manifest's `artifact` block, off the public `Model`.
 - **Endpoints** in `api/models.py`: `POST /models/{id}/install` (202, returns
-  immediately), `DELETE /models/{id}/weights`, and installation state on the two
-  existing `GET`s.
+  immediately), `DELETE /models/{id}/weights` (which cancels a running install),
+  and installation state on the two existing `GET`s.
 - Installer wired into `create_app()`, closed in the lifespan.
 - `models/weights/` gitignored; `httpx2` promoted to a runtime dependency.
 - `docs/contracts/rest-api.md` and the regenerated
@@ -70,17 +72,19 @@ becomes installable.
       atomically renames into `Settings.models_dir`; the model then reports
       `installed`.
 - [x] A hash mismatch installs nothing, deletes the artifact, and reports
-      `checksum_mismatch` with the expected and actual digests.
+      `checksum_mismatch` with the digest that actually arrived (never the
+      pinned one, which belongs to the private `artifact` block).
 - [x] A truncated download, a short body, an over-long body (declared *and*
       length-less), an HTTP error page and a connection failure each fail with
       the documented code and leave no artifact behind.
-- [x] A cancelled install leaves no `.part` and no installed file — both when
-      cancelled directly and when the application shuts down mid-download.
+- [x] A cancelled install leaves no `.part` and no installed file — cancelled
+      directly, via `DELETE .../weights`, or by application shutdown.
 - [x] `POST .../install` returns immediately and never blocks the event loop
       (proved with a gated download: the 202 lands while the body is parked, and
       `/health`, `/models` and `/separation-modes` are all served meanwhile).
-- [x] A second install for the same model while one is running is rejected with
-      `model_busy`; the server records exactly one request.
+- [x] A second **install** for the same model while one is running is rejected
+      with `model_busy`; the server records exactly one request. A **remove**
+      cancels the running install instead of refusing.
 - [x] Removing weights returns the model to `available`; install → remove →
       install again works and re-downloads.
 - [x] Model IDs cannot escape `models_dir`: every path accessor rejects an
@@ -98,6 +102,11 @@ becomes installable.
   refuses an unusable ID; weights stay inside `models_dir`; the `.part` is a
   sibling of its target; remove reports whether anything was there and clears an
   orphaned `.part`.
+- Regression tests for the three review findings, each verified to fail against
+  the pre-fix code: an unclassified exception reports `failed` rather than
+  reverting to `available`; no failure message or `detail` leaks a presigned
+  URL's query string, its `user:pass@`, or the pinned SHA-256; and the `.part`
+  is `fsync`ed before `os.replace` (spied call order).
 - `test_model_installer.py`: the full API surface against a **real loopback HTTP
   server** (`tests/weights_server.py`, bound to `127.0.0.1` on an ephemeral
   port) — happy path, progress, immediate return, event-loop freedom,
@@ -192,7 +201,7 @@ artifact's *size* does reach the client, as `installation.total_bytes`, because
   the coupling `inference/layout.py` avoids for stems.
 - `models/weights/` is gitignored; **weights are never committed**.
 
-### Why the per-chunk write stays on the event loop
+### Why the per-chunk write — and the final `fsync` — stay on the event loop
 
 `asyncio.to_thread` cannot be cancelled. Moving the 1 MiB `write` + `hash.update`
 into a worker thread would create a window in which the `finally` unlinks a
@@ -201,6 +210,70 @@ an orphaned file. Feature 022's export shields its worker threads for exactly
 this reason; here the cheaper answer is not to open the window. The expensive
 part (the network) is fully asynchronous, and there is a test proving other
 requests are served while a download is in flight.
+
+The **one** measurable stall is the `fsync` before the rename, and it is a
+considered trade. It happens once, after the last chunk. Moving it into a thread
+would put the `fsync` *and* the `os.replace` in an uncancellable worker racing
+the `finally`'s unlink — turning a bounded once-per-install stall into a window
+where a cancelled install can publish weights, or where the rename fails on a
+`.part` that was just deleted. For a local single-user application running one
+job at a time, the stall is the cheaper cost. If it stops being cheaper, the fix
+is to shield the whole fsync-and-publish step as one unit — never to drop the
+`fsync`.
+
+### Durability: `fsync` before publishing
+
+`os.replace` is atomic for the *directory entry*, not for the file's data.
+Without a sync, a power loss shortly after a "successful" install can leave a
+**published** `weights.bin` with a garbage tail — and since
+`weights_installed()` is a bare `is_file()` and nothing ever re-hashes installed
+weights, feature 026 would load that torn file silently, forever. Unlike
+`api/export.py`'s artifacts, which are cheap to rebuild, these are not. So the
+`.part` is flushed and `fsync`ed before the rename, and the containing directory
+is `fsync`ed after it where the platform has a directory handle to sync (POSIX;
+Windows exposes none and does not need one).
+
+### Every failure is recorded, not only the classified ones
+
+An install runs detached from the request that started it, so an exception the
+manager does not classify has nowhere to surface: the task would die with its
+exception never retrieved and the model would report `available` — the same
+answer as "never tried". A user who clicked Install would watch the state flick
+to `downloading` and back and be told nothing. `_run` therefore catches
+`Exception` (not `BaseException`: `CancelledError` is control flow and must keep
+propagating), records `download_failed` with `reason: unexpected_error`, and logs
+the traceback.
+
+### Nothing about the download URL reaches a client
+
+`installation.error.message` is served by `GET /models` to every caller, and
+large weights are routinely hosted behind presigned URLs whose **query string is
+the credential**. Stripping only `user:pass@` would leak the signature. So no
+part of the URL is returned at all: messages name the model, the URL goes to the
+log.
+
+The same rule decides what a failure `detail` may carry: **facts about what
+happened**, never a field copied out of the private `artifact` block. So
+`checksum_mismatch` returns `actual` (the digest that arrived) and not the
+pinned `expected` — which is `artifact.sha256`, the thing `catalog.py` exists to
+keep off the wire, and which a client cannot act on anyway. Both digests are
+logged together. `expected_bytes` is the deliberate exception: `size_bytes` is
+already published as `installation.total_bytes`, because the download size is a
+decision input before installing.
+
+### Removing weights cancels a running install
+
+`DELETE /models/{id}/weights` used to answer `model_busy` while an install ran.
+It now cancels it instead, which is both the honest reading of the request and
+the only escape from a download that will not finish: `DEFAULT_TIMEOUT_SECONDS`
+is a **per-operation** bound, not a total budget, so a host trickling one byte
+per timeout window keeps the transfer nominally alive. With `start_install` also
+answering `model_busy`, a restart was previously the only way out.
+
+A dedicated cancel route was considered and rejected as a second way to say the
+same thing: the outcome of cancelling an install is exactly "this model has no
+weights", which is what `DELETE .../weights` already means. `model_busy` remains
+for a second concurrent **install**.
 
 ### `download_failed` / `checksum_mismatch` are not HTTP statuses
 
@@ -290,6 +363,22 @@ event; the REST field remains the reconnect source of truth.
 - **No retention or disk-space check.** Nothing warns before a download fills
   the disk, and nothing garbage-collects weights for models a later catalog no
   longer lists — the same gap `data/` already has (feature 021's note).
+- **The network bound is per-operation, not a total budget.**
+  `DEFAULT_TIMEOUT_SECONDS` (60 s) bounds connect, read and write individually,
+  so a host trickling one byte per window keeps a transfer nominally alive for
+  as long as it likes; there is no overall deadline and no minimum-throughput
+  check. `DELETE /models/{id}/weights` cancels a running install, so this is a
+  waste of a socket rather than a stuck model — but a stall-detection bound
+  (bytes per interval, or a total deadline derived from `size_bytes`) is real
+  future work.
+- **Installed weights are never re-verified.** The SHA-256 is checked once, on
+  the way in, and `weights_installed()` is thereafter a bare `is_file()`. A file
+  corrupted *after* installation — bit rot, an external edit — is not detected.
+  Re-hashing hundreds of megabytes on every job would be the wrong trade; a
+  `verify` command, or a stored digest checked on load, is the shape a later
+  feature would want. The install-time `fsync` closes the one window this
+  feature can close on its own (a torn tail from a crash right after the
+  rename).
 - **Failure state is in memory.** Like job records, a recorded `failed` state
   does not survive a restart; the model simply reports `available` again.
 - **No model-management UI.** Deliberate — see *Out of scope*.

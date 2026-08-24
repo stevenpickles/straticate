@@ -30,17 +30,47 @@ Three further rules this module keeps:
   the running total is checked per chunk so a chunked or length-less response
   cannot stream an unbounded body into the data directory because a server said
   so. A short response fails too: the byte count must match exactly.
+- **Durability before publication.** ``os.replace`` is atomic for the *directory
+  entry*, not for the file's data: without an ``fsync`` a power loss shortly
+  after a "successful" install can leave a **published** ``weights.bin`` with a
+  garbage tail. Nothing ever re-hashes installed weights —
+  :func:`~straticate.models.layout.weights_installed` is a bare ``is_file()`` —
+  so feature 026 would load that torn file silently, forever. The ``.part`` is
+  therefore flushed and ``fsync``-ed before the rename, and the containing
+  directory is ``fsync``-ed after it where the platform has a directory handle
+  to sync. Unlike :mod:`straticate.api.export`, whose artifacts are cheap to
+  rebuild, these are not.
 - **The ``.part`` never survives.** A ``finally`` unlinks it on every exit —
   success (where the rename already consumed it), failure, and cancellation.
-- **Nothing blocks the event loop.** The download is fully asynchronous, and the
-  per-chunk work left on the loop is one buffered ``write`` and one
-  ``hashlib.update`` of at most :data:`DEFAULT_CHUNK_BYTES`. That is deliberate
-  rather than lazy: :func:`asyncio.to_thread` cannot be cancelled, so moving the
-  write off the loop would create a window in which the ``finally`` unlinks a
-  ``.part`` that a live worker thread is still writing to — trading a
-  sub-millisecond memcpy for an orphaned file. Feature 022's export shields its
-  worker threads for exactly this reason; here the cheaper answer is not to
-  create the window.
+- **Nothing meaningful blocks the event loop.** The download is fully
+  asynchronous, and the per-chunk work left on the loop is one buffered
+  ``write`` and one ``hashlib.update`` of at most :data:`DEFAULT_CHUNK_BYTES`.
+  That is deliberate rather than lazy: :func:`asyncio.to_thread` cannot be
+  cancelled, so moving the write off the loop would create a window in which the
+  ``finally`` unlinks a ``.part`` that a live worker thread is still writing to
+  — trading a sub-millisecond memcpy for an orphaned file. Feature 022's export
+  shields its worker threads for exactly this reason; here the cheaper answer is
+  not to create the window.
+
+  The **one** measurable stall is the final ``fsync``, which runs on the loop
+  too, and that is a considered trade rather than an oversight. It happens once,
+  after the last chunk, and its cost is whatever the OS has left to flush.
+  Moving it into ``asyncio.to_thread`` would put the ``fsync`` *and* the rename
+  in an uncancellable thread racing the ``finally``'s unlink — turning a bounded
+  once-per-install stall into a window where a cancelled install can publish
+  weights, or where the rename fails on a ``.part`` that was just deleted. For a
+  local single-user application running one job at a time, the stall is the
+  cheaper cost. If it ever stops being cheaper, the fix is to shield the whole
+  fsync-and-publish step as one unit — never to drop the ``fsync``.
+
+- **A failure message names the model, never the host.** ``download_url`` is
+  private to this module (``models/catalog.py`` keeps it off
+  :class:`~straticate.schemas.Model` for exactly this reason), and a failure
+  message is a thing users paste into issues. Large weights are routinely hosted
+  behind presigned URLs whose query string *is* the credential, so no part of
+  the URL reaches a client: it is logged instead. For the same reason the
+  ``checksum_mismatch`` detail carries the digest that was **received** — a fact
+  about what happened — and not the one the catalog pins.
 
 Resumable downloads are **out of scope** (see
 ``docs/features/025-model-download-manager.md``): a failed install starts over.
@@ -55,7 +85,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Self
+from typing import IO, Any, Self
 
 import httpx2
 
@@ -102,6 +132,17 @@ SIZE_MISMATCH = "size_mismatch"
 
 FILESYSTEM_ERROR = "filesystem_error"
 """``detail.reason``: the artifact could not be written or published."""
+
+UNEXPECTED_ERROR = "unexpected_error"
+"""``detail.reason``: the install raised something this module did not classify.
+
+An install runs detached from the request that started it, so an unhandled
+exception has nowhere to surface: the task would die with its exception never
+retrieved and the model would revert to ``available`` — indistinguishable from
+"never tried". A user who clicked Install would watch the state flick to
+``downloading`` and back and be told nothing. Whatever it was, it is reported as
+a failure and the traceback goes to the log.
+"""
 
 
 class ModelInstallError(Exception):
@@ -305,8 +346,17 @@ class ModelInstaller:
         )
         return self.describe(entry)
 
-    def remove(self, model_id: str) -> Model:
-        """Delete ``model_id``'s installed weights, returning it to ``available``.
+    async def remove(self, model_id: str) -> Model:
+        """Delete ``model_id``'s weights, returning it to ``available``.
+
+        **A running install is cancelled first.** "I do not want this model's
+        weights" includes the ones being fetched, and this is also the only
+        escape hatch from a download that will not finish: the network bound is
+        per-operation, not a total budget, so a host trickling one byte per
+        timeout window could otherwise hold a model in ``downloading`` until the
+        process was restarted. The cancelled download unlinks its own ``.part``
+        before this returns, so nothing is left behind and no rename can land
+        after the removal.
 
         Idempotent: removing weights that are not there succeeds and reports
         ``available``, because that is already the state the caller asked for. A
@@ -315,19 +365,29 @@ class ModelInstaller:
 
         Raises:
             ApplicationError: ``model_not_found`` (404) for an unknown ID,
-                ``model_not_downloadable`` (409) for a built-in model,
-                ``model_busy`` (409) while an install is running — the running
-                download would otherwise publish weights a moment after they
-                were removed.
+                ``model_not_downloadable`` (409) for a built-in model.
         """
         entry = self._catalog.get_entry(model_id)
         if entry.artifact is None:
             raise _model_not_downloadable(model_id)
-        if model_id in self._running:
-            raise _model_busy(model_id)
+        await self._cancel(model_id)
         self._failures.pop(model_id, None)
         remove_weights(self._models_dir, model_id)
         return self.describe(entry)
+
+    async def _cancel(self, model_id: str) -> None:
+        """Cancel ``model_id``'s running install and wait for it to unwind.
+
+        Waiting is the point: the task's ``finally`` is what unlinks the
+        ``.part``, so returning before it has run would leave the caller free to
+        delete a directory a dying task is still using.
+        """
+        running = self._running.get(model_id)
+        if running is None or running.task is None:
+            return
+        running.task.cancel()
+        await asyncio.gather(running.task, return_exceptions=True)
+        self._running.pop(model_id, None)
 
     async def wait(self, model_id: str) -> None:
         """Wait for ``model_id``'s running install to settle (no-op if none).
@@ -363,6 +423,14 @@ class ModelInstaller:
         install returned long ago, so the only place to report it is the model
         resource. Cancellation is re-raised so ``aclose`` sees a genuinely
         cancelled task.
+
+        **Every** exception is recorded, not only :class:`ModelInstallError`.
+        Letting an unclassified one escape would leave the task dying with an
+        unretrieved exception and the model reporting ``available`` — the same
+        answer as "never tried", which is the one thing a user who just clicked
+        Install must not be told. ``Exception`` and not ``BaseException``:
+        :class:`asyncio.CancelledError` is a control-flow signal and must keep
+        propagating.
         """
         try:
             await self._install(model_id, artifact, running)
@@ -375,6 +443,13 @@ class ModelInstaller:
                 exc.message,
             )
             self._failures[model_id] = exc.to_error_info()
+        except Exception:
+            logger.exception("Installing model %r raised an unclassified error", model_id)
+            self._failures[model_id] = ModelInstallError(
+                DOWNLOAD_FAILED,
+                f"Installing model {model_id!r} failed unexpectedly; see the server log.",
+                {"model_id": model_id, "reason": UNEXPECTED_ERROR},
+            ).to_error_info()
         finally:
             # Dropped last, and never before the failure is recorded: a client
             # polling between the two would otherwise see ``available`` for an
@@ -393,15 +468,26 @@ class ModelInstaller:
         part = partial_weights_path(self._models_dir, model_id)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
-            digest = await self._download(artifact, part, running)
+            digest = await self._download(model_id, artifact, part, running)
             if digest != artifact.sha256:
+                # The pinned digest is logged, not returned: it belongs to the
+                # private ``artifact`` block. ``actual`` is a fact about the
+                # bytes that arrived, so it travels with the failure.
+                logger.warning(
+                    "Model %r artifact hashed to %s but the catalog pins %s (from %s)",
+                    model_id,
+                    digest,
+                    artifact.sha256,
+                    artifact.download_url,
+                )
                 raise ModelInstallError(
                     CHECKSUM_MISMATCH,
                     f"The downloaded artifact for model {model_id!r} does not match the "
                     "SHA-256 pinned in the catalog; it was discarded.",
-                    {"model_id": model_id, "expected": artifact.sha256, "actual": digest},
+                    {"model_id": model_id, "actual": digest},
                 )
             os.replace(part, target)
+            _sync_directory(target.parent)
         except OSError as exc:
             logger.exception("Could not write the weights artifact for model %r", model_id)
             raise ModelInstallError(
@@ -412,13 +498,23 @@ class ModelInstaller:
         finally:
             _discard(part)
 
-    async def _download(self, artifact: ModelArtifact, part: Path, running: _RunningInstall) -> str:
+    async def _download(
+        self, model_id: str, artifact: ModelArtifact, part: Path, running: _RunningInstall
+    ) -> str:
         """Stream the artifact into ``part``; return its SHA-256 hex digest.
 
         The response is never read whole. ``size_bytes`` bounds it twice — once
         against a declared ``Content-Length`` before any body is read, and once
         per chunk against the running total, which is what covers a chunked or
         length-less response.
+
+        The file is flushed and ``fsync``-ed before it is closed, so the caller's
+        rename publishes bytes that are actually on stable storage.
+
+        **No message here names the download URL.** Weights are routinely served
+        from presigned URLs whose query string is the credential, and these
+        messages reach every API client through ``installation.error``. The URL
+        goes to the log, where it belongs.
 
         Raises:
             ModelInstallError: ``download_failed`` for a non-200 status, a
@@ -433,13 +529,22 @@ class ModelInstaller:
                 client.stream("GET", artifact.download_url) as response,
             ):
                 if response.status_code != 200:
+                    logger.warning(
+                        "Weights host answered %d for model %r at %s",
+                        response.status_code,
+                        model_id,
+                        artifact.download_url,
+                    )
                     raise ModelInstallError(
                         DOWNLOAD_FAILED,
-                        f"The weights host answered {response.status_code} for "
-                        f"{_safe_url(artifact.download_url)}.",
-                        {"reason": HTTP_STATUS, "status_code": response.status_code},
+                        f"The weights host answered {response.status_code} for model {model_id!r}.",
+                        {
+                            "model_id": model_id,
+                            "reason": HTTP_STATUS,
+                            "status_code": response.status_code,
+                        },
                     )
-                _reject_declared_overrun(response, expected)
+                _reject_declared_overrun(model_id, response, expected)
                 with part.open("wb") as sink:
                     async for chunk in response.aiter_bytes(self._chunk_bytes):
                         received += len(chunk)
@@ -447,25 +552,41 @@ class ModelInstaller:
                             raise ModelInstallError(
                                 DOWNLOAD_FAILED,
                                 "The weights host is serving more data than the catalog "
-                                f"declares ({expected} bytes); the download was stopped.",
-                                {"reason": SIZE_EXCEEDED, "expected_bytes": expected},
+                                f"declares for model {model_id!r} ({expected} bytes); the "
+                                "download was stopped.",
+                                {
+                                    "model_id": model_id,
+                                    "reason": SIZE_EXCEEDED,
+                                    "expected_bytes": expected,
+                                },
                             )
                         digest.update(chunk)
                         sink.write(chunk)
                         running.downloaded_bytes = received
+                    _sync_to_disk(sink)
         except httpx2.HTTPError as exc:
+            logger.warning(
+                "Could not fetch the weights artifact for model %r from %s: %r",
+                model_id,
+                artifact.download_url,
+                exc,
+            )
             raise ModelInstallError(
                 DOWNLOAD_FAILED,
-                f"The weights artifact could not be fetched from "
-                f"{_safe_url(artifact.download_url)}.",
-                {"reason": CONNECTION_FAILED},
+                f"The weights artifact for model {model_id!r} could not be fetched from its host.",
+                {"model_id": model_id, "reason": CONNECTION_FAILED},
             ) from exc
         if received != expected:
             raise ModelInstallError(
                 DOWNLOAD_FAILED,
-                f"The weights host sent {received} bytes but the catalog declares "
-                f"{expected}; the download was incomplete.",
-                {"reason": SIZE_MISMATCH, "expected_bytes": expected, "received_bytes": received},
+                f"The weights host sent {received} bytes for model {model_id!r} but the "
+                f"catalog declares {expected}; the download was incomplete.",
+                {
+                    "model_id": model_id,
+                    "reason": SIZE_MISMATCH,
+                    "expected_bytes": expected,
+                    "received_bytes": received,
+                },
             )
         return digest.hexdigest()
 
@@ -478,7 +599,7 @@ class ModelInstaller:
         await self.aclose()
 
 
-def _reject_declared_overrun(response: httpx2.Response, expected: int) -> None:
+def _reject_declared_overrun(model_id: str, response: httpx2.Response, expected: int) -> None:
     """Fail before reading a body the server has already said is too big.
 
     Cheap and worth doing: a mirror serving a 20 GB file where the catalog
@@ -497,24 +618,50 @@ def _reject_declared_overrun(response: httpx2.Response, expected: int) -> None:
     if length > expected:
         raise ModelInstallError(
             DOWNLOAD_FAILED,
-            f"The weights host declares {length} bytes but the catalog declares "
-            f"{expected}; the download was refused.",
-            {"reason": SIZE_EXCEEDED, "expected_bytes": expected, "declared_bytes": length},
+            f"The weights host declares {length} bytes for model {model_id!r} but the catalog "
+            f"declares {expected}; the download was refused.",
+            {
+                "model_id": model_id,
+                "reason": SIZE_EXCEEDED,
+                "expected_bytes": expected,
+                "declared_bytes": length,
+            },
         )
 
 
-def _safe_url(url: str) -> str:
-    """Return ``url`` without any credentials it may carry.
+def _sync_to_disk(sink: IO[bytes]) -> None:
+    """Flush ``sink`` all the way to stable storage.
 
-    A catalog is a file a user can edit, and an error message is a thing a user
-    pastes into an issue. Nothing else here strips anything: the host and path
-    are exactly what makes a download failure diagnosable.
+    ``close()`` alone only hands the bytes to the OS page cache, so a rename
+    performed straight afterwards can publish a file whose tail is still in
+    volatile memory. Nothing ever re-hashes installed weights, so a torn tail
+    would be loaded silently and permanently — see the module docstring for why
+    this ``fsync`` runs on the event loop rather than in a worker thread.
     """
+    sink.flush()
+    os.fsync(sink.fileno())
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make the rename itself durable, where the platform allows it.
+
+    ``fsync`` on the containing directory is what persists a new directory
+    entry on POSIX. Windows exposes no directory handle to sync — and its
+    ``ReplaceFile``/``MoveFileEx`` semantics do not need one — so a refusal to
+    open the directory is expected, not an error, and the install is complete
+    either way.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
     try:
-        parsed = httpx2.URL(url)
-    except httpx2.InvalidURL:  # pragma: no cover - the catalog validated the scheme
-        return "<invalid url>"
-    return str(parsed.copy_with(userinfo=b""))
+        descriptor = os.open(directory, flags)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:  # pragma: no cover - platform-dependent
+        logger.debug("Could not fsync the weights directory %s", directory, exc_info=True)
+    finally:
+        os.close(descriptor)
 
 
 def _discard(part: Path) -> None:
@@ -539,6 +686,7 @@ __all__ = [
     "HTTP_STATUS",
     "SIZE_EXCEEDED",
     "SIZE_MISMATCH",
+    "UNEXPECTED_ERROR",
     "ModelInstallError",
     "ModelInstaller",
 ]

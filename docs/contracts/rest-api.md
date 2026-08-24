@@ -205,13 +205,21 @@ model whose weights are already present is an idempotent no-op reporting
 `installed`. Removing weights that are not installed is likewise a no-op
 reporting `available`.
 
+**`DELETE /models/{model_id}/weights` cancels a running install** rather than
+refusing it. "I do not want this model's weights" includes the ones being
+fetched, and it is also the escape hatch from a download that will not finish:
+the network bound is *per operation*, not a total budget, so a host trickling
+bytes just under the timeout could otherwise hold a model in `downloading` until
+the process was restarted. The cancelled download removes its own partial file
+before the response is sent.
+
 Model management error codes:
 
 | code | status | when |
 | --- | --- | --- |
 | `model_not_found` | 404 | unknown `model_id` (get / install / remove). An ID that could not be a model ID at all — a traversal attempt, an absolute path — is simply not a catalog key and exits here |
 | `model_not_downloadable` | 409 | the model declares no `artifact`; it is built in and always installed. `detail` carries `model_id` |
-| `model_busy` | 409 | an install is already running for this model (install and remove alike). `detail` carries `model_id` |
+| `model_busy` | 409 | an install is already running for this model. `detail` carries `model_id`. **Install only** — `DELETE .../weights` cancels a running install instead of refusing |
 
 **`download_failed` and `checksum_mismatch` are install-failure codes, not HTTP
 statuses.** The request that started the install returned long before the
@@ -220,23 +228,40 @@ download could fail, so — exactly as `audio_decode_timed_out` does for a job
 
 | code | when | `detail` |
 | --- | --- | --- |
-| `download_failed` | the artifact could not be fetched in full | `reason`, plus the sizes involved |
-| `checksum_mismatch` | the bytes are not the SHA-256 the catalog pins | `model_id`, `expected`, `actual` |
+| `download_failed` | the artifact could not be fetched in full | `model_id`, `reason`, plus the sizes involved |
+| `checksum_mismatch` | the bytes are not the SHA-256 the catalog pins | `model_id`, `actual` (the digest that arrived) |
 
 `download_failed`'s `reason` is a **classification, not a message**:
 `http_status` (the host answered, but not `200` — `detail.status_code` says
 what), `connection_failed` (refused, reset, or timed out), `size_exceeded` (the
 body is larger than the manifest's `size_bytes`, refused from the declared
-`Content-Length` or stopped mid-stream), `size_mismatch` (it ended short), or
-`filesystem_error` (the artifact could not be written). OS error strings and
-FFmpeg-style diagnostics name absolute server paths, so they are logged and never
-returned — the same discipline `export_failed` applies.
+`Content-Length` or stopped mid-stream), `size_mismatch` (it ended short),
+`filesystem_error` (the artifact could not be written), or `unexpected_error`
+(the install raised something the manager does not classify — reported rather
+than swallowed, because a model silently returning to `available` is
+indistinguishable from "never tried"). OS error strings and FFmpeg-style
+diagnostics name absolute server paths, so they are logged and never returned —
+the same discipline `export_failed` applies.
+
+**No failure ever names the download URL, and `checksum_mismatch` never returns
+the pinned digest.** `installation.error` is served to every API caller, and
+large weights are routinely hosted behind presigned URLs whose query string *is*
+the credential — so the URL is logged, never returned, and the message names the
+model instead. By the same rule the failure `detail` carries facts about *what
+happened* (the digest and byte count that actually arrived) plus `size_bytes`,
+which the model resource already publishes as `installation.total_bytes`. It
+never carries a field copied out of the private `artifact` block.
 
 **An incomplete or hash-mismatched artifact is never installed and never
 loadable** (ARCHITECTURE.md §9). The download streams to a temporary `.part`
-file, the pinned SHA-256 is verified *before* anything is published, and only
-then is the file `os.replace`d into place. The `.part` is removed on every
-failure path, including cancellation and shutdown. A pinned checksum is
+file, the pinned SHA-256 is verified *before* anything is published, the file is
+`fsync`ed so the bytes are on stable storage rather than in the page cache, and
+only then is it `os.replace`d into place (with the containing directory synced
+afterwards where the platform allows). Nothing ever re-hashes installed weights,
+so a file that is published torn would be loaded silently forever — the sync is
+what stops a power loss just after a "successful" install from producing one.
+The `.part` is removed on every failure path, including cancellation and
+shutdown. A pinned checksum is
 *enforced*, never trusted: a checkpoint host that is renamed or taken down
 serves a 404 page, not weights, and installing something plausible-looking would
 be the exact failure this exists to prevent.
