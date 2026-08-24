@@ -113,7 +113,7 @@ Deferred review findings from PRs #5, #8, #17 and #20 are tracked as feature
 | 021 | Result management + stem serving             | MERGED  | 014, 015   | `021-result-serving` | #20 |
 | 022 | Stem export (WAV24/float32/FLAC)             | PR OPEN | 021        | `022-stem-export` | #25 |
 | 023 | Stem player UI (sync playback, solo, mute)   | PR OPEN | 017, 021   | `023-stem-player` | #26 |
-| 024 | Export UI                                    | PR OPEN | 022, 023   | `024-export-ui` | #… |
+| 024 | Export UI                                    | PR OPEN | 022, 023   | `024-export-ui` | #27 |
 | 025 | Model download manager (SHA-256, atomic)     | PLANNED | 010        | | |
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
