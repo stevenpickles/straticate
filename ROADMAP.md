@@ -39,52 +39,46 @@ production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
 
 ## Current state (2026-08-24)
 
-Phases 0–6 (partly) are merged into `dev`: features 001–021 except 022–024.
-**381 backend tests and 319 frontend tests**, all CI-enforced on every PR.
+**Milestone M1 is met.** Features 001–024 are merged into `dev`.
+**442 backend tests and 517 frontend tests**, all CI-enforced on every PR.
 
-**The application works end to end in a browser.** Verified manually on a
-GPU-free machine against a real backend and Vite dev server, not just the test
-harness: a 3-minute MP3 was dropped in, ffprobe metadata rendered (with the
-`bit_depth` row correctly absent for a lossy source), the four-stem mode was
-chosen from catalog-derived options, and the job ran to `completed` at **13.7×
-real time** with live chunk-grained progress and a populated telemetry panel —
-model, device and processing, including real-time factor. A second 10-minute
-job was cancelled mid-run: the UI settled on `cancelled` reporting the stage,
-and **no partial stem was left on disk**. `GET /jobs/{id}/stems/{stem}` serves
-`206 Partial Content` with `accept-ranges: bytes`.
+M1's formal acceptance is that *a person* can run backend + frontend locally per
+DEVELOPMENT.md and perform the whole workflow against the fake separator, with
+CI green, on a machine with no GPU. That was carried out by hand in a browser on
+2026-08-24 against a real uvicorn backend and Vite dev server on a CPU-only
+host (no `torch` installed, so `GET /system/devices` reports CPU only):
 
-The device shown is the fake separator's own honestly-labelled
-`Straticate Fake Accelerator` / `backend: "fake"` / `fake:0`. That is
-deliberate: feature 019 publishes the separator's `DeviceStats` verbatim
-(feature 014's design) rather than deriving GPU identity from the compute
-device, which is what lets the whole telemetry path be demonstrated on a
-machine with no GPU. This **supersedes the telemetry sketch in
-`docs/features/018-device-detection.md`**, which predates 014 — see
-`docs/features/019-telemetry-sampler.md`.
+| Step | Observed |
+| --- | --- |
+| Upload | 3-minute MP3 accepted; ffprobe metadata rendered, `bit_depth` row correctly absent for a lossy source |
+| Configure | Modes, stem lists and quality tiers rendered from `/separation-modes`; 4-stem mode selected |
+| Separate | Job created, returned immediately, ran to `completed` at **12.4x real time** |
+| Progress | Live chunk-grained progress over WebSocket (36 chunks), stage, elapsed, audio processed |
+| Telemetry | Model / device / processing panel populated, including real-time factor |
+| Cancel | A separate 10-minute job cancelled mid-run: settled on `cancelled` naming the stage, **no partial stem left on disk**, re-cancel idempotent |
+| Inspect | All four stems loaded and played in sync off one clock; solo and mute per stem; scrubber and time readout |
+| Export | 3-of-4 stem subset exported as `wav_pcm24`; server produced `vocals/drums/other.wav` + `separation.json`, with `bass` correctly excluded |
+| Round trip | "Start another separation" returned to `configure` with the uploaded file retained |
 
-Working today:
+Playback ran uninterrupted while the export transcoded, confirming the export
+path does not block the event loop.
 
-- **Backend** — the shared contract layer (Pydantic → OpenAPI → generated
-  TypeScript), audio upload/probe/delete, the model catalog serving
-  capability-derived separation modes, compute-device detection, the
-  asynchronous job manager, the WebSocket event hub, the `Separator`
-  abstraction with `FakeSeparator`, the job REST resource with the
-  architecture-keyed `SeparatorRegistry`, the runtime telemetry sampler, and
-  result + stem serving with byte-range support.
-- **Frontend** — app shell, drag-drop upload, metadata panel, catalog-driven
-  mode/quality selection that starts jobs, live progress with cancel and
-  terminal-state handling, the session-wide job event socket with REST resync
-  on reconnect, and the runtime telemetry panel.
+One caveat on the export step: the browser automation context suppresses
+page-initiated downloads, so the file landing on the user's disk could not be
+observed — the server-side artifact was verified instead, and the UI's success
+line reflects the fetch completing rather than a confirmed disk write (recorded
+as a known limitation in `docs/features/024-export-ui.md`).
 
-**Remaining for M1 — features 022, 023, 024.** Stem export (022) is backend and
-independent; the stem player (023) and export UI (024) complete the loop.
-`023` and `022` may run in parallel; `024` follows both. Nothing else blocks
-M1: every dependency of 022–024 is merged.
+Working today: the complete `select -> configure -> separate -> inspect ->
+export` workflow, end to end, with no ML model.
 
-Deferred review findings from PRs #5, #8, #17 and #20 are tracked as feature
-**029**; two of them (separator construction on the event loop, and
-`Model.capabilities` never being consulted) are recorded there as work feature
-**026** must carry out.
+**Next up — M2 (features 025, 026).** Real HQ vocal separation on CUDA with CPU
+fallback, which needs the model download manager (025) first. Before that work
+starts, feature **029** is worth scheduling: it now carries deferred review
+findings from five PRs (#5, #8, #17, #20, #25), two of which are a single fix,
+and two more items are recorded there as work **026** must carry out. The
+Playwright E2E tier that DEVELOPMENT.md schedules "around M1" is also still
+unwritten and now has a workflow worth pinning down.
 
 ## Feature ledger
 
@@ -111,9 +105,9 @@ Deferred review findings from PRs #5, #8, #17 and #20 are tracked as feature
 | 019 | Runtime telemetry sampler + metrics events   | MERGED  | 013, 018   | `019-telemetry-sampler` | #21 |
 | 020 | Telemetry panel UI (model/GPU/processing)    | MERGED  | 011, 016, 019* | `020-telemetry-panel` | #22 |
 | 021 | Result management + stem serving             | MERGED  | 014, 015   | `021-result-serving` | #20 |
-| 022 | Stem export (WAV24/float32/FLAC)             | PR OPEN | 021        | `022-stem-export` | #25 |
-| 023 | Stem player UI (sync playback, solo, mute)   | PR OPEN | 017, 021   | `023-stem-player` | #26 |
-| 024 | Export UI                                    | PR OPEN | 022, 023   | `024-export-ui` | #27 |
+| 022 | Stem export (WAV24/float32/FLAC)             | MERGED  | 021        | `022-stem-export` | #25 |
+| 023 | Stem player UI (sync playback, solo, mute)   | MERGED  | 017, 021   | `023-stem-player` | #26 |
+| 024 | Export UI                                    | MERGED  | 022, 023   | `024-export-ui` | #27 |
 | 025 | Model download manager (SHA-256, atomic)     | PLANNED | 010        | | |
 | 026 | Real separator: HQ vocals (RoFormer-family)  | PLANNED | 014, 018, 025 | | |
 | 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
