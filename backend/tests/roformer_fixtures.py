@@ -55,13 +55,19 @@ TINY_MODEL_PARAMETERS: dict[str, Any] = {
 
 
 def tiny_parameters(**overrides: Any) -> RoFormerParameters:
-    """Catalog-shaped parameters for the synthetic model."""
+    """Catalog-shaped parameters for the synthetic model.
+
+    ``residual_stem`` defaults to ``"instrumental"`` because the synthetic model
+    emits one stem and :func:`tiny_info` advertises two — the same shape the real
+    entry has. Pass ``residual_stem=None`` for a model that emits them all.
+    """
     model = dict(TINY_MODEL_PARAMETERS)
     model.update(overrides.pop("model", {}))
     return RoFormerParameters(
         model=model,
         chunk_samples=overrides.pop("chunk_samples", TINY_CHUNK_SAMPLES),
         num_overlap=overrides.pop("num_overlap", 2),
+        residual_stem=overrides.pop("residual_stem", "instrumental"),
     )
 
 
@@ -69,13 +75,17 @@ def tiny_catalog_block(**overrides: Any) -> dict[str, Any]:
     """The same thing in ``default_inference_parameters`` (JSON) form."""
     model = dict(TINY_MODEL_PARAMETERS)
     model.update(overrides.pop("model", {}))
-    return {
+    block: dict[str, Any] = {
         "model": model,
         "inference": {
             "chunk_size": overrides.pop("chunk_size", TINY_CHUNK_SAMPLES),
             "num_overlap": overrides.pop("num_overlap", 2),
         },
     }
+    residual = overrides.pop("residual_stem", "instrumental")
+    if residual is not None:
+        block["output"] = {"residual_stem": residual}
+    return block
 
 
 def tiny_info(**overrides: Any) -> SeparatorInfo:

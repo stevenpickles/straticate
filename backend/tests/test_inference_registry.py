@@ -13,6 +13,7 @@ loop stays responsive while that happens and that two racing callers build once.
 
 import asyncio
 import threading
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -343,3 +344,95 @@ async def test_aget_surfaces_a_builder_failure_and_does_not_cache_it() -> None:
     # Installing the weights and retrying works: nothing negative was cached.
     assert isinstance(await registry.aget(model), FakeSeparator)
     assert attempts == 2
+
+
+def test_a_registry_outlives_the_event_loop_that_first_used_it() -> None:
+    """A registry is long-lived; an ``asyncio.Lock`` would not be.
+
+    ``asyncio.Lock`` binds to whichever loop first *contends* for it, and it
+    stays in the registry afterwards. A build that fails leaves the lock behind
+    with nothing cached, so the next contended attempt — from a synchronous
+    ``TestClient`` block after an async client on the same app, from a second
+    ``asyncio.run``, or from the next test's function-scoped loop — met
+    ``RuntimeError: ... is bound to a different event loop`` instead of
+    building. The build already runs in a worker thread, so a thread lock is
+    what actually guards it, and nothing is ever held across an ``await``.
+
+    Two racing callers per loop are what make this reproducible: an uncontended
+    ``asyncio.Lock`` acquire returns on a fast path that never looks at the loop
+    at all, which is exactly why the bug is the kind that survives review.
+    """
+    attempts = 0
+    fail_until = 2
+    at_the_gate = threading.Event()
+    proceed = threading.Event()
+
+    def build(model: Model) -> Separator:
+        nonlocal attempts
+        attempts += 1
+        at_the_gate.set()
+        proceed.wait(timeout=30)
+        if attempts <= fail_until:
+            raise ApplicationError("model_weights_missing", "no weights", status_code=409)
+        return FakeSeparator(separator_info_from_model(model), chunk_delay_seconds=0.0)
+
+    registry = SeparatorRegistry({"flaky": build})
+    model = make_catalog_model("flaky-001", architecture="flaky")
+
+    async def two_racing_callers() -> Sequence[Separator | BaseException]:
+        at_the_gate.clear()
+        proceed.clear()
+        first = asyncio.create_task(registry.aget(model))
+        # The second caller only contends if the first is already building.
+        await asyncio.to_thread(at_the_gate.wait, 30)
+        second = asyncio.create_task(registry.aget(model))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        proceed.set()
+        return await asyncio.gather(first, second, return_exceptions=True)
+
+    # Loop one: both callers contend, both fail, nothing is cached — and a
+    # per-model asyncio.Lock would now be bound to this loop, which is gone.
+    outcomes = asyncio.run(two_racing_callers())
+    assert [type(outcome) for outcome in outcomes] == [ApplicationError, ApplicationError]
+    assert attempts == 2
+
+    # Loop two: an entirely separate event loop. Nothing from the first may
+    # leak into it.
+    fail_until = 0
+    outcomes = asyncio.run(two_racing_callers())
+    assert all(isinstance(outcome, FakeSeparator) for outcome in outcomes), outcomes
+    assert outcomes[0] is outcomes[1], "racing callers must share one instance"
+
+    # And a third loop still gets the cached instance.
+    assert asyncio.run(registry.aget(model)) is outcomes[0]
+
+
+def test_the_lock_for_a_model_is_created_once_and_reused() -> None:
+    """A miss must not construct and discard a fresh lock every time."""
+    registry = SeparatorRegistry({})
+    model = make_catalog_model("late-001", architecture="late_net")
+
+    # Three misses (no builder registered), then a successful build.
+    for _ in range(3):
+        with pytest.raises(ApplicationError):
+            asyncio.run(registry.aget(model))
+    registry.register("late_net", fake_separator_builder(chunk_delay_seconds=0.0))
+    assert isinstance(asyncio.run(registry.aget(model)), FakeSeparator)
+
+
+def test_get_and_aget_share_one_cache_and_one_lock() -> None:
+    """Both accessors are the same build-once path, reached differently."""
+    builds: list[str] = []
+
+    def build(model: Model) -> Separator:
+        builds.append(model.id)
+        return FakeSeparator(separator_info_from_model(model), chunk_delay_seconds=0.0)
+
+    registry = SeparatorRegistry({"counted": build})
+    model = make_catalog_model("counted-001", architecture="counted")
+
+    synchronous = registry.get(model)
+    assert asyncio.run(registry.aget(model)) is synchronous
+    assert registry.get(model) is synchronous
+    assert builds == ["counted-001"]

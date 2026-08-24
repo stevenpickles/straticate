@@ -829,3 +829,38 @@ async def test_loading_a_separator_does_not_stall_the_application(tmp_path: Path
 
     assert created.status_code == 201, created.text
     assert threading.get_ident() not in build_threads
+
+
+async def test_a_catalog_entry_this_build_cannot_run_is_a_500_from_create(tmp_path: Path) -> None:
+    """Building the separator happens in the handler, so its faults answer here.
+
+    ``model_parameters_invalid`` and ``model_weights_invalid`` are deployment
+    faults, not client mistakes, and the REST contract lists them with the other
+    job-creation errors because this is the request that surfaces them.
+    """
+    block = tiny_catalog_block()
+    block["inference"]["chunk_size"] = 0
+    models_dir = write_catalog_with(
+        [roformer_entry(default_inference_parameters=block)], tmp_path / "models"
+    )
+    write_tiny_weights(weights_path(models_dir, "tiny-vocals-001"))
+    app = create_app(Settings(data_dir=tmp_path / "data", models_dir=models_dir))
+    app.state.device_detector = DeviceDetector(probes=[])
+    audio = register_audio(app)
+
+    error = assert_envelope(await post_job(app, audio), "model_parameters_invalid", 500)
+    assert error["detail"]["model_id"] == "tiny-vocals-001"
+
+
+async def test_weights_that_do_not_match_the_architecture_are_a_500_from_create(
+    tmp_path: Path,
+) -> None:
+    models_dir = write_catalog_with([roformer_entry()], tmp_path / "models")
+    # A checkpoint for a differently-shaped network of the same architecture.
+    write_tiny_weights(weights_path(models_dir, "tiny-vocals-001"), num_bands=16)
+    app = create_app(Settings(data_dir=tmp_path / "data", models_dir=models_dir))
+    app.state.device_detector = DeviceDetector(probes=[])
+    audio = register_audio(app)
+
+    error = assert_envelope(await post_job(app, audio), "model_weights_invalid", 500)
+    assert error["detail"]["model_id"] == "tiny-vocals-001"
