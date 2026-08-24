@@ -206,6 +206,14 @@ export interface paths {
          *     populated — in responses and in every event — even when the request omitted
          *     it.
          *
+         *     The separator is handed to the telemetry sampler (feature 019) **directly
+         *     after** ``submit`` returns, with no ``await`` in between: the job ID does
+         *     not exist until then, and any suspension point between the two would let
+         *     the manager's worker start the job — and emit ``job_started`` — before the
+         *     sampler knew which separator to poll. This handler is already required to
+         *     be ``await``-free between resolution and submit (feature 015), so the
+         *     registration simply joins that atomic block.
+         *
          *     Errors (see ``docs/contracts/rest-api.md``): ``audio_not_found`` (404),
          *     ``separation_mode_not_found`` (404), ``quality_option_not_found`` (404),
          *     ``device_not_found`` (404), ``separator_unavailable`` (501),
@@ -314,6 +322,46 @@ export interface paths {
          *     ``stem_file_missing`` (404) when the listed stem's file is gone from disk.
          */
         get: operations["get_job_stem_api_v1_jobs__job_id__stems__stem_name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{job_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export Job Stems
+         * @description Download a completed job's stems in the requested format.
+         *
+         *     Exactly one stem requested → that stem's transcoded audio file. More than
+         *     one (including the default, which is every stem of the job's result) → a
+         *     zip holding one file per stem plus a ``separation.json`` manifest. Either
+         *     way the response is ``Content-Disposition: attachment``; a single-stem
+         *     export deliberately carries no manifest (see
+         *     ``docs/contracts/rest-api.md``).
+         *
+         *     The built file is cached under the job's ``exports/`` directory and reused:
+         *     a completed job's stems never change, so a repeated identical download is
+         *     served straight from disk without running FFmpeg again. Simultaneous
+         *     identical requests share one build rather than racing (see
+         *     :class:`BuildLocks`), and a request cancelled mid-build leaves the build to
+         *     finish rather than abandoning a partial file.
+         *
+         *     Errors (see ``docs/contracts/rest-api.md``): ``job_not_found`` (404),
+         *     ``result_not_available`` (409, with the job's current ``state`` in
+         *     ``detail``), ``stem_not_found`` (404, with ``available_stems`` in
+         *     ``detail``), ``stem_file_missing`` (404), ``export_failed`` (500), and an
+         *     unknown ``format`` as the standard ``validation_error`` (422).
+         */
+        get: operations["export_job_stems_api_v1_jobs__job_id__export_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -456,6 +504,20 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /**
+         * ExportFormat
+         * @description Audio format an export is encoded to.
+         *
+         *     Deliberately defined here rather than in :mod:`straticate.schemas`: it is
+         *     one endpoint's query-parameter vocabulary, not a shared entity, and
+         *     nothing else in the application encodes audio. Being a query parameter it
+         *     still reaches the generated frontend types (FastAPI registers a query
+         *     enum as a component), which is what feature 024's format picker needs, and
+         *     an unrecognised value is the standard FastAPI ``validation_error`` (422)
+         *     rather than a code invented here.
+         * @enum {string}
+         */
+        ExportFormat: "wav_pcm24" | "wav_float32" | "flac";
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1513,6 +1575,44 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_job_stems_api_v1_jobs__job_id__export_get: {
+        parameters: {
+            query?: {
+                /** @description Audio format to encode the stems in. The stems are 16-bit PCM WAV on disk, so `wav_pcm24` and `wav_float32` change the encoding without adding information. */
+                format?: components["schemas"]["ExportFormat"];
+                /** @description Comma-separated stem names to export. Omit to export every stem of the job's result. Each name is validated against that result. */
+                stems?: string | null;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The transcoded stem (exactly one requested) or a zip of the stems plus `separation.json` (more than one). Always `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "audio/wav": string;
+                    "audio/flac": string;
+                    "application/zip": string;
+                };
             };
             /** @description Validation Error */
             422: {
