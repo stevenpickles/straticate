@@ -13,3 +13,118 @@
   border: 1px solid var(--color-border);
   border-radius: 0.75rem;
 }
+
+.export-panel-title {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.export-panel-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0.6rem 0.75rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+}
+
+.export-panel-legend {
+  padding: 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.export-panel-option {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.export-panel-option input {
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.export-panel-option-label {
+  text-transform: capitalize;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.export-panel-format {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.export-panel-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.export-panel-select {
+  flex: 1;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.4rem;
+  cursor: pointer;
+}
+
+.export-panel-select:focus-visible {
+  border-color: var(--color-accent);
+}
+
+.export-panel-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+}
+
+.export-panel-download {
+  align-self: flex-start;
+  min-width: 6rem;
+  padding: 0.4rem 1rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  background-color: transparent;
+  border: 1px solid var(--color-accent);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.export-panel-download:hover:enabled,
+.export-panel-download:focus-visible:enabled {
+  background-color: color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+
+.export-panel-download:disabled {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  cursor: default;
+}
+
+.export-panel-status {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+}
+
+.export-panel-error {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-danger);
+}
