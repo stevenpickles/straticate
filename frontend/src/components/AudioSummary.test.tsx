@@ -2,14 +2,25 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Workspace } from './Workspace'
-import { AppStateProvider, type AppState } from '../state/appState'
-import { sampleAudioFile } from '../test/fixtures'
+import {
+  AppStateProvider,
+  initialConfigureState,
+  type AppState,
+} from '../state/appState'
+import { JobStateProvider } from '../state/jobState'
+import { sampleAudioFile, sampleSeparationModes } from '../test/fixtures'
 import type { AudioFile } from '../api/types'
 import { deleteAudio } from '../api/audio'
 
 vi.mock('../api/audio', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/audio')>()),
   deleteAudio: vi.fn(() => Promise.resolve()),
+}))
+
+// The configure phase also mounts SeparationOptions (feature 011), which
+// loads the catalog on mount; this suite is about the metadata summary.
+vi.mock('../api/modes', () => ({
+  listSeparationModes: vi.fn(() => Promise.resolve(sampleSeparationModes)),
 }))
 
 const deleteAudioMock = vi.mocked(deleteAudio)
@@ -19,10 +30,13 @@ function renderConfigured(file: AudioFile = sampleAudioFile) {
   const initialState: AppState = {
     phase: 'configure',
     upload: { status: 'uploaded', file },
+    configure: initialConfigureState,
   }
   return render(
     <AppStateProvider initialState={initialState}>
-      <Workspace />
+      <JobStateProvider>
+        <Workspace />
+      </JobStateProvider>
     </AppStateProvider>,
   )
 }
@@ -92,11 +106,6 @@ describe('AudioSummary', () => {
 
     expect(screen.queryByText('Bit Rate')).not.toBeInTheDocument()
     expect(fieldValue('Bit Depth')).toBe('24 bit')
-  })
-
-  it('marks where the separation options will go', () => {
-    renderConfigured()
-    expect(screen.getByText('Separation options coming next.')).toBeVisible()
   })
 
   it('choose a different file resets to select and deletes the upload', async () => {

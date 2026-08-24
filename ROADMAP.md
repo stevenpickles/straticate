@@ -89,7 +89,7 @@ features can hold disjoint file ownership rather than by feature number:
 | 008 | Drag-drop + file picker + upload state UI    | MERGED  | 003, 005   | `008-drag-drop-ui` | #7 |
 | 009 | Metadata display UI                          | MERGED  | 008        | `009-metadata-display` | #10 |
 | 010 | Model catalog + capabilities backend         | MERGED  | 005        | `010-model-catalog` | #11 |
-| 011 | Separation mode + quality selection UI       | PLANNED | 009, 010*  | | |
+| 011 | Separation mode + quality selection UI       | PR OPEN | 009, 010*  | `011-mode-selection-ui` | #19 |
 | 012 | Job manager (queue, states, cancellation)    | MERGED  | 005        | `012-job-manager` | #8 |
 | 013 | WebSocket event hub + typed events           | MERGED  | 012        | `013-websocket-hub` | #13 |
 | 014 | Separator interface + FakeSeparator          | MERGED  | 012        | `014-fake-separator` | #15 |

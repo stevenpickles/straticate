@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import {
   appReducer,
   initialAppState,
+  initialConfigureState,
   AppStateProvider,
   useAppState,
   useAppDispatch,
@@ -11,7 +12,7 @@ import {
   type AppState,
   type WorkflowPhase,
 } from './appState'
-import { sampleAudioFile } from '../test/fixtures'
+import { sampleAudioFile, sampleSeparationModes } from '../test/fixtures'
 
 describe('appReducer', () => {
   it('starts at the select phase', () => {
@@ -122,6 +123,185 @@ describe('appReducer upload slice', () => {
     state = appReducer(state, { type: 'upload/reset' })
     expect(state.upload).toEqual({ status: 'idle' })
     expect(state.phase).toBe('select')
+  })
+})
+
+describe('appReducer configure slice', () => {
+  /** Application state with the mode catalog loaded (and preselected). */
+  function withModesLoaded(
+    modes: typeof sampleSeparationModes = sampleSeparationModes,
+  ): AppState {
+    return appReducer(
+      appReducer(initialAppState, { type: 'configure/modesRequested' }),
+      { type: 'configure/modesLoaded', modes },
+    )
+  }
+
+  const [twoStemMode, fourStemMode] = sampleSeparationModes
+
+  it('starts idle with nothing loaded and nothing selected', () => {
+    expect(initialAppState.configure).toEqual(initialConfigureState)
+    expect(initialAppState.configure.modes).toEqual({ status: 'idle' })
+    expect(initialAppState.configure.modeId).toBeNull()
+    expect(initialAppState.configure.qualityId).toBeNull()
+    expect(initialAppState.configure.create).toEqual({ status: 'idle' })
+  })
+
+  it('configure/modesRequested enters loading', () => {
+    const state = appReducer(initialAppState, {
+      type: 'configure/modesRequested',
+    })
+    expect(state.configure.modes).toEqual({ status: 'loading' })
+  })
+
+  it('configure/modesLoaded preselects the first mode and its first tier', () => {
+    const state = withModesLoaded()
+    expect(state.configure.modes).toEqual({
+      status: 'loaded',
+      modes: sampleSeparationModes,
+    })
+    expect(state.configure.modeId).toBe(twoStemMode?.id)
+    expect(state.configure.qualityId).toBe(twoStemMode?.quality_options[0]?.id)
+  })
+
+  it('configure/modesLoaded selects nothing when the catalog is empty', () => {
+    const state = withModesLoaded([])
+    expect(state.configure.modeId).toBeNull()
+    expect(state.configure.qualityId).toBeNull()
+  })
+
+  it('configure/modesFailed records the envelope code and message', () => {
+    const state = appReducer(withModesLoaded(), {
+      type: 'configure/modesFailed',
+      code: 'unknown_error',
+      message: 'The separation modes could not be loaded.',
+    })
+    expect(state.configure.modes).toEqual({
+      status: 'error',
+      code: 'unknown_error',
+      message: 'The separation modes could not be loaded.',
+    })
+    expect(state.configure.modeId).toBeNull()
+    expect(state.configure.qualityId).toBeNull()
+  })
+
+  it('configure/modeSelected resets the quality to that mode first option', () => {
+    let state = withModesLoaded()
+    // Move off the preselected tier first, so the reset is observable.
+    state = appReducer(state, {
+      type: 'configure/qualitySelected',
+      qualityId: twoStemMode?.quality_options[1]?.id ?? '',
+    })
+    expect(state.configure.qualityId).toBe(twoStemMode?.quality_options[1]?.id)
+
+    state = appReducer(state, {
+      type: 'configure/modeSelected',
+      modeId: fourStemMode?.id ?? '',
+    })
+    expect(state.configure.modeId).toBe(fourStemMode?.id)
+    expect(state.configure.qualityId).toBe(fourStemMode?.quality_options[0]?.id)
+  })
+
+  it('never keeps a quality tier belonging to another mode', () => {
+    const foreignTier = twoStemMode?.quality_options[1]?.id ?? ''
+    expect(
+      fourStemMode?.quality_options.some((option) => option.id === foreignTier),
+    ).toBe(false)
+
+    let state = appReducer(withModesLoaded(), {
+      type: 'configure/modeSelected',
+      modeId: fourStemMode?.id ?? '',
+    })
+    state = appReducer(state, {
+      type: 'configure/qualitySelected',
+      qualityId: foreignTier,
+    })
+    expect(state.configure.qualityId).toBe(fourStemMode?.quality_options[0]?.id)
+  })
+
+  it('ignores selections before the catalog loads, and unknown IDs', () => {
+    expect(
+      appReducer(initialAppState, {
+        type: 'configure/modeSelected',
+        modeId: twoStemMode?.id ?? '',
+      }),
+    ).toBe(initialAppState)
+
+    const loaded = withModesLoaded()
+    expect(
+      appReducer(loaded, {
+        type: 'configure/modeSelected',
+        modeId: 'not-a-mode',
+      }),
+    ).toBe(loaded)
+    expect(
+      appReducer(loaded, {
+        type: 'configure/qualitySelected',
+        qualityId: 'not-a-tier',
+      }),
+    ).toBe(loaded)
+  })
+
+  it('upload/reset clears the whole configure slice', () => {
+    let state = appReducer(withModesLoaded(), {
+      type: 'configure/createFailed',
+      code: 'audio_not_found',
+      message: 'No such audio file.',
+    })
+    state = { ...state, phase: 'configure' }
+
+    state = appReducer(state, { type: 'upload/reset' })
+    expect(state.configure).toEqual(initialConfigureState)
+    expect(state.phase).toBe('select')
+  })
+})
+
+describe('appReducer create-job request state', () => {
+  const started = appReducer(initialAppState, {
+    type: 'configure/createStarted',
+  })
+
+  it('configure/createStarted marks a request in flight', () => {
+    expect(started.configure.create).toEqual({ status: 'creating' })
+    expect(started.phase).toBe('select')
+  })
+
+  it('configure/createSucceeded clears the request and advances to separate', () => {
+    const state = appReducer(started, { type: 'configure/createSucceeded' })
+    expect(state.configure.create).toEqual({ status: 'idle' })
+    expect(state.phase).toBe<WorkflowPhase>('separate')
+  })
+
+  it('configure/createFailed records the envelope and keeps the selection', () => {
+    const loaded = appReducer(
+      appReducer(initialAppState, { type: 'configure/modesRequested' }),
+      { type: 'configure/modesLoaded', modes: sampleSeparationModes },
+    )
+    const state = appReducer(
+      appReducer(loaded, { type: 'configure/createStarted' }),
+      {
+        type: 'configure/createFailed',
+        code: 'separator_unavailable',
+        message: 'No separator implementation exists for this model.',
+      },
+    )
+    expect(state.configure.create).toEqual({
+      status: 'error',
+      code: 'separator_unavailable',
+      message: 'No separator implementation exists for this model.',
+    })
+    expect(state.configure.modeId).toBe(sampleSeparationModes[0]?.id)
+    expect(state.phase).toBe('select')
+  })
+
+  it('a retry after a failure returns to creating', () => {
+    const failed = appReducer(started, {
+      type: 'configure/createFailed',
+      code: 'service_unavailable',
+      message: 'The server is shutting down.',
+    })
+    const retried = appReducer(failed, { type: 'configure/createStarted' })
+    expect(retried.configure.create).toEqual({ status: 'creating' })
   })
 })
 
