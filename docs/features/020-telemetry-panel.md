@@ -3,7 +3,7 @@
 Branch: `020-telemetry-panel`
 Status: PR OPEN
 Dependencies: 011, 016, 019\*
-PR: #…
+PR: #22
 
 ## Objective
 

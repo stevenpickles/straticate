@@ -98,7 +98,7 @@ features can hold disjoint file ownership rather than by feature number:
 | 017 | Progress UI + cancel + error handling        | PLANNED | 011, 016   | | |
 | 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
 | 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
-| 020 | Telemetry panel UI (model/GPU/processing)    | PR OPEN | 011, 016, 019* | `020-telemetry-panel` | #… |
+| 020 | Telemetry panel UI (model/GPU/processing)    | PR OPEN | 011, 016, 019* | `020-telemetry-panel` | #22 |
 | 021 | Result management + stem serving             | PLANNED | 014, 015   | | |
 | 022 | Stem export (WAV24/float32/FLAC)             | PLANNED | 021        | | |
 | 023 | Stem player UI (sync playback, solo, mute)   | PLANNED | 017, 021*  | | |
