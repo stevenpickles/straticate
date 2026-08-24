@@ -9,7 +9,7 @@ import {
   type Dispatch,
   type ReactNode,
 } from 'react'
-import type { AudioFile } from '../api/types'
+import type { AudioFile, SeparationMode } from '../api/types'
 
 /** The phases of the product workflow, in order. */
 export type WorkflowPhase =
@@ -41,12 +41,65 @@ export type UploadState =
       readonly message: string
     }
 
+/**
+ * State of the separation-mode catalog fetch, discriminated on `status`.
+ * The catalog is served by `GET /separation-modes`; nothing about modes,
+ * stems or quality tiers is known to the client before it loads.
+ */
+export type ModesState =
+  | { readonly status: 'idle' }
+  | { readonly status: 'loading' }
+  | {
+      readonly status: 'loaded'
+      readonly modes: readonly SeparationMode[]
+    }
+  | {
+      readonly status: 'error'
+      readonly code: string
+      readonly message: string
+    }
+
+/**
+ * State of the `POST /jobs` request that starts a separation,
+ * discriminated on `status`: `idle` (nothing in flight), `creating`, or
+ * `error` (envelope code + human-readable message, retryable).
+ */
+export type JobCreateState =
+  | { readonly status: 'idle' }
+  | { readonly status: 'creating' }
+  | {
+      readonly status: 'error'
+      readonly code: string
+      readonly message: string
+    }
+
+/**
+ * The `configure` phase: which separation mode and quality tier the user
+ * picked, plus the catalog fetch and job-creation request states.
+ *
+ * `modeId`/`qualityId` are IDs served by the backend - they are never
+ * compared against, or defaulted to, any literal in client code. They are
+ * `null` until the catalog loads (and again after `upload/reset`).
+ */
+export interface ConfigureState {
+  /** The loaded separation-mode catalog. */
+  readonly modes: ModesState
+  /** ID of the selected separation mode, or `null` when none is selected. */
+  readonly modeId: string | null
+  /** ID of the selected quality tier within the selected mode. */
+  readonly qualityId: string | null
+  /** State of the create-job request. */
+  readonly create: JobCreateState
+}
+
 /** Shape of the global application state. */
 export interface AppState {
   /** The workflow phase currently shown in the workspace. */
   readonly phase: WorkflowPhase
   /** State of the audio upload step. */
   readonly upload: UploadState
+  /** State of the separation mode + quality selection step. */
+  readonly configure: ConfigureState
 }
 
 /** Actions accepted by {@link appReducer}. */
@@ -86,11 +139,90 @@ export type AppAction =
        */
       readonly type: 'upload/reset'
     }
+  | {
+      /** The separation-mode catalog fetch has started. */
+      readonly type: 'configure/modesRequested'
+    }
+  | {
+      /**
+       * The catalog loaded. Preselects the first mode and, within it, its
+       * first quality option (the backend orders them
+       * `fast` then `balanced` then `high_quality`).
+       */
+      readonly type: 'configure/modesLoaded'
+      readonly modes: readonly SeparationMode[]
+    }
+  | {
+      /** The catalog fetch failed with a backend envelope code and message. */
+      readonly type: 'configure/modesFailed'
+      readonly code: string
+      readonly message: string
+    }
+  | {
+      /**
+       * The user picked a separation mode. Resets the quality selection to
+       * that mode's first option, so a `quality_id` from another mode can
+       * never survive. Unknown mode IDs are ignored.
+       */
+      readonly type: 'configure/modeSelected'
+      readonly modeId: string
+    }
+  | {
+      /**
+       * The user picked a quality tier. Ignored unless the tier is an
+       * option of the currently selected mode.
+       */
+      readonly type: 'configure/qualitySelected'
+      readonly qualityId: string
+    }
+  | {
+      /** A create-job request is in flight (blocks a second submission). */
+      readonly type: 'configure/createStarted'
+    }
+  | {
+      /**
+       * The backend queued the job. Clears the request state and advances
+       * the workflow from `configure` to `separate`.
+       */
+      readonly type: 'configure/createSucceeded'
+    }
+  | {
+      /** Creating the job failed; the user may retry without changing anything. */
+      readonly type: 'configure/createFailed'
+      readonly code: string
+      readonly message: string
+    }
+
+/** Initial state of the configure slice: nothing loaded, nothing selected. */
+export const initialConfigureState: ConfigureState = {
+  modes: { status: 'idle' },
+  modeId: null,
+  qualityId: null,
+  create: { status: 'idle' },
+}
 
 /** Initial application state: the workflow starts at file selection. */
 export const initialAppState: AppState = {
   phase: 'select',
   upload: { status: 'idle' },
+  configure: initialConfigureState,
+}
+
+/** The mode with `modeId` in a loaded catalog, or `undefined`. */
+function findMode(
+  modes: readonly SeparationMode[],
+  modeId: string | null,
+): SeparationMode | undefined {
+  return modes.find((mode) => mode.id === modeId)
+}
+
+/**
+ * The ID of a mode's first quality option - the backend already orders them
+ * `fast`, `balanced`, `high_quality`, so "first" is that mode's default
+ * tier. `null` for a mode with no options (which the backend never serves).
+ */
+function firstQualityId(mode: SeparationMode | undefined): string | null {
+  return mode?.quality_options[0]?.id ?? null
 }
 
 /** Pure reducer over {@link AppState}; exported for direct unit testing. */
@@ -120,7 +252,98 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         upload: { status: 'error', code: action.code, message: action.message },
       }
     case 'upload/reset':
-      return { ...state, upload: { status: 'idle' }, phase: 'select' }
+      return {
+        ...state,
+        upload: { status: 'idle' },
+        phase: 'select',
+        configure: initialConfigureState,
+      }
+    case 'configure/modesRequested':
+      return {
+        ...state,
+        configure: { ...state.configure, modes: { status: 'loading' } },
+      }
+    case 'configure/modesLoaded': {
+      const mode = action.modes[0]
+      return {
+        ...state,
+        configure: {
+          modes: { status: 'loaded', modes: action.modes },
+          modeId: mode?.id ?? null,
+          qualityId: firstQualityId(mode),
+          create: { status: 'idle' },
+        },
+      }
+    }
+    case 'configure/modesFailed':
+      return {
+        ...state,
+        configure: {
+          ...initialConfigureState,
+          modes: {
+            status: 'error',
+            code: action.code,
+            message: action.message,
+          },
+        },
+      }
+    case 'configure/modeSelected': {
+      const { modes } = state.configure
+      if (modes.status !== 'loaded') {
+        return state
+      }
+      const mode = findMode(modes.modes, action.modeId)
+      if (mode === undefined) {
+        return state
+      }
+      return {
+        ...state,
+        configure: {
+          ...state.configure,
+          modeId: mode.id,
+          qualityId: firstQualityId(mode),
+        },
+      }
+    }
+    case 'configure/qualitySelected': {
+      const { modes, modeId } = state.configure
+      if (modes.status !== 'loaded') {
+        return state
+      }
+      const option = findMode(modes.modes, modeId)?.quality_options.find(
+        (candidate) => candidate.id === action.qualityId,
+      )
+      if (option === undefined) {
+        return state
+      }
+      return {
+        ...state,
+        configure: { ...state.configure, qualityId: option.id },
+      }
+    }
+    case 'configure/createStarted':
+      return {
+        ...state,
+        configure: { ...state.configure, create: { status: 'creating' } },
+      }
+    case 'configure/createSucceeded':
+      return {
+        ...state,
+        phase: 'separate',
+        configure: { ...state.configure, create: { status: 'idle' } },
+      }
+    case 'configure/createFailed':
+      return {
+        ...state,
+        configure: {
+          ...state.configure,
+          create: {
+            status: 'error',
+            code: action.code,
+            message: action.message,
+          },
+        },
+      }
   }
 }
 

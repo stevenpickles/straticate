@@ -1,0 +1,7 @@
+/* Styles for TelemetryPanel.tsx, imported by that module (feature 020). */
+
+.telemetry-panel {
+  width: min(28rem, 100%);
+  margin-top: 1rem;
+  text-align: left;
+}
