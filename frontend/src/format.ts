@@ -1,6 +1,7 @@
 /**
  * Presentation helpers that turn contract values (seconds, hertz, bytes,
- * ffprobe format names) into the short human-readable strings the UI shows.
+ * ffprobe format names, telemetry fractions) into the short human-readable
+ * strings the UI shows.
  *
  * These are pure functions with no React or DOM dependency so they can be
  * reused by any component and unit-tested directly.
@@ -142,4 +143,55 @@ export function formatFileSize(bytes: number): string {
     rendered = trimTrailingZero((value / BYTES_PER_UNIT).toFixed(1))
   }
   return `${rendered} ${SIZE_UNITS[unitIndex] ?? 'B'}`
+}
+
+/**
+ * Format a `0..1` fraction as a whole-number percentage (`0.91` → `91%`),
+ * used for GPU utilization. The contract documents the range, so values
+ * above `1` are clamped to `100%` rather than rendered as `140%`; negative
+ * and non-finite inputs render as `0%`.
+ *
+ * @example formatPercentage(0.91) // "91%"
+ * @example formatPercentage(0.004) // "0%"
+ * @example formatPercentage(1) // "100%"
+ */
+export function formatPercentage(fraction: number): string {
+  if (!Number.isFinite(fraction) || fraction <= 0) {
+    return '0%'
+  }
+  return `${String(Math.round(Math.min(fraction, 1) * 100))}%`
+}
+
+/**
+ * Format a temperature in degrees Celsius, rounded to the nearest degree
+ * (`71.4` → `71 °C`). Sub-zero readings are kept — a device colder than
+ * freezing is unusual, not impossible — but non-finite input renders as
+ * `0 °C`.
+ *
+ * @example formatTemperature(63) // "63 °C"
+ * @example formatTemperature(71.4) // "71 °C"
+ */
+export function formatTemperature(celsius: number): string {
+  const value = Number.isFinite(celsius) ? Math.round(celsius) : 0
+  // `Math.round(-0.2)` is `-0`; adding zero normalises it so it reads "0 °C".
+  return `${String(value + 0)} °C`
+}
+
+/**
+ * Format a real-time factor — this project's standard performance metric,
+ * `audio duration / processing duration` (ARCHITECTURE.md §12) — as a
+ * multiplier. One decimal place from `1×` upwards, two below it so a run
+ * slower than real time does not collapse to `0×`; trailing zeros are
+ * dropped. Non-positive, non-finite, and vanishingly small values render as
+ * `0×`.
+ *
+ * @example formatRealtimeFactor(7.9) // "7.9×"
+ * @example formatRealtimeFactor(12) // "12×"
+ * @example formatRealtimeFactor(0.42) // "0.42×"
+ */
+export function formatRealtimeFactor(factor: number): string {
+  if (!Number.isFinite(factor) || factor <= 0) {
+    return '0×'
+  }
+  return `${String(Number(factor.toFixed(factor < 1 ? 2 : 1)))}×`
 }
