@@ -115,7 +115,7 @@ is a new test tier rather than a deferred fix.
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
 | 029 | Skeleton hardening (deferred review finds)  | MERGED  | 004, 005   | `029-skeleton-hardening` | #29 |
 | 030 | Playwright E2E tier (fake separator)         | PLANNED | 024        | | |
-| 031 | Post-029 review findings (stem Range, logging, test integrity) | PLANNED | 029 | | |
+| 031 | Post-029 review findings (stem Range, logging, test integrity) | PR OPEN | 029 | `031-post-029-findings` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
