@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from collections import deque
 from typing import cast
 
 from fastapi import Request
@@ -62,6 +63,25 @@ rate, and every sample is a frame a slow client may have to shed
 
 TERMINAL_EVENT_TYPES = frozenset({"job_completed", "job_cancelled", "job_failed"})
 """Event types after which a job is over and sampling must stop."""
+
+FINISHED_JOB_MEMORY = 64
+"""How many recently finished job IDs are remembered, to refuse late registrations.
+
+A registration that arrives *after* its job's terminal event has nothing left
+to sample, so storing it would pin the separator forever. The record of
+finished jobs that makes such a registration a no-op must not become the leak
+it prevents, so it is a :class:`collections.deque` with ``maxlen``: it evicts
+its oldest entry instead of growing, and therefore costs ``O(FINISHED_JOB_MEMORY)``
+however many jobs a long-running server processes.
+
+Sixty-four is generous by orders of magnitude for what it has to cover. Only
+one job runs at a time (ARCHITECTURE.md §6), and a late registration is one
+handler call wide — a producer that submits a job and registers its separator
+behind an ``await``, so the terminal event beats it by microseconds. A
+registration arriving more than sixty-four *completed jobs* after its own job
+finished is not a race but a caller bug; it would be stored, and dropped at
+:meth:`TelemetrySampler.aclose`, exactly as before this record existed.
+"""
 
 
 class TelemetrySampler:
@@ -89,6 +109,7 @@ class TelemetrySampler:
         "_active_job_id",
         "_awaiting_registration",
         "_closed",
+        "_finished",
         "_hub",
         "_interval_seconds",
         "_separators",
@@ -106,6 +127,7 @@ class TelemetrySampler:
         self._hub = hub
         self._interval_seconds = interval_seconds
         self._separators: dict[str, Separator] = {}
+        self._finished: deque[str] = deque(maxlen=FINISHED_JOB_MEMORY)
         self._task: asyncio.Task[None] | None = None
         self._active_job_id: str | None = None
         self._awaiting_registration: str | None = None
@@ -123,9 +145,19 @@ class TelemetrySampler:
         """Jobs whose separator is currently registered.
 
         Entries are dropped on a job's terminal event and by :meth:`aclose`,
-        so this never grows without bound on a long-running server.
+        and a registration for a job that has already finished is refused
+        outright, so this never grows without bound on a long-running server.
         """
         return frozenset(self._separators)
+
+    @property
+    def finished_job_ids(self) -> tuple[str, ...]:
+        """Recently finished jobs, oldest first — the record :meth:`register` checks.
+
+        Bounded to :data:`FINISHED_JOB_MEMORY` entries by construction (see
+        that constant for why that is enough).
+        """
+        return tuple(self._finished)
 
     @property
     def active_job_id(self) -> str | None:
@@ -150,10 +182,13 @@ class TelemetrySampler:
         already started begins sampling right away instead of losing the job's
         telemetry entirely.
 
-        Registering on a closed sampler is a no-op: nothing will ever sample
-        it, and keeping the entry would leak.
+        Registering on a closed sampler is a no-op, and so is registering a
+        job that has already reached a terminal state: in both cases nothing
+        will ever sample the separator, so storing it would only pin it in
+        memory for the life of the process.
         """
-        if self._closed:
+        if self._closed or job_id in self._finished:
+            logger.debug("Ignoring a telemetry registration for inactive job %s", job_id)
             return
         self._separators[job_id] = separator
         if self._awaiting_registration == job_id:
@@ -221,6 +256,7 @@ class TelemetrySampler:
         """
         self._closed = True
         self._separators.clear()
+        self._finished.clear()
         self._awaiting_registration = None
         self._active_job_id = None
         task = self._task
@@ -248,8 +284,10 @@ class TelemetrySampler:
         )
 
     def _stop(self, job_id: str) -> None:
-        """Stop sampling ``job_id`` and forget its separator."""
+        """Stop sampling ``job_id``, forget its separator, and record it as finished."""
         self._separators.pop(job_id, None)
+        if job_id not in self._finished:
+            self._finished.append(job_id)
         if self._awaiting_registration == job_id:
             self._awaiting_registration = None
         if self._active_job_id != job_id:
@@ -315,6 +353,7 @@ def get_telemetry_sampler(request: Request) -> TelemetrySampler:
 
 __all__ = [
     "DEFAULT_SAMPLE_INTERVAL_SECONDS",
+    "FINISHED_JOB_MEMORY",
     "TERMINAL_EVENT_TYPES",
     "TelemetrySampler",
     "get_telemetry_sampler",

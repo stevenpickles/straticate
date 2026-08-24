@@ -82,8 +82,9 @@ connects them.
       not even read the separator's snapshot.
 - [x] A raising sample tick is logged and neither kills the sampler nor
       affects the job; the listener itself never raises.
-- [x] Registrations are dropped on terminal events and by `aclose()` — no
-      leak, including for a job cancelled while still queued.
+- [x] Registrations are dropped on terminal events and by `aclose()`, and a
+      registration for an already-finished job is refused rather than stored —
+      no leak, including for a job cancelled while still queued.
 - [x] The sampler is created, wired and closed by the lifespan, with a fresh
       instance per cycle; shutdown order is sampler → manager → hub.
 - [x] `uv run ruff format --check .` · `ruff check .` · `pyright` (strict) ·
@@ -105,9 +106,11 @@ drop-the-registration on each of `job_completed` / `job_cancelled` /
 *different* job leaving sampling alone; the zero-connections skip (asserting
 the separator was never even polled); a raising tick swallowed with sampling
 continuing; the listener swallowing an internal failure; the late-registration
-fallback (and that it does not start for an already-finished job); `aclose()`
-cancelling sampling and dropping registrations, being safe twice, and leaving a
-sampler that starts nothing.
+fallback, and its refusal for an already-finished job (asserting it stores
+nothing as well as starting nothing); the finished-job record staying bounded
+and not being consumed by a repeated terminal event; `aclose()` cancelling
+sampling, dropping registrations and clearing the finished-job record, being
+safe twice, and leaving a sampler that starts nothing.
 
 Wiring (`straticate.main.lifespan`): a fresh sampler per cycle, closed on exit;
 the listener actually registered (a job started through the real manager is
@@ -181,7 +184,10 @@ Solved on both sides:
    (`_awaiting_registration`); if the registration arrives afterwards, sampling
    begins at once instead of the job losing its telemetry entirely. The memo is
    cleared by the job's terminal event, so a job that was never registered
-   leaves nothing behind.
+   leaves nothing behind — and a registration arriving *after* that terminal
+   event is refused outright (see "Only one job at a time, but several
+   registrations" below), because it has nothing left to sample and nothing
+   would ever drop it.
 
 A test drives the real endpoint with a separator that has publishable
 statistics from the instant its first stage begins and does not finish until
@@ -230,6 +236,24 @@ therefore a dict keyed by job ID, and every terminal event — including the
 immediate cancellation of a job that never left the queue — drops its entry, as
 does `aclose()`. `TelemetrySampler.registered_job_ids` exposes the set so a test
 can assert the absence of a leak directly.
+
+One entry could still escape that cleanup: a registration arriving *after* its
+job's terminal event, which is precisely what the late-registration fallback
+above allows. It has nothing left to sample, and nothing would ever drop it, so
+it would pin the separator for the life of the process. `register` therefore
+refuses a job it has already seen finish.
+
+The record of finished jobs that makes this possible must not become the leak
+it prevents, so it is a `deque` with `maxlen=FINISHED_JOB_MEMORY` (64): it
+evicts its oldest entry rather than growing, costing `O(64)` however many jobs
+the server runs. Sixty-four is generous by orders of magnitude for what it must
+cover — one job runs at a time, and the window is a single handler call wide (a
+producer that registers behind an `await`, losing to the terminal event by
+microseconds). A registration arriving more than sixty-four *completed jobs*
+after its own job finished is a caller bug rather than a race; it is stored and
+dropped at `aclose()`, exactly as it would have been before the record existed.
+`TelemetrySampler.finished_job_ids` exposes the record so a test can assert its
+bound directly.
 
 ### Nobody listening → no work at all
 

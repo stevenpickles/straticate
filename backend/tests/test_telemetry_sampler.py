@@ -59,7 +59,11 @@ from straticate.schemas.jobs import (
     SeparationResultMetrics,
     Stem,
 )
-from straticate.telemetry import DEFAULT_SAMPLE_INTERVAL_SECONDS, TelemetrySampler
+from straticate.telemetry import (
+    DEFAULT_SAMPLE_INTERVAL_SECONDS,
+    FINISHED_JOB_MEMORY,
+    TelemetrySampler,
+)
 from tests.audio_fixtures import write_tone_wav
 
 WAIT_TIMEOUT = 30.0
@@ -601,9 +605,15 @@ async def test_registering_after_the_job_started_still_samples(
     assert sampler.active_job_id == JOB_ID
 
 
-async def test_a_late_registration_for_a_finished_job_does_not_start_sampling(
+async def test_a_late_registration_for_a_finished_job_starts_nothing_and_stores_nothing(
     sampler: TelemetrySampler, hub: RecordingHub
 ) -> None:
+    """A registration that loses the race to the terminal event must not leak.
+
+    There is nothing left to sample, so keeping the entry would pin the
+    separator in memory for the life of the process — the very leak the
+    terminal-event cleanup exists to prevent.
+    """
     sampler.on_job_event(started())
     sampler.on_job_event(completed())
 
@@ -612,6 +622,40 @@ async def test_a_late_registration_for_a_finished_job_does_not_start_sampling(
 
     assert hub.published == []
     assert sampler.active_job_id is None
+    assert sampler.registered_job_ids == frozenset()
+    assert sampler.sample_once(JOB_ID) is None
+
+
+async def test_the_finished_job_record_stays_bounded(sampler: TelemetrySampler) -> None:
+    """The record that refuses late registrations must not become a leak itself."""
+    job_ids = [f"01JOB{index:021d}" for index in range(FINISHED_JOB_MEMORY * 3)]
+    for job_id in job_ids:
+        sampler.on_job_event(completed(job_id))
+
+    remembered = sampler.finished_job_ids
+    assert len(remembered) == FINISHED_JOB_MEMORY
+    assert list(remembered) == job_ids[-FINISHED_JOB_MEMORY:]  # oldest evicted, newest kept
+    assert sampler.registered_job_ids == frozenset()
+
+
+async def test_a_repeated_terminal_event_does_not_consume_the_finished_record(
+    sampler: TelemetrySampler,
+) -> None:
+    """One job may not push others out of the record by being reported twice."""
+    for _ in range(FINISHED_JOB_MEMORY * 2):
+        sampler.on_job_event(completed())
+
+    assert sampler.finished_job_ids == (JOB_ID,)
+
+
+async def test_aclose_clears_the_finished_job_record(hub: RecordingHub) -> None:
+    instance = TelemetrySampler(hub, interval_seconds=IDLE_INTERVAL)
+    instance.on_job_event(completed())
+    assert instance.finished_job_ids == (JOB_ID,)
+
+    await instance.aclose()
+
+    assert instance.finished_job_ids == ()
 
 
 # -- shutdown ---------------------------------------------------------------
