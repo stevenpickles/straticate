@@ -3,7 +3,11 @@ import { act, renderHook } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { JobEventClient } from './client'
 import { useJobEvents } from './useJobEvents'
-import { JobStateProvider, useJobState } from '../state/jobState'
+import {
+  JobStateProvider,
+  useJobDispatch,
+  useJobState,
+} from '../state/jobState'
 import { FakeScheduler, FakeWebSocketFactory } from '../test/mockWebSocket'
 import { sampleJob, sampleJobId } from '../test/fixtures'
 
@@ -43,23 +47,23 @@ describe('useJobEvents', () => {
 
   it('feeds decoded events into the job store', () => {
     const { result } = renderHook(
-      () => ({ client: useJobEvents({ client }), state: useJobState() }),
+      () => ({
+        client: useJobEvents({ client }),
+        state: useJobState(),
+        dispatch: useJobDispatch(),
+      }),
       { wrapper },
     )
 
+    // The store only follows a job the client itself tracked: a broadcast
+    // `job_created` is never adopted (see `state/jobState.tsx`).
     act(() => {
-      sockets.last.emitOpen()
-      sockets.last.emitMessage(
-        JSON.stringify({
-          type: 'job_created',
-          job_id: sampleJobId,
-          job: sampleJob,
-        }),
-      )
+      result.current.dispatch({ type: 'job/track', job: sampleJob })
     })
     expect(result.current.state.job).toEqual(sampleJob)
 
     act(() => {
+      sockets.last.emitOpen()
       sockets.last.emitMessage(
         JSON.stringify({
           type: 'job_stage_changed',
@@ -93,23 +97,33 @@ describe('useJobEvents', () => {
 
   it('stops feeding the store after unmount', () => {
     const { result, unmount } = renderHook(
-      () => ({ client: useJobEvents({ client }), state: useJobState() }),
+      () => ({
+        client: useJobEvents({ client }),
+        state: useJobState(),
+        dispatch: useJobDispatch(),
+      }),
       { wrapper },
     )
     const socket = sockets.last
+
+    act(() => {
+      result.current.dispatch({ type: 'job/track', job: sampleJob })
+    })
+    expect(result.current.state.job?.state).toBe('queued')
 
     unmount()
     // The client detaches its handlers on close, so nothing is delivered.
     act(() => {
       socket.emitMessage(
         JSON.stringify({
-          type: 'job_created',
+          type: 'job_stage_changed',
           job_id: sampleJobId,
-          job: sampleJob,
+          stage: 'separating',
+          previous_stage: 'loading_model',
         }),
       )
     })
-    expect(result.current.state.job).toBeNull()
+    expect(result.current.state.job?.state).toBe('queued')
   })
 
   it('calls onOpen on connect and after every reconnect', () => {
