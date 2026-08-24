@@ -28,7 +28,10 @@ WebSocket path visible to a human.
   it is not `open`.
 - `frontend/src/state/jobState.tsx` — a cancel-request slice
   (`idle` / `requesting` / `error` with the envelope `code` + `message`), reset
-  when a different job is tracked and cleared on the terminal transition.
+  when a different job is tracked and cleared on the terminal transition; a
+  demotion guard in `trackJob` so a stale REST snapshot cannot walk a job back
+  out of a terminal state; and no more `job_created` adoption, now that this
+  feature keeps the (broadcast) socket open from app start.
 
 ## Out of scope
 
@@ -98,6 +101,24 @@ WebSocket path visible to a human.
 - `App.test.tsx` — the session opens exactly one job event socket at
   `/api/v1/ws` and closes it on unmount.
 
+Regression tests for the three defects PR review found (each fails against the
+code as first written):
+
+- `jobState.test.tsx` — a `job/track` carrying a non-terminal record cannot
+  replace a `completed` or `cancelled` job of the same id; a snapshot that
+  carries the job *forward* is still accepted; the guard is per job id, not
+  global; a `job_created` broadcast is never adopted while nothing is tracked,
+  but still refreshes the record of the job this client does track.
+- `JobEventBridge.test.tsx` — a `getJob` response that predates a
+  `job_completed` event does not revert the store (the completion and its
+  result survive); a `job_created` broadcast is neither adopted nor refetched
+  on the next reconnect; a job tracked *after* the socket opened is resynced on
+  the next reconnect; only one socket is opened as the tracked job changes.
+- `SeparationProgress.test.tsx` — a `cancelJob` response that predates a
+  `job_cancelled` event does not revert the store (no Cancel button reappears
+  for a dead job); a cancel response, and a cancel failure, that resolve after
+  a different job was tracked are both ignored.
+
 ## Notes / decisions
 
 ### The socket is a session resource, not a phase resource
@@ -138,6 +159,56 @@ with a ref that flips synchronously, the same pattern feature 011 used for
 There is deliberately **no** 409 / "not cancellable" path: cancelling a
 terminal job is a `200` no-op (`docs/contracts/rest-api.md`), and the cancel
 button is not rendered at all once the job is terminal.
+
+### REST snapshots must never demote a job (PR review, defects 1 & 2)
+
+`getJob` and `cancelJob` both answer with the job **as it was when the handler
+ran**, and both race the event stream:
+
+- `JobEventBridge.resync` runs *after* the socket is open, so events stream in
+  during the fetch. Reconnect while `separating`, apply `job_completed` at
+  t+5 ms, and a snapshot taken pre-completion resolving at t+30 ms would
+  overwrite it — reverting the store to `separating` with `result: null`.
+- The cancel handler is the same shape: a worker that reaches its cooperative
+  checkpoint quickly emits `job_cancelled` before the HTTP reply lands, and the
+  pre-cancel snapshot would be written back over it.
+
+Both are **permanent**: the job has genuinely stopped, so no further event will
+ever arrive to correct the mistake, and the panel is stranded mid-run with a
+live Cancel button.
+
+The fix is a single rule in `trackJob`: when the incoming record has the same
+id as the tracked one, a **non-terminal** record may not replace a **terminal**
+one. It lives in the reducer rather than in each caller so every present and
+future `job/track` producer inherits it. Events are authoritative for forward
+progress; REST is authoritative only for resyncing a job the events have not
+already carried further. A snapshot that moves the job *forward* (including
+terminal-to-terminal) is still accepted, and the guard is scoped to a matching
+id, so tracking a genuinely different job is unaffected.
+
+`SeparationProgress`'s cancel handler additionally got the "a different job may
+have been started while the request was in flight" guard that `JobEventBridge`
+already had, on both the success and the failure path — otherwise a late reply
+re-tracks the old job, or reports the old job's failure against the new one.
+
+### No `job_created` adoption (PR review, defect 3)
+
+The store used to adopt a `job_created` event when nothing was tracked. The hub
+broadcasts every event to **every** connected client, and until this feature
+nothing opened the socket, so the branch never fired in practice. This feature
+holds the socket open from app start through the whole `select`/`configure`
+phase, which would let a second tab — or another machine against the same
+backend — silently adopt the first one's job, and `JobEventBridge` would then
+refetch that foreign job on every reconnect.
+
+The branch is therefore **removed** rather than restricted: a job this client
+starts is already tracked from the `POST /jobs` response (feature 011), which
+is authoritative about ownership, so adoption bought nothing that a
+`job/track` did not already provide. `job_created` for the job that *is*
+tracked still refreshes the record. This supersedes the "the only exception: a
+`job_created` event is adopted when nothing is tracked yet" note in
+`docs/features/016-job-ws-clients.md`; 016's doc was left as the record of what
+016 shipped.
 
 ### Progress fraction and its fallback
 

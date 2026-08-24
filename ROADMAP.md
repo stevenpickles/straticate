@@ -95,7 +95,7 @@ features can hold disjoint file ownership rather than by feature number:
 | 014 | Separator interface + FakeSeparator          | MERGED  | 012        | `014-fake-separator` | #15 |
 | 015 | Job REST endpoints (create/get/cancel/list)  | MERGED  | 012, 014   | `015-job-endpoints` | #17 |
 | 016 | Frontend job + WebSocket clients             | MERGED  | 003, 005*  | `016-job-ws-clients` | #14 |
-| 017 | Progress UI + cancel + error handling        | PR OPEN | 011, 016   | `017-progress-cancel-ui` | #23 |
+| 017 | Progress UI + cancel + error handling        | PR OPEN | 011, 015, 016 | `017-progress-cancel-ui` | #23 |
 | 018 | Compute device detection + devices API       | MERGED  | 005        | `018-device-detection` | #12 |
 | 019 | Runtime telemetry sampler + metrics events   | PLANNED | 013, 018   | | |
 | 020 | Telemetry panel UI (model/GPU/processing)    | PR OPEN | 011, 016, 019* | `020-telemetry-panel` | #22 |

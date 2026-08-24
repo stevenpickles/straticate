@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { ApiError } from '../api/client'
 import { cancelJob } from '../api/jobs'
 import type { JobState } from '../api/types'
@@ -91,6 +91,13 @@ export function SeparationProgress() {
   const dispatch = useJobDispatch()
   const cancellingRef = useRef(false)
 
+  // Read at settlement time, not from the closure: the user may have started
+  // a different separation while the cancel was in flight.
+  const trackedJobIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    trackedJobIdRef.current = job?.id ?? null
+  }, [job])
+
   const requestCancel = () => {
     // The ref, not `cancel.status`, is what makes a double click a single
     // POST: it flips synchronously, before React has re-rendered.
@@ -103,11 +110,19 @@ export function SeparationProgress() {
     cancelJob(jobId)
       .then((updated) => {
         // May still be a processing state; the job_cancelled event is what
-        // actually settles the request.
-        dispatch({ type: 'job/track', job: updated })
+        // actually settles the request. The reducer refuses to let this
+        // snapshot demote a job the events already carried to a terminal
+        // state, so a fast worker cannot be un-cancelled by its own reply.
+        if (trackedJobIdRef.current === jobId) {
+          dispatch({ type: 'job/track', job: updated })
+        }
       })
       .catch((reason: unknown) => {
-        dispatch({ type: 'cancel/failed', ...errorInfo(reason) })
+        // A failure belongs to the job the user asked to cancel; if that is
+        // no longer the tracked one, it is not this panel's news to report.
+        if (trackedJobIdRef.current === jobId) {
+          dispatch({ type: 'cancel/failed', ...errorInfo(reason) })
+        }
       })
       .finally(() => {
         cancellingRef.current = false

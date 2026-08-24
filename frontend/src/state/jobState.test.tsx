@@ -97,6 +97,63 @@ describe('jobReducer job/track', () => {
     expect(next.metrics).toEqual(sampleRuntimeMetrics)
   })
 
+  it('refuses to demote a terminal job with a stale REST snapshot', () => {
+    // `getJob` on reconnect and `cancelJob` both answer with the job as it
+    // was when the handler ran, which can be older than an event already
+    // applied. The job has genuinely stopped, so no further event would
+    // arrive to undo the damage.
+    const completed = apply(tracked(), {
+      type: 'job_completed',
+      job_id: sampleJobId,
+      result: sampleResult,
+    })
+
+    const stale = jobReducer(completed, {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'separating', progress: 0.65 },
+    })
+    expect(stale).toBe(completed)
+    expect(stale.job?.state).toBe('completed')
+    expect(stale.job?.result).toEqual(sampleResult)
+  })
+
+  it('refuses to demote a cancelled job with a stale cancel response', () => {
+    const cancelled = apply(tracked(), {
+      type: 'job_cancelled',
+      job_id: sampleJobId,
+      stage_at_cancellation: 'separating',
+    })
+
+    const stale = jobReducer(cancelled, {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'separating' },
+    })
+    expect(stale.job?.state).toBe('cancelled')
+    expect(stale.cancelledAtStage).toBe('separating')
+  })
+
+  it('still accepts a snapshot that carries the job forward', () => {
+    const state = jobReducer(tracked(), {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'completed', result: sampleResult },
+    })
+    expect(state.job?.state).toBe('completed')
+  })
+
+  it('the demotion guard is per job, not global', () => {
+    const completed = apply(tracked(), {
+      type: 'job_completed',
+      job_id: sampleJobId,
+      result: sampleResult,
+    })
+    const next = jobReducer(completed, {
+      type: 'job/track',
+      job: { ...sampleJob, id: otherJobId, state: 'queued' },
+    })
+    expect(next.job?.id).toBe(otherJobId)
+    expect(next.job?.state).toBe('queued')
+  })
+
   it('job/clear returns to the initial state but keeps the connection status', () => {
     const state = jobReducer(
       { ...tracked(), connection: 'open' },
@@ -108,13 +165,25 @@ describe('jobReducer job/track', () => {
 })
 
 describe('jobReducer WebSocket events', () => {
-  it('adopts a job_created event when nothing is tracked', () => {
-    const state = apply(initialJobState, {
+  it('never adopts a job_created event: the hub broadcasts to every client', () => {
+    // A second tab (or another machine against the same backend) would
+    // otherwise silently take over a job this client never started.
+    expect(
+      apply(initialJobState, {
+        type: 'job_created',
+        job_id: sampleJobId,
+        job: sampleJob,
+      }),
+    ).toBe(initialJobState)
+  })
+
+  it('refreshes the record from a job_created event for the tracked job', () => {
+    const state = apply(tracked(), {
       type: 'job_created',
       job_id: sampleJobId,
-      job: sampleJob,
+      job: { ...sampleJob, model_id: 'resolved-later' },
     })
-    expect(state.job).toEqual(sampleJob)
+    expect(state.job?.model_id).toBe('resolved-later')
   })
 
   it('records the start timestamp from job_started', () => {
@@ -281,7 +350,7 @@ describe('jobReducer WebSocket events', () => {
     expect(stale.progress).toBeNull()
   })
 
-  it('ignores non-creation events while nothing is tracked', () => {
+  it('ignores every event while nothing is tracked', () => {
     expect(
       apply(initialJobState, {
         type: 'job_started',

@@ -119,9 +119,11 @@ export interface JobStateValue {
 export type JobAction =
   | {
       /**
-       * Track a job from an authoritative REST response (create, fetch, or
-       * cancel). Tracking a different job resets progress, metrics, and
-       * cancellation stage.
+       * Track a job from a REST response (create, fetch, or cancel).
+       * Tracking a different job resets progress, metrics, cancellation
+       * stage, and the cancel request. A snapshot that is *behind* the
+       * event stream can never demote the tracked job out of a terminal
+       * state (see {@link trackJob}).
        */
       readonly type: 'job/track'
       readonly job: Job
@@ -169,6 +171,19 @@ export const initialJobState: JobStateValue = {
 
 function trackJob(state: JobStateValue, job: Job): JobStateValue {
   if (state.job !== null && state.job.id === job.id) {
+    // A REST record is a point-in-time snapshot and races the event stream:
+    // `getJob` on reconnect and `cancelJob` both return a job as it was when
+    // the handler ran, which may be older than an event already applied.
+    // Events are authoritative for forward progress; REST is authoritative
+    // only for resyncing a job the events have not already carried further.
+    // So a snapshot must never walk a job back out of a terminal state —
+    // the job has genuinely stopped, no further event will arrive to correct
+    // the mistake, and the UI would be stranded mid-run forever. The rule
+    // lives here so every present and future `job/track` producer inherits
+    // it rather than having to remember the race.
+    if (isTerminalJobState(state.job.state) && !isTerminalJobState(job.state)) {
+      return state
+    }
     return { ...state, job }
   }
   return {
@@ -199,10 +214,14 @@ function applyEvent(
   state: JobStateValue,
   event: WebSocketEvent,
 ): JobStateValue {
-  // `job_created` may adopt a job when nothing is tracked yet; every other
-  // event only applies to the job already being tracked.
+  // Every event applies only to the job already being tracked. The hub
+  // broadcasts to *every* connected client, so a `job_created` event is not
+  // evidence that this client started the job: adopting it would let a
+  // second tab (or another machine against the same backend) silently take
+  // over the first one's job. A job this client creates is tracked from the
+  // `POST /jobs` response instead, which is authoritative about ownership.
   if (state.job === null) {
-    return event.type === 'job_created' ? trackJob(state, event.job) : state
+    return state
   }
   if (event.job_id !== state.job.id) {
     return state

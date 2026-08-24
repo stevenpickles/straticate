@@ -5,6 +5,8 @@ import { SeparationProgress } from './SeparationProgress'
 import {
   JobStateProvider,
   initialJobState,
+  useJobDispatch,
+  useJobState,
   type JobStateValue,
 } from '../state/jobState'
 import { JobEventBridge } from '../ws/JobEventBridge'
@@ -55,6 +57,41 @@ function jobIn(state: JobState, overrides: Partial<Job> = {}): Job {
   return { ...sampleJob, state, ...overrides }
 }
 
+/** A second job, standing in for a separation the user starts next. */
+const otherJob: Job = {
+  ...sampleJob,
+  id: '01OTHERJOBULID000000000000',
+  state: 'queued',
+}
+
+/** A promise plus its resolver, for holding a request in flight. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => {
+    resolve = r
+  })
+  return { promise, resolve }
+}
+
+/** Surfaces the tracked job id, and tracks another job on click. */
+function TrackOther() {
+  const { job } = useJobState()
+  const dispatch = useJobDispatch()
+  return (
+    <>
+      <p data-testid="tracked-job">{job?.id ?? 'none'}</p>
+      <button
+        type="button"
+        onClick={() => {
+          dispatch({ type: 'job/track', job: otherJob })
+        }}
+      >
+        track other
+      </button>
+    </>
+  )
+}
+
 type FetchMock = ReturnType<typeof vi.fn>
 
 /**
@@ -102,6 +139,7 @@ async function renderLive(jobState: Partial<JobStateValue> = {}) {
     <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
       <JobEventBridge client={client} />
       <SeparationProgress />
+      <TrackOther />
     </JobStateProvider>,
   )
   await act(async () => {
@@ -323,7 +361,7 @@ describe('SeparationProgress cancellation', () => {
     expect(
       screen.getByText('Separation cancelled while separating.'),
     ).toBeInTheDocument()
-    expect(screen.queryByRole('button')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Cancel/ })).toBeNull()
     expect(cancelRequests(fetchMock)).toHaveLength(1)
   })
 
@@ -361,6 +399,77 @@ describe('SeparationProgress cancellation', () => {
     await waitFor(() => {
       expect(cancelRequests(fetchMock)).toHaveLength(2)
     })
+  })
+})
+
+describe('SeparationProgress cancellation races', () => {
+  it('does not let a stale cancel response revert a cancelled job', async () => {
+    // `POST /jobs/{id}/cancel` answers with the job as it was when the
+    // handler ran; a worker that hits its checkpoint quickly emits
+    // `job_cancelled` before that reply lands.
+    const pending = deferred<Response>()
+    stubFetch({ job: jobIn('separating'), cancel: pending.promise })
+    await renderLive({ job: jobIn('separating') })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Cancelling…' })
+
+    emit({
+      type: 'job_cancelled',
+      job_id: sampleJobId,
+      stage_at_cancellation: 'separating',
+    })
+    expect(
+      screen.getByText('Separation cancelled while separating.'),
+    ).toBeInTheDocument()
+
+    await act(async () => {
+      pending.resolve(jsonResponse(jobIn('separating')))
+    })
+
+    // The job is dead: an enabled Cancel button here would never go away.
+    expect(
+      screen.getByText('Separation cancelled while separating.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Cancel/ })).toBeNull()
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument()
+  })
+
+  it('ignores a cancel response once a different job is tracked', async () => {
+    const pending = deferred<Response>()
+    stubFetch({ job: jobIn('separating'), cancel: pending.promise })
+    await renderLive({ job: jobIn('separating') })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Cancelling…' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'track other' }))
+    expect(screen.getByTestId('tracked-job')).toHaveTextContent(otherJob.id)
+
+    await act(async () => {
+      pending.resolve(jsonResponse(jobIn('separating')))
+    })
+
+    expect(screen.getByTestId('tracked-job')).toHaveTextContent(otherJob.id)
+    expect(screen.getByText('Queued')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+  })
+
+  it('ignores a cancel failure once a different job is tracked', async () => {
+    const pending = deferred<Response>()
+    stubFetch({ job: jobIn('separating'), cancel: pending.promise })
+    await renderLive({ job: jobIn('separating') })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await screen.findByRole('button', { name: 'Cancelling…' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'track other' }))
+
+    await act(async () => {
+      pending.resolve(errorResponse('job_not_found', 'No such job.', 404))
+    })
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
 
