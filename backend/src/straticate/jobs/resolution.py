@@ -9,7 +9,8 @@ can be tested without an HTTP client:
 - :func:`resolve_model` — mode + quality tier → the catalog
   :class:`~straticate.schemas.Model` behind them.
 - :func:`resolve_audio` — audio ID → its record *and* its on-disk source path.
-- :func:`resolve_device` — an explicit device ID, or the detector's default.
+- :func:`resolve_device` — an explicit device ID, or the first detected device
+  the chosen model can actually run on.
 
 Every failure is an :class:`~straticate.errors.ApplicationError` with an error
 code documented in ``docs/contracts/rest-api.md``; nothing here imports FastAPI.
@@ -92,19 +93,79 @@ def resolve_audio(store: AudioStore, audio_id: str) -> tuple[AudioFile, Path]:
     return record, source
 
 
-def resolve_device(detector: DeviceDetector, device_id: str | None) -> ComputeDevice:
+def resolve_device(
+    detector: DeviceDetector, device_id: str | None, *, model: Model | None = None
+) -> ComputeDevice:
     """Resolve the compute device a job should run on.
 
-    ``None`` means "let the backend pick" (the contract's default), which is
-    the detector's preferred device — the first CUDA device if any, else CPU.
+    ``None`` means "let the backend pick" (the contract's default): the
+    detector's preferred device — the first CUDA device if any, else CPU.
+
+    **``model.capabilities`` decides whether that pairing is legal.** A manifest
+    declares which compute backends its weights can run on (ARCHITECTURE.md §9),
+    and until feature 026 nothing read it: a CUDA-only model on a CPU-only host
+    was accepted with ``201`` and then died mid-job as a generic
+    ``separation_failed``, which tells a user nothing they can act on. The
+    answer is known at create time, so it is given at create time.
+
+    The two cases are treated differently on purpose:
+
+    - **The client pinned a device.** It is honoured or refused —
+      ``model_device_unsupported`` — never silently swapped for another one.
+    - **The client pinned nothing.** "Let the backend pick" is a request to
+      pick *well*, so the first detected device the model supports wins (still
+      CUDA-before-CPU, since that is the detector's order). Only when no
+      detected device can run the model at all is it an error.
+
+    Passing ``model=None`` skips the check entirely, which is what a caller
+    resolving a device for something other than a job wants.
 
     Raises:
         ApplicationError: ``device_not_found`` (404) when an explicit
-            ``device_id`` names no detected device.
+            ``device_id`` names no detected device; ``model_device_unsupported``
+            (409) when the model cannot run on the resolved device (or, with no
+            device pinned, on any detected device).
     """
-    if device_id is None:
+    if device_id is not None:
+        device = detector.get_device(device_id)
+        if model is not None and not _supports(model, device):
+            raise _device_unsupported(model, device)
+        return device
+    if model is None:
         return detector.select_default_device()
-    return detector.get_device(device_id)
+    for candidate in detector.devices():
+        if _supports(model, candidate):
+            return candidate
+    raise _device_unsupported(model, detector.select_default_device())
+
+
+def _supports(model: Model, device: ComputeDevice) -> bool:
+    """Whether ``model``'s manifest declares support for ``device``'s backend.
+
+    Absence is refusal, not permission: ``capabilities`` is an open set of
+    backend IDs, so a backend the manifest does not mention is one nobody has
+    claimed the weights work on.
+    """
+    return model.capabilities.get(device.backend, False)
+
+
+def _device_unsupported(model: Model, device: ComputeDevice) -> ApplicationError:
+    """Build the 409 for a model that cannot run on the device a job resolved."""
+    supported = sorted(backend for backend, allowed in model.capabilities.items() if allowed)
+    return ApplicationError(
+        "model_device_unsupported",
+        (
+            f"Model {model.id!r} does not support compute backend "
+            f"{device.backend!r} (device {device.id!r})."
+        ),
+        status_code=409,
+        detail={
+            "model_id": model.id,
+            "device_id": device.id,
+            "device_backend": device.backend,
+            "supported_backends": supported,
+        },
+    )
 
 
 def _audio_not_found(audio_id: str) -> ApplicationError:
