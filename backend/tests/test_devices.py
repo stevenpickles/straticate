@@ -1,13 +1,21 @@
 """Tests for compute device detection.
 
-Every test here runs on a GPU-free machine with **no PyTorch installed**: CUDA
-detection is exercised through injected fakes (a fake torch module for the real
-probe, or a fake probe for the detector).
+Every test here runs on a GPU-free machine: CUDA detection is exercised through
+injected fakes (a fake torch module for the real probe, or a fake probe for the
+detector), never against a real device.
+
+Feature 026 made ``torch`` a real dependency, so it is now *installed* — but
+:mod:`straticate.system.devices` must still never import it at module scope, or
+every process that merely wants to know what a compute device is pays seconds of
+torch import. That property is asserted in a subprocess now, because inside the
+test session another module (the RoFormer separator) has legitimately imported
+torch already.
 """
 
 import importlib
 import logging
 import platform
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -123,9 +131,26 @@ def _cuda_detector() -> DeviceDetector:
 
 
 def test_module_imports_without_torch() -> None:
-    """Importing the package must never pull in (or require) PyTorch."""
-    importlib.import_module("straticate.system.devices")
-    assert "torch" not in sys.modules
+    """Importing the module must never pull in (or require) PyTorch.
+
+    Run in a fresh interpreter: torch is a dependency of the application now
+    (feature 026), so ``sys.modules`` inside the test session says nothing about
+    what *this* module imports. A subprocess with nothing else loaded does.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import straticate.system.devices as devices; "
+            "assert devices is not None; "
+            "sys.exit(1 if 'torch' in sys.modules else 0)",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or "straticate.system.devices imported torch"
 
 
 def test_load_torch_returns_none_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:

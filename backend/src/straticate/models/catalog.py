@@ -36,9 +36,13 @@ Tier labels are humanized the same way (``high_quality`` → ``High Quality``),
 which is why no label table exists anywhere in this package.
 
 Architecture-specific manifest fields (``default_inference_parameters``) are
-absent from :class:`~straticate.schemas.Model` and are therefore dropped on
-load: they can never reach the API. Users choose modes and quality tiers, never
-inference parameters.
+absent from :class:`~straticate.schemas.Model`, so they can never reach the API:
+users choose modes and quality tiers, never inference parameters. They are not
+*discarded*, though — feature 026 needs a checkpoint's own hyperparameters to
+build a network that checkpoint will load into, and ARCHITECTURE.md §9 provides
+the field precisely so that configuration is data rather than code. They travel
+on :class:`CatalogEntry`, beside the ``artifact`` block and under the same rule:
+private to the machinery, invisible to every response.
 
 The manifest's ``artifact`` block (feature 025) is *kept*, but off the API
 surface: it holds the download URL and the pinned SHA-256, which are the model
@@ -150,6 +154,16 @@ class CatalogEntry:
     artifact: ModelArtifact | None
     """Weights to download, or ``None`` for a built-in (always-installed) model."""
 
+    default_inference_parameters: Mapping[str, Any] | None = None
+    """Architecture-specific defaults, opaque to everything but the separator.
+
+    Whatever the manifest declared, unvalidated and uninterpreted: only the
+    implementation registered for the model's ``architecture`` knows what a
+    ``stft_hop_length`` is, and this module refuses to learn (ARCHITECTURE.md
+    §1). ``None`` for a model that declares none — every fake model, and any
+    architecture whose separator needs no tuning.
+    """
+
 
 def _baseline_installation(artifact: ModelArtifact | None) -> ModelInstallation:
     """The installation state of a model nothing has yet tried to install.
@@ -182,11 +196,16 @@ def _as_entry(item: Model | CatalogEntry, source: str) -> CatalogEntry:
             so its weights could never be stored. Caught here, at load, rather
             than at the first install.
     """
+    parameters: Mapping[str, Any] | None = None
     if isinstance(item, CatalogEntry):
         model, artifact = item.model, item.artifact
+        parameters = item.default_inference_parameters
     elif isinstance(item, _ManifestEntry):
         artifact = item.artifact
-        model = Model.model_validate(item.model_dump(exclude={"artifact"}))
+        parameters = item.default_inference_parameters
+        model = Model.model_validate(
+            item.model_dump(exclude={"artifact", "default_inference_parameters"})
+        )
     else:
         model, artifact = item, None
     try:
@@ -196,6 +215,7 @@ def _as_entry(item: Model | CatalogEntry, source: str) -> CatalogEntry:
     return CatalogEntry(
         model=model.model_copy(update={"installation": _baseline_installation(artifact)}),
         artifact=artifact,
+        default_inference_parameters=parameters,
     )
 
 
@@ -208,14 +228,16 @@ class _ModeLabel(BaseModel):
 
 
 class _ManifestEntry(Model):
-    """On-disk shape of one catalog entry: :class:`Model` plus its artifact.
+    """On-disk shape of one catalog entry: :class:`Model` plus its private blocks.
 
-    Entry fields outside both (``schema_version``,
-    ``default_inference_parameters``, …) are accepted and ignored; they belong
-    to the inference package, not to the API surface.
+    Entry fields outside all of these (``schema_version``, …) are accepted and
+    ignored. ``artifact`` and ``default_inference_parameters`` are declared here
+    only so they survive onto :class:`CatalogEntry`; they are stripped before
+    the public :class:`Model` is built, so no route can return them.
     """
 
     artifact: ModelArtifact | None = None
+    default_inference_parameters: dict[str, Any] | None = None
 
 
 class _CatalogFile(BaseModel):
@@ -328,6 +350,18 @@ class ModelCatalog:
     def list_entries(self) -> list[CatalogEntry]:
         """Every entry — model plus artifact — in catalog order."""
         return list(self._entries)
+
+    def inference_parameters(self, model_id: str) -> Mapping[str, Any] | None:
+        """The ``default_inference_parameters`` of ``model_id``, if it declares any.
+
+        The lookup :func:`straticate.main.create_app` hands the separator
+        registry, so a builder can reach its model's hyperparameters without
+        this package's private types leaving it.
+
+        Raises:
+            ApplicationError: ``model_not_found`` (404) if no such model exists.
+        """
+        return self.get_entry(model_id).default_inference_parameters
 
     def get_entry(self, model_id: str) -> CatalogEntry:
         """Return the entry for ``model_id``, artifact included.

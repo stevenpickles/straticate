@@ -242,3 +242,89 @@ def test_resolve_device_rejects_an_unknown_id() -> None:
         resolve_device(DeviceDetector(probes=[]), "cuda:7")
     assert excinfo.value.code == "device_not_found"
     assert excinfo.value.status_code == 404
+
+
+# -- device resolution consults the model's capabilities --------------------
+
+
+def test_a_model_may_not_run_on_a_backend_it_does_not_declare() -> None:
+    """The 026 case: a CUDA-only model pinned to the CPU device.
+
+    Before this, ``Model.capabilities`` was read by nothing at all: the job was
+    created with ``201`` and died later as a generic ``separation_failed``,
+    which tells a user neither what went wrong nor what to do instead.
+    """
+    detector = DeviceDetector(probes=[])
+    model = make_catalog_model("cuda-only-001", capabilities={"cuda": True, "cpu": False})
+
+    with pytest.raises(ApplicationError) as excinfo:
+        resolve_device(detector, CPU_DEVICE_ID, model=model)
+
+    error = excinfo.value
+    assert error.code == "model_device_unsupported"
+    assert error.status_code == 409
+    assert error.detail == {
+        "model_id": "cuda-only-001",
+        "device_id": CPU_DEVICE_ID,
+        "device_backend": CPU_BACKEND,
+        "supported_backends": ["cuda"],
+    }
+
+
+def test_a_backend_the_manifest_never_mentions_is_refused() -> None:
+    """Absence is refusal: nobody claimed the weights work there."""
+    detector = DeviceDetector(probes=[StaticProbe()])
+    model = make_catalog_model("cpu-only-001", capabilities={"cpu": True})
+
+    with pytest.raises(ApplicationError) as excinfo:
+        resolve_device(detector, "cuda:0", model=model)
+
+    assert excinfo.value.code == "model_device_unsupported"
+
+
+def test_a_supported_pairing_resolves_normally() -> None:
+    detector = DeviceDetector(probes=[StaticProbe()])
+    model = make_catalog_model("both-001", capabilities={"cuda": True, "cpu": True})
+
+    assert resolve_device(detector, "cuda:0", model=model) == FAKE_GPU
+    assert resolve_device(detector, CPU_DEVICE_ID, model=model).backend == CPU_BACKEND
+
+
+def test_with_no_device_pinned_the_first_supported_one_wins() -> None:
+    """ "Let the backend pick" is a request to pick something that works."""
+    detector = DeviceDetector(probes=[StaticProbe()])
+
+    cuda_capable = make_catalog_model("gpu-001", capabilities={"cuda": True, "cpu": True})
+    assert resolve_device(detector, None, model=cuda_capable) == FAKE_GPU
+
+    cpu_only = make_catalog_model("cpu-001", capabilities={"cpu": True})
+    assert resolve_device(detector, None, model=cpu_only).backend == CPU_BACKEND
+
+
+def test_a_model_no_detected_device_can_run_is_refused_up_front() -> None:
+    detector = DeviceDetector(probes=[])
+    model = make_catalog_model("cuda-only-001", capabilities={"cuda": True})
+
+    with pytest.raises(ApplicationError) as excinfo:
+        resolve_device(detector, None, model=model)
+
+    error = excinfo.value
+    assert error.code == "model_device_unsupported"
+    assert error.status_code == 409
+    assert error.detail is not None
+    assert error.detail["supported_backends"] == ["cuda"]
+
+
+def test_an_unknown_device_id_still_beats_the_capability_check() -> None:
+    """A device that does not exist is a 404, not a 409 about capabilities."""
+    model = make_catalog_model("cpu-001", capabilities={"cpu": True})
+    with pytest.raises(ApplicationError) as excinfo:
+        resolve_device(DeviceDetector(probes=[]), "cuda:7", model=model)
+    assert excinfo.value.code == "device_not_found"
+
+
+def test_resolution_without_a_model_skips_the_check_entirely() -> None:
+    """Callers resolving a device for something other than a job are unaffected."""
+    detector = DeviceDetector(probes=[StaticProbe()])
+    assert resolve_device(detector, "cuda:0") == FAKE_GPU
+    assert resolve_device(detector, None) == FAKE_GPU

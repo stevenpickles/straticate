@@ -14,6 +14,23 @@ dependencies = [
     # Already the test suite's HTTP client (see DEVELOPMENT.md); promoted to a
     # runtime dependency rather than adding a second client library.
     "httpx2>=2.12",
+    # Real inference (feature 026). ``torch`` is resolved from the CPU wheel
+    # index below so a plain ``uv sync`` — and CI — never pulls the bundled
+    # multi-gigabyte CUDA runtime; DEVELOPMENT.md documents installing the CUDA
+    # build for GPU use. The remaining three are what the vendored Mel-Band
+    # RoFormer architecture imports (see
+    # ``src/straticate/inference/roformer/vendor/README.md``): all pure-Python,
+    # all tiny, none of them a model registry or a downloader.
+    "torch>=2.4",
+    # torch warns at *import* time when NumPy is absent ("Failed to initialize
+    # NumPy"), which the suite would see as a finding under ``-W error``
+    # (DEVELOPMENT.md). Declaring it is the fix rather than the filter: torch
+    # treats NumPy as present in several conversion paths, and the wheel is a
+    # few tens of megabytes next to torch's own hundreds.
+    "numpy>=1.26",
+    "einops>=0.7",
+    "rotary-embedding-torch>=0.6",
+    "beartype>=0.18",
 ]
 
 [dependency-groups]
@@ -23,6 +40,22 @@ dev = [
     "ruff>=0.6",
     "pyright>=1.1.380",
 ]
+
+# PyTorch's default PyPI wheels bundle the CUDA runtime on Linux — several
+# gigabytes per install, downloaded on every CI run, for a job that has no GPU
+# (ARCHITECTURE.md §14: normal CI never requires CUDA). So ``torch`` is pinned
+# to PyTorch's CPU wheel index, which is the right default for CI, for
+# development on a CPU-only host, and for macOS/Windows where the PyPI wheel is
+# CPU-only anyway. ``explicit = true`` keeps every *other* package resolving
+# from PyPI. Installing the CUDA build is one documented command — see
+# DEVELOPMENT.md, "PyTorch and CUDA".
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
 
 [build-system]
 requires = ["hatchling"]
@@ -35,12 +68,31 @@ packages = ["src/straticate"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
+# Vendored third-party code is pinned, not maintained: it must stay diffable
+# against the upstream commit it was copied from, so it is neither formatted nor
+# linted here. See src/straticate/inference/roformer/vendor/README.md.
+extend-exclude = ["src/straticate/inference/roformer/vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pyright]
 include = ["src", "tests"]
+# Same reason as Ruff's exclusion above: the vendored architecture is upstream's
+# code, in upstream's style, with no annotations. ``exclude`` drops it from the
+# analysed set and ``ignore`` silences the diagnostics it still produces as an
+# imported module, so strict mode keeps its teeth everywhere Straticate writes
+# code. ``mel_filters.py`` is Straticate's own and is deliberately *not*
+# excluded — it lives in that directory only because it substitutes for a
+# library the vendored file imports.
+exclude = [
+    "src/straticate/inference/roformer/vendor/attend.py",
+    "src/straticate/inference/roformer/vendor/mel_band_roformer.py",
+]
+ignore = [
+    "src/straticate/inference/roformer/vendor/attend.py",
+    "src/straticate/inference/roformer/vendor/mel_band_roformer.py",
+]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"
 venvPath = "."
@@ -50,3 +102,13 @@ venv = ".venv"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+# The real-model tier is opt-in. ARCHITECTURE.md §14 forbids normal CI from
+# needing CUDA or a model download, and DEVELOPMENT.md has always described this
+# as a "manually triggered" suite -- so a plain ``pytest`` deselects it, and
+# ``pytest -m integration`` (the command line's ``-m`` wins over this one) runs
+# it. See tests/test_roformer_integration.py.
+addopts = "-m 'not integration'"
+markers = [
+    "integration: needs installed model weights and/or real hardware; deselected by default",
+    "gpu: needs a CUDA device; skipped when none is present",
+]

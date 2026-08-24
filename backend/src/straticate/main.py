@@ -243,8 +243,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     per-run state, only the
     architecture → builder map and the separator instances it lazily creates.
     It is built **from these settings**, so ``ffmpeg_timeout_seconds`` governs
-    the separator's decode subprocesses on a per-application basis rather than
-    being re-read from the environment deep in the call stack. The model
+    the separator's decode subprocesses and ``models_dir`` decides where a real
+    backend reads its weights, on a per-application basis rather than being
+    re-read from the environment deep in the call stack. It is also given the
+    catalog's ``inference_parameters`` lookup, which is how a separator reaches
+    its model's architecture-specific defaults — data the catalog keeps off the
+    public model (ARCHITECTURE.md §9). The model
     installer is built here too, over the same catalog and ``models_dir``, and
     is closed in the lifespan so an install running at shutdown is cancelled
     rather than orphaned.
@@ -266,7 +270,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.device_detector = DeviceDetector()
 
     app.state.separator_registry = SeparatorRegistry(
-        default_separator_builders(ffmpeg_timeout_seconds=settings.ffmpeg_timeout_seconds)
+        default_separator_builders(
+            ffmpeg_timeout_seconds=settings.ffmpeg_timeout_seconds,
+            models_dir=settings.models_dir,
+            inference_parameters=catalog.inference_parameters,
+        )
     )
 
     # Middleware order matters and reads backwards: ``add_middleware``
