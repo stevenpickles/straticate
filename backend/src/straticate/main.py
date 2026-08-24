@@ -22,42 +22,64 @@ from straticate.jobs import EventHub, JobManager
 from straticate.logging import configure_logging
 from straticate.models import ModelCatalog
 from straticate.system import DeviceDetector
+from straticate.telemetry import TelemetrySampler
 
 API_PREFIX = "/api/v1"
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    """Run a job manager and a WebSocket event hub for the application's lifetime.
+    """Run the job manager, event hub and telemetry sampler for the app's lifetime.
 
-    A **fresh** :class:`JobManager` and :class:`EventHub` are created per
-    lifespan cycle (neither can be restarted once closed, and an app object may
-    go through several lifespans, e.g. under repeated ``TestClient`` usage).
-    They are stored on ``app.state.job_manager`` / ``app.state.event_hub``
-    (retrieved in endpoints via :func:`straticate.jobs.get_job_manager` and
-    :func:`straticate.jobs.get_event_hub`).
+    A **fresh** :class:`JobManager`, :class:`EventHub` and
+    :class:`TelemetrySampler` are created per lifespan cycle (none can be
+    restarted once closed, and an app object may go through several lifespans,
+    e.g. under repeated ``TestClient`` usage). They are stored on
+    ``app.state.job_manager`` / ``app.state.event_hub`` /
+    ``app.state.telemetry_sampler`` (retrieved in endpoints via
+    :func:`straticate.jobs.get_job_manager`,
+    :func:`straticate.jobs.get_event_hub` and
+    :func:`straticate.telemetry.get_telemetry_sampler`).
 
-    The hub's :meth:`~straticate.jobs.EventHub.publish` is registered as a job
-    manager listener, so every job event is broadcast to connected browsers.
-    Shutdown order matters: the manager is closed first so that it drains its
-    event queue (including the cancellation of a job that was still running)
-    into the hub — the listener therefore stays registered until that drain
-    finishes — and only then are the connections closed (after the hub has
-    flushed what it buffered). The hub is torn down even if closing the manager
-    fails, so a failure there cannot leak sender tasks or leave sockets open.
+    Two listeners are registered with the manager, in this order: the hub's
+    :meth:`~straticate.jobs.EventHub.publish`, so every job event is broadcast
+    to connected browsers, and the sampler's
+    :meth:`~straticate.telemetry.TelemetrySampler.on_job_event`, which starts
+    telemetry sampling when a job starts and stops it at its terminal event.
+    Registration order matters for the wire: a terminal event is handed to the
+    hub before the sampler is asked to stop, so nothing can be interleaved
+    between them.
+
+    Shutdown order is **sampler → manager → hub**:
+
+    - the sampler first, so no telemetry sample can be published into a hub
+      that is about to tear its connections down;
+    - the manager second, so that it drains its event queue (including the
+      cancellation of a job that was still running) into the hub — the hub's
+      listener therefore stays registered until that drain finishes;
+    - the hub last, in a ``finally``, so it is closed (and its sender tasks
+      released, its sockets shut) even if closing the sampler or the manager
+      raises.
     """
     manager = JobManager()
     hub = EventHub()
+    sampler = TelemetrySampler(hub)
     app.state.job_manager = manager
     app.state.event_hub = hub
+    app.state.telemetry_sampler = sampler
     manager.add_listener(hub.publish)
+    manager.add_listener(sampler.on_job_event)
     manager.start()
     try:
         yield
     finally:
         try:
-            await manager.aclose()
+            try:
+                await sampler.aclose()
+            finally:
+                await manager.aclose()
         finally:
+            manager.remove_listener(sampler.on_job_event)
             manager.remove_listener(hub.publish)
             await hub.aclose()
 
