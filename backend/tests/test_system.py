@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 
@@ -28,27 +28,27 @@ class _StaticProbe:
 
 
 @pytest.fixture
-async def gpu_client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+async def gpu_client(app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
     """A client whose app reports one fake CUDA device plus the CPU."""
     app.state.device_detector = DeviceDetector(probes=[_StaticProbe()])
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 
 
-async def test_health_returns_ok(client: httpx.AsyncClient) -> None:
+async def test_health_returns_ok(client: httpx2.AsyncClient) -> None:
     response = await client.get("/api/v1/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
 
 
-async def test_version_matches_package_version(client: httpx.AsyncClient) -> None:
+async def test_version_matches_package_version(client: httpx2.AsyncClient) -> None:
     response = await client.get("/api/v1/version")
     assert response.status_code == 200
     assert response.json() == {"version": straticate.__version__}
 
 
-async def test_devices_always_include_cpu(client: httpx.AsyncClient) -> None:
+async def test_devices_always_include_cpu(client: httpx2.AsyncClient) -> None:
     """The real application detector: GPU-free CI reports the CPU device."""
     response = await client.get("/api/v1/system/devices")
     assert response.status_code == 200
@@ -70,7 +70,7 @@ async def test_devices_always_include_cpu(client: httpx.AsyncClient) -> None:
     assert memory >= 0
 
 
-async def test_devices_report_cuda_before_cpu(gpu_client: httpx.AsyncClient) -> None:
+async def test_devices_report_cuda_before_cpu(gpu_client: httpx2.AsyncClient) -> None:
     response = await gpu_client.get("/api/v1/system/devices")
     assert response.status_code == 200
 

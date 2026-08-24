@@ -36,14 +36,16 @@ wants the RFC 9110 status and ``Content-Range``, not a JSON body. Every
 *application* error on these routes uses the envelope.
 """
 
+import asyncio
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
+from starlette.types import Message, Receive, Scope, Send
 
 from straticate.api.audio import SettingsDep
-from straticate.api.job_outputs import completed_job, stem_source_path
+from straticate.api.job_outputs import completed_job, stem_file_missing, stem_source
 from straticate.jobs import JobManager, get_job_manager
 from straticate.schemas import SeparationResult
 
@@ -83,6 +85,91 @@ def stem_media_type(path: Path) -> str:
     return STEM_MEDIA_TYPES.get(path.suffix.lower(), DEFAULT_STEM_MEDIA_TYPE)
 
 
+def streams_a_body(scope: Scope) -> bool:
+    """Whether serving this request will actually read the file's bytes.
+
+    Mirrors :class:`~starlette.responses.FileResponse`'s own two shortcuts: a
+    ``HEAD`` gets headers only, and a server advertising the
+    ``http.response.pathsend`` extension is handed the path instead of the
+    contents. In both cases the file is never opened, so pre-opening it would
+    be a worker-thread dispatch bought for nothing.
+
+    The ``pathsend`` arm is the one that fires in practice (uvicorn offers the
+    extension on some transports); the ``HEAD`` arm is currently unreachable
+    through the API, since FastAPI registers this route for ``GET`` only and a
+    ``HEAD`` is answered with ``405``. It is checked anyway because it is
+    ``FileResponse``'s contract, not ours, and a route gaining ``HEAD`` should
+    not quietly reintroduce the cost.
+    """
+    if scope.get("method", "GET").upper() == "HEAD":
+        return False
+    return "http.response.pathsend" not in scope.get("extensions", {})
+
+
+class StemFileResponse(FileResponse):
+    """A :class:`FileResponse` whose vanished file is the documented 404.
+
+    Two things go wrong with a plain ``FileResponse`` on this route, and both
+    are the same time-of-check/time-of-use gap: the handler proves the file
+    exists, and the response reads it some moments later. A job directory
+    "can be removed underneath a live job" (see
+    :mod:`straticate.api.job_outputs`), so those moments are not theoretical.
+
+    - Without ``stat_result``, ``FileResponse`` re-``stat``s the path itself
+      and raises ``RuntimeError`` if it is gone. The handler therefore passes
+      the ``stat_result`` it already has, which removes the second ``stat``
+      entirely.
+    - ``FileResponse`` then sends its headers **before** opening the file, so a
+      file that vanished after the handler checked it produces a
+      ``FileNotFoundError`` with the ``200`` already on the wire — nothing left
+      to convert. This class therefore opens the file *first*, while a proper
+      response can still be chosen, and only then delegates.
+
+    The pre-open is skipped when the response will not read the file anyway:
+    a ``HEAD`` (``FileResponse`` sends headers only) or a server offering the
+    ``http.response.pathsend`` extension (the file is handed to the server by
+    path). Skipping matters because the open is dispatched to a worker thread,
+    and that thread comes from the same shared default ``ThreadPoolExecutor``
+    that :mod:`straticate.audio.ffmpeg` identifies as the scarce resource —
+    the stem player issues a range request per seek, so this is a hot path.
+    Nothing is lost: a request that never opens the file cannot fail to open
+    it, and the handler's ``stat`` already answered "does this stem exist".
+
+    That leaves one irreducible window — between this open and Starlette's own,
+    microseconds later — and one irrecoverable case: a file lost part-way
+    through streaming, when the status line is long gone. Both are re-raised
+    honestly rather than papered over.
+
+    Raising an :class:`~straticate.errors.ApplicationError` from here works
+    because a response is sent *inside* the route's exception-handling wrapper:
+    the registered handler turns it into the standard envelope.
+    """
+
+    def __init__(self, path: Path, *, job_id: str, stem_name: str, **kwargs: Any) -> None:
+        super().__init__(path, **kwargs)
+        self._job_id = job_id
+        self._stem_name = stem_name
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Send the file, mapping a pre-send filesystem failure onto a 404."""
+        started = False
+
+        async def watched_send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            if streams_a_body(scope):
+                (await asyncio.to_thread(open, self.path, "rb")).close()
+            await super().__call__(scope, receive, watched_send)
+        except (OSError, RuntimeError) as exc:
+            if started:
+                raise
+            raise stem_file_missing(self._job_id, self._stem_name) from exc
+
+
 @router.get("/{job_id}/result")
 async def get_job_result(job_id: str, manager: ManagerDep) -> SeparationResult:
     """Fetch the :class:`SeparationResult` of a completed job.
@@ -112,13 +199,19 @@ async def get_job_stem(
 
     Errors: ``job_not_found`` (404), ``result_not_available`` (409),
     ``stem_not_found`` (404) when the job's result lists no such stem, and
-    ``stem_file_missing`` (404) when the listed stem's file is gone from disk.
+    ``stem_file_missing`` (404) when the listed stem's file is gone from disk —
+    including when it disappears *between* the check and the send, which is
+    what :class:`StemFileResponse` and the passed-through ``stat_result``
+    exist for.
     """
     job, result = completed_job(manager, job_id)
     available = [stem.name for stem in result.stems]
-    path = stem_source_path(settings.data_dir, job.id, stem_name, available)
-    return FileResponse(
+    path, info = stem_source(settings.data_dir, job.id, stem_name, available)
+    return StemFileResponse(
         path,
+        job_id=job.id,
+        stem_name=stem_name,
+        stat_result=info,
         media_type=stem_media_type(path),
         filename=path.name,
         content_disposition_type="inline",

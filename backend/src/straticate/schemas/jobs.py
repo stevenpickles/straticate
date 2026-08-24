@@ -11,6 +11,7 @@ from enum import StrEnum
 from pydantic import AwareDatetime, BaseModel, Field
 
 from straticate.schemas.common import ErrorInfo
+from straticate.schemas.stems import StemName
 
 
 class JobState(StrEnum):
@@ -58,9 +59,16 @@ class SeparationConfiguration(BaseModel):
 
 
 class Stem(BaseModel):
-    """One separated output stem of a completed job."""
+    """One separated output stem of a completed job.
 
-    name: str = Field(description='Stem name, e.g. "vocals", "instrumental".')
+    ``name`` is constrained to :data:`~straticate.schemas.stems.STEM_NAME_REGEX`
+    because it is not merely a label: it is the path segment
+    ``GET /jobs/{job_id}/stems/{stem_name}`` accepts and the file name on disk.
+    Unconstrained, a result could advertise a stem the stem route would then
+    refuse — a 404 whose ``detail`` listed the very name it denied.
+    """
+
+    name: StemName = Field(description='Stem name, e.g. "vocals", "instrumental".')
     duration_seconds: float = Field(ge=0, description="Stem duration in seconds.")
     sample_rate_hz: int = Field(gt=0, description="Sample rate in Hz.")
     channels: int = Field(ge=1, description="Number of audio channels.")

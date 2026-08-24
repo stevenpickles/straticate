@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-import httpx
+import httpx2
 import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient, WebSocketTestSession
@@ -196,7 +196,7 @@ def register_audio(app: FastAPI, *, seconds: float = 0.4, filename: str = "song.
     """Write a real tone WAV into the app's audio store and register it."""
     store = app.state.audio_store
     audio_id = cast(str, store.new_id())
-    path = cast(Path, store.original_path(audio_id, filename))
+    path = cast(Path, store.prepare_original_path(audio_id, filename))
     write_tone_wav(path, seconds=seconds)
     store.register(
         AudioFile(
@@ -224,11 +224,11 @@ def jobs_app(tmp_path: Path) -> FastAPI:
 
 
 @pytest.fixture
-async def jobs_client(jobs_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+async def jobs_client(jobs_app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
     """A client for a running application (lifespan started on this loop)."""
     async with jobs_app.router.lifespan_context(jobs_app):
-        transport = httpx.ASGITransport(app=jobs_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        transport = httpx2.ASGITransport(app=jobs_app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
 
 
@@ -239,7 +239,7 @@ def audio_id(jobs_app: FastAPI) -> str:
 
 @pytest.fixture
 async def recorder(
-    jobs_client: httpx.AsyncClient, jobs_app: FastAPI
+    jobs_client: httpx2.AsyncClient, jobs_app: FastAPI
 ) -> AsyncIterator[EventRecorder]:
     """A listener on the running app's job manager (needs the lifespan)."""
     listener = EventRecorder()
@@ -264,13 +264,13 @@ def configuration(audio_id: str, **overrides: Any) -> dict[str, Any]:
     return body
 
 
-async def create_job(client: httpx.AsyncClient, **body: Any) -> dict[str, Any]:
+async def create_job(client: httpx2.AsyncClient, **body: Any) -> dict[str, Any]:
     response = await client.post(JOBS_URL, json=body)
     assert response.status_code == 201, response.text
     return cast(dict[str, Any], response.json())
 
 
-def assert_envelope(response: httpx.Response, code: str, status: int) -> dict[str, Any]:
+def assert_envelope(response: httpx2.Response, code: str, status: int) -> dict[str, Any]:
     """Assert the standard error envelope and return the error object."""
     assert response.status_code == status, response.text
     body: dict[str, Any] = response.json()
@@ -286,7 +286,7 @@ def assert_envelope(response: httpx.Response, code: str, status: int) -> dict[st
 
 
 async def test_create_returns_201_queued_with_the_resolved_model_and_device(
-    jobs_client: httpx.AsyncClient, audio_id: str
+    jobs_client: httpx2.AsyncClient, audio_id: str
 ) -> None:
     job = await create_job(jobs_client, **configuration(audio_id))
 
@@ -308,14 +308,14 @@ async def test_create_returns_201_queued_with_the_resolved_model_and_device(
 
 
 async def test_create_honours_a_pinned_device(
-    jobs_client: httpx.AsyncClient, audio_id: str
+    jobs_client: httpx2.AsyncClient, audio_id: str
 ) -> None:
     job = await create_job(jobs_client, **configuration(audio_id, device_id=CPU_DEVICE_ID))
     assert job["configuration"]["device_id"] == CPU_DEVICE_ID
 
 
 async def test_create_returns_before_the_separation_runs(
-    jobs_client: httpx.AsyncClient, jobs_app: FastAPI, audio_id: str, tmp_path: Path
+    jobs_client: httpx2.AsyncClient, jobs_app: FastAPI, audio_id: str, tmp_path: Path
 ) -> None:
     """No inference happens inside the request handler (AGENTS.md principle 4).
 
@@ -343,7 +343,7 @@ async def test_create_returns_before_the_separation_runs(
 
 
 async def test_create_resolves_the_model_of_the_requested_mode(
-    jobs_client: httpx.AsyncClient, audio_id: str
+    jobs_client: httpx2.AsyncClient, audio_id: str
 ) -> None:
     job = await create_job(jobs_client, **configuration(audio_id, mode_id="standard_stems"))
     assert job["model_id"] == STANDARD_MODEL_ID
@@ -360,7 +360,7 @@ async def test_create_resolves_the_model_of_the_requested_mode(
     ],
 )
 async def test_a_created_job_runs_to_completion_with_stems_on_disk(
-    jobs_client: httpx.AsyncClient,
+    jobs_client: httpx2.AsyncClient,
     recorder: EventRecorder,
     audio_id: str,
     tmp_path: Path,
@@ -401,7 +401,7 @@ async def test_a_created_job_runs_to_completion_with_stems_on_disk(
 
 
 async def test_list_returns_jobs_in_submission_order(
-    jobs_client: httpx.AsyncClient, audio_id: str
+    jobs_client: httpx2.AsyncClient, audio_id: str
 ) -> None:
     assert (await jobs_client.get(JOBS_URL)).json() == []
 
@@ -416,7 +416,7 @@ async def test_list_returns_jobs_in_submission_order(
     assert [job["id"] for job in listed] == submitted
 
 
-async def test_get_unknown_job_returns_job_not_found(jobs_client: httpx.AsyncClient) -> None:
+async def test_get_unknown_job_returns_job_not_found(jobs_client: httpx2.AsyncClient) -> None:
     response = await jobs_client.get(f"{JOBS_URL}/01NOTAJOB")
     assert_envelope(response, "job_not_found", 404)
 
@@ -439,7 +439,7 @@ def gated_registry(
 
 
 async def test_cancelling_a_queued_job_cancels_it_immediately(
-    jobs_client: httpx.AsyncClient, jobs_app: FastAPI, recorder: EventRecorder, audio_id: str
+    jobs_client: httpx2.AsyncClient, jobs_app: FastAPI, recorder: EventRecorder, audio_id: str
 ) -> None:
     started, gate = asyncio.Event(), asyncio.Event()
     registry, _ = gated_registry(started, gate)
@@ -467,7 +467,7 @@ async def test_cancelling_a_queued_job_cancels_it_immediately(
 
 
 async def test_cancelling_a_running_job_is_a_request_the_separator_honours(
-    jobs_client: httpx.AsyncClient, jobs_app: FastAPI, recorder: EventRecorder, audio_id: str
+    jobs_client: httpx2.AsyncClient, jobs_app: FastAPI, recorder: EventRecorder, audio_id: str
 ) -> None:
     started, gate = asyncio.Event(), asyncio.Event()
     registry, _ = gated_registry(started, gate)
@@ -494,7 +494,7 @@ async def test_cancelling_a_running_job_is_a_request_the_separator_honours(
 
 
 async def test_cancelling_a_terminal_job_is_idempotent(
-    jobs_client: httpx.AsyncClient, recorder: EventRecorder, audio_id: str
+    jobs_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:
     created = await create_job(jobs_client, **configuration(audio_id))
     job_id = cast(str, created["id"])
@@ -509,7 +509,7 @@ async def test_cancelling_a_terminal_job_is_idempotent(
 
 
 async def test_cancelling_an_unknown_job_returns_job_not_found(
-    jobs_client: httpx.AsyncClient,
+    jobs_client: httpx2.AsyncClient,
 ) -> None:
     response = await jobs_client.post(f"{JOBS_URL}/01NOTAJOB/cancel")
     assert_envelope(response, "job_not_found", 404)
@@ -518,14 +518,14 @@ async def test_cancelling_an_unknown_job_returns_job_not_found(
 # -- error codes ------------------------------------------------------------
 
 
-async def test_unknown_audio_is_a_404(jobs_client: httpx.AsyncClient) -> None:
+async def test_unknown_audio_is_a_404(jobs_client: httpx2.AsyncClient) -> None:
     response = await jobs_client.post(JOBS_URL, json=configuration("01NOSUCHAUDIO"))
     error = assert_envelope(response, "audio_not_found", 404)
     assert error["detail"] == {"audio_id": "01NOSUCHAUDIO"}
 
 
 async def test_registered_audio_whose_file_vanished_is_a_404(
-    jobs_client: httpx.AsyncClient, jobs_app: FastAPI, audio_id: str
+    jobs_client: httpx2.AsyncClient, jobs_app: FastAPI, audio_id: str
 ) -> None:
     store = jobs_app.state.audio_store
     cast(Path, store.original_path(audio_id, "song.wav")).unlink()
@@ -534,21 +534,21 @@ async def test_registered_audio_whose_file_vanished_is_a_404(
     assert_envelope(response, "audio_not_found", 404)
 
 
-async def test_unknown_mode_is_a_404(jobs_client: httpx.AsyncClient, audio_id: str) -> None:
+async def test_unknown_mode_is_a_404(jobs_client: httpx2.AsyncClient, audio_id: str) -> None:
     response = await jobs_client.post(JOBS_URL, json=configuration(audio_id, mode_id="karaoke"))
     error = assert_envelope(response, "separation_mode_not_found", 404)
     assert error["detail"] == {"mode_id": "karaoke"}
 
 
 async def test_unknown_quality_option_is_a_404(
-    jobs_client: httpx.AsyncClient, audio_id: str
+    jobs_client: httpx2.AsyncClient, audio_id: str
 ) -> None:
     response = await jobs_client.post(JOBS_URL, json=configuration(audio_id, quality_id="ultra"))
     error = assert_envelope(response, "quality_option_not_found", 404)
     assert error["detail"] == {"mode_id": "vocals", "quality_id": "ultra"}
 
 
-async def test_unknown_device_is_a_404(jobs_client: httpx.AsyncClient, audio_id: str) -> None:
+async def test_unknown_device_is_a_404(jobs_client: httpx2.AsyncClient, audio_id: str) -> None:
     response = await jobs_client.post(JOBS_URL, json=configuration(audio_id, device_id="cuda:9"))
     error = assert_envelope(response, "device_not_found", 404)
     assert error["detail"] == {"device_id": "cuda:9"}
@@ -583,8 +583,8 @@ async def test_a_model_without_a_separator_is_a_501(tmp_path: Path) -> None:
     audio = register_audio(app)
 
     async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.post(JOBS_URL, json=configuration(audio))
 
     error = assert_envelope(response, "separator_unavailable", 501)
@@ -595,7 +595,7 @@ async def test_a_model_without_a_separator_is_a_501(tmp_path: Path) -> None:
 
 
 async def test_a_shutting_down_manager_is_a_503(
-    jobs_client: httpx.AsyncClient, jobs_app: FastAPI, audio_id: str
+    jobs_client: httpx2.AsyncClient, jobs_app: FastAPI, audio_id: str
 ) -> None:
     created = await create_job(jobs_client, **configuration(audio_id))
     await manager_of(jobs_app).aclose()
@@ -615,7 +615,7 @@ async def test_a_shutting_down_manager_is_a_503(
     assert (await jobs_client.get(JOBS_URL)).status_code == 200
 
 
-async def test_a_malformed_request_is_a_validation_error(jobs_client: httpx.AsyncClient) -> None:
+async def test_a_malformed_request_is_a_validation_error(jobs_client: httpx2.AsyncClient) -> None:
     response = await jobs_client.post(JOBS_URL, json={"audio_id": "01A"})
     assert_envelope(response, "validation_error", 422)
 
@@ -646,8 +646,8 @@ def create_job_over_portal(
     assert portal is not None
 
     async def post() -> dict[str, Any]:
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as http:
             response = await http.post(JOBS_URL, json=body)
         assert response.status_code == 201, response.text
         return cast(dict[str, Any], response.json())

@@ -12,6 +12,7 @@ from typing import Annotated, cast
 from fastapi import APIRouter, Depends, Request, UploadFile
 
 from straticate.audio import AudioProbeError, AudioStore, probe_audio
+from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.config import Settings
 from straticate.errors import ApplicationError
 from straticate.schemas import AudioFile
@@ -55,7 +56,7 @@ async def _save_upload(file: UploadFile, store: AudioStore, audio_id: str, limit
             exceeds ``limit``; the partial file is left for the caller's
             cleanup handler to remove.
     """
-    destination = store.original_path(audio_id, file.filename or "")
+    destination = store.prepare_original_path(audio_id, file.filename or "")
     size = 0
     with destination.open("wb") as out:
         while chunk := await file.read(_CHUNK_SIZE):
@@ -79,18 +80,35 @@ async def upload_audio(file: UploadFile, store: StoreDep, settings: SettingsDep)
     ``audio_too_large`` (413) when the body exceeds
     ``Settings.max_upload_bytes``; ``audio_not_decodable`` (422) when
     ffprobe cannot decode the bytes as audio (the extension is never
-    trusted).
+    trusted); ``audio_probe_timed_out`` (504) when ffprobe exceeds
+    ``Settings.ffmpeg_timeout_seconds``.
+
+    The last two are deliberately distinct. ``audio_not_decodable`` tells the
+    user their file is the problem and re-uploading it will not help; a probe
+    that ran out of time says nothing about the file, and retrying is exactly
+    the right response.
     """
     audio_id = store.new_id()
     try:
         size = await _save_upload(file, store, audio_id, settings.max_upload_bytes)
-        metadata = await probe_audio(store.original_path(audio_id, file.filename or ""))
+        metadata = await probe_audio(
+            store.original_path(audio_id, file.filename or ""),
+            timeout_seconds=settings.ffmpeg_timeout_seconds,
+        )
     except AudioProbeError as exc:
         store.remove_files(audio_id)
         raise ApplicationError(
             "audio_not_decodable",
             "The uploaded file could not be decoded as audio.",
             status_code=422,
+        ) from exc
+    except FFmpegTimeout as exc:
+        store.remove_files(audio_id)
+        raise ApplicationError(
+            "audio_probe_timed_out",
+            "Reading the uploaded file's metadata timed out.",
+            status_code=504,
+            detail={"timeout_seconds": exc.timeout_seconds},
         ) from exc
     except BaseException:
         store.remove_files(audio_id)

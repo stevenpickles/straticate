@@ -6,6 +6,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
+
 
 def _default_models_dir() -> Path:
     """Resolve the repository's ``models/`` directory (cwd-independent).
@@ -18,20 +20,46 @@ def _default_models_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "models"
 
 
+def _default_cors_origins() -> list[str]:
+    """Origins the Vite dev server is reachable on (see DEVELOPMENT.md)."""
+    return ["http://localhost:5173", "http://127.0.0.1:5173"]
+
+
 class Settings(BaseSettings):
     """Runtime configuration for the Straticate backend.
 
     Every field can be overridden via an environment variable with the
-    ``STRATICATE_`` prefix, e.g. ``STRATICATE_PORT=9000``.
+    ``STRATICATE_`` prefix, e.g. ``STRATICATE_PORT=9000``. List-valued fields
+    take a JSON array, e.g.
+    ``STRATICATE_CORS_ORIGINS='["https://studio.example"]'``.
+
+    Every field here is **consumed**: ``host`` and ``port`` by
+    :func:`straticate.main.serve`, ``cors_origins`` and ``log_level`` by the
+    application factory, ``data_dir`` by the audio store, the job output layout
+    and the export cache, ``models_dir`` by the model catalog,
+    ``max_upload_bytes`` by the upload route, and ``ffmpeg_timeout_seconds`` by
+    :func:`straticate.audio.ffmpeg.run_ffmpeg`. A setting nothing reads is a
+    documented promise the application does not keep, so it does not belong
+    here.
     """
 
     model_config = SettingsConfigDict(env_prefix="STRATICATE_")
 
     host: str = "127.0.0.1"
-    """Interface the server binds to."""
+    """Interface the server binds to (consumed by :func:`straticate.main.serve`)."""
 
     port: int = 8000
-    """Port the server listens on."""
+    """Port the server listens on (consumed by :func:`straticate.main.serve`)."""
+
+    cors_origins: list[str] = Field(default_factory=_default_cors_origins)
+    """Browser origins allowed to call the API cross-origin.
+
+    Defaults to the Vite dev server's two loopback spellings. The dev server
+    proxies ``/api`` to the backend, so in normal development the browser sees
+    a same-origin request and this list is never consulted; it matters when a
+    page talks to ``:8000`` directly. Override with ``STRATICATE_CORS_ORIGINS``
+    (a JSON array).
+    """
 
     data_dir: Path = Path("data")
     """Directory for application data (uploads, models, job artifacts, etc.).
@@ -51,8 +79,28 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 1024**3
     """Maximum accepted audio upload size in bytes (default 1 GiB)."""
 
+    ffmpeg_timeout_seconds: float = Field(default=DEFAULT_FFMPEG_TIMEOUT_SECONDS, gt=0)
+    """Wall-clock ceiling for a single FFmpeg or ffprobe invocation.
+
+    Every subprocess this application starts runs in a worker thread of
+    asyncio's shared default executor, so a wedged FFmpeg does not merely stall
+    one request: it holds a thread that audio probing, decoding and exporting
+    all draw from. The bound turns "hangs forever" into a documented,
+    per-surface timeout error (see :mod:`straticate.audio.ffmpeg`).
+
+    It reaches the subprocess by being **passed down** from the application
+    that was built with these settings — the upload route and the export route
+    take it from ``app.state.settings``, and the separator is constructed with
+    it — so ``create_app(Settings(ffmpeg_timeout_seconds=30))`` really governs
+    the bound, not only the environment variable.
+    """
+
     log_level: str = "INFO"
-    """Root log level name (e.g. ``DEBUG``, ``INFO``, ``WARNING``)."""
+    """Root log level name (e.g. ``DEBUG``, ``INFO``, ``WARNING``).
+
+    Applied by :func:`straticate.main.serve`, which owns process-global logging
+    configuration; importing or building the application never touches it.
+    """
 
 
 @lru_cache

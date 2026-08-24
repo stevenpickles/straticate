@@ -27,7 +27,6 @@ code.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,14 +35,14 @@ from typing import Protocol
 from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.events import GpuMetrics, ModelInfo, ProcessingMetrics
 from straticate.schemas.jobs import JobState, SeparationConfiguration, SeparationResult
+from straticate.schemas.stems import STEM_NAME_PATTERN
 
-STEM_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
-"""Stem names allowed by ``models/schemas/model-manifest.schema.json``.
-
-Stem names become file names under the job's output directory, so the pattern
-is enforced here as well: it makes path traversal through a stem name
-impossible by construction.
-"""
+# ``STEM_NAME_PATTERN`` is re-exported from here (see ``__all__`` below) because
+# :mod:`straticate.inference.layout` and the rest of the inference package have
+# always imported it from this module. Its definition now lives in
+# :mod:`straticate.schemas.stems`, next to the field constraint the API applies,
+# so the separator seam and the shared contract cannot disagree about what a
+# stem name is.
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,7 +7,9 @@ renders — derived from model capabilities, never hardcoded client-side.
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from straticate.schemas.stems import StemName
 
 
 class QualityTier(StrEnum):
@@ -41,6 +43,14 @@ class Model(BaseModel):
     ``architecture`` is an open set (e.g. ``mel_band_roformer``, ``mdx``,
     ``mdxc``, ``demucs``, ``fake``); application code never branches on it
     outside the inference package.
+
+    ``stems`` carries the constraints the separation engine has always
+    enforced: each name matches
+    :data:`~straticate.schemas.stems.STEM_NAME_REGEX`, and the list holds no
+    duplicates. They live here so a malformed catalog fails **at load time**
+    (feature 010's stated principle) instead of loading cleanly, serving
+    ``GET /models`` and ``GET /separation-modes``, and then raising an
+    unhandled ``ValueError`` on the first job created for that mode.
     """
 
     id: str = Field(description='Stable logical model ID, e.g. "vocals-hq-001".')
@@ -55,7 +65,9 @@ class Model(BaseModel):
             'null means "balanced". Unique per separation mode.'
         ),
     )
-    stems: list[str] = Field(min_length=2, description="Stem names this model produces.")
+    stems: list[StemName] = Field(
+        min_length=2, description="Stem names this model produces; unique, in output order."
+    )
     sample_rate: int = Field(ge=8000, description="Native sample rate in Hz.")
     requirements: ModelRequirements = Field(
         default_factory=ModelRequirements, description="Resource requirements."
@@ -63,6 +75,20 @@ class Model(BaseModel):
     capabilities: dict[str, bool] = Field(
         description="Compute backends this model supports (open set of backend IDs)."
     )
+
+    @field_validator("stems")
+    @classmethod
+    def _stems_are_unique(cls, stems: list[str]) -> list[str]:
+        """Reject a repeated stem name.
+
+        A stem name identifies one output file and one URL, so a duplicate is
+        not a harmless redundancy: two stems would write to and be served from
+        the same path.
+        """
+        duplicates = sorted({name for name in stems if stems.count(name) > 1})
+        if duplicates:
+            raise ValueError(f"stem names must be unique; repeated: {', '.join(duplicates)}")
+        return stems
 
 
 class QualityOption(BaseModel):

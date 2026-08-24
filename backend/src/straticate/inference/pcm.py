@@ -16,13 +16,13 @@ higher-precision export formats.
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import sys
 import wave
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
+from straticate.audio.ffmpeg import run_ffmpeg
 from straticate.audio.probe import AudioProbeError, probe_audio
 
 SAMPLE_WIDTH_BYTES = 2
@@ -73,6 +73,7 @@ async def decode_to_pcm(
     path: Path,
     *,
     sample_rate: int,
+    timeout_seconds: float,
     max_channels: int = MAX_OUTPUT_CHANNELS,
 ) -> PcmAudio:
     """Decode ``path`` to planar 16-bit PCM at ``sample_rate``.
@@ -86,6 +87,9 @@ async def decode_to_pcm(
     Args:
         path: Media file to decode.
         sample_rate: Target sample rate in Hz (the separator's native rate).
+        timeout_seconds: Bound for each of the two subprocesses, from the
+            settings the caller was configured with. Required, so nothing here
+            can fall back to a default nobody chose.
         max_channels: Channel ceiling; the result has
             ``min(source_channels, max_channels)`` channels.
 
@@ -95,14 +99,19 @@ async def decode_to_pcm(
     Raises:
         AudioDecodeError: The file is not decodable audio, or decoded to no
             samples at all.
+        FFmpegTimeout: ffprobe or FFmpeg exceeded ``timeout_seconds``.
+            Deliberately *not* converted
+            into :class:`AudioDecodeError`: a tool that ran out of time made no
+            claim about the media, and the separator maps it onto its own error
+            code.
     """
     try:
-        metadata = await probe_audio(path)
+        metadata = await probe_audio(path, timeout_seconds=timeout_seconds)
     except AudioProbeError as exc:
         raise AudioDecodeError(str(exc)) from exc
 
     channels = min(max(metadata.channels, 1), max(max_channels, 1))
-    raw = await asyncio.to_thread(_decode_sync, path, sample_rate, channels)
+    raw = await asyncio.to_thread(_decode_sync, path, sample_rate, channels, timeout_seconds)
     return _planar_from_interleaved(raw, sample_rate=sample_rate, channels=channels)
 
 
@@ -145,7 +154,7 @@ def interleave(audio: PcmAudio) -> array[int]:
     return interleaved
 
 
-def _decode_sync(path: Path, sample_rate: int, channels: int) -> bytes:
+def _decode_sync(path: Path, sample_rate: int, channels: int, timeout_seconds: float) -> bytes:
     """Blocking FFmpeg decode to raw interleaved little-endian 16-bit PCM."""
     command = [
         "ffmpeg",
@@ -166,7 +175,7 @@ def _decode_sync(path: Path, sample_rate: int, channels: int) -> bytes:
         str(channels),
         "-",
     ]
-    result = subprocess.run(command, capture_output=True, check=False)
+    result = run_ffmpeg(command, timeout_seconds=timeout_seconds)
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", "replace").strip()
         raise AudioDecodeError(f"FFmpeg could not decode the file: {message}")
