@@ -19,11 +19,11 @@ import io
 import json
 import threading
 import zipfile
-from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import httpx
 import pytest
@@ -38,6 +38,7 @@ from straticate.api.export import (
     artifact_name,
 )
 from straticate.audio import probe_audio
+from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.config import Settings
 from straticate.errors import ApplicationError
 from straticate.inference import (
@@ -838,6 +839,38 @@ async def test_an_ffmpeg_failure_is_export_failed(
         "format": ExportFormat.WAV_PCM24.value,
         "reason": export_module.TRANSCODE_FAILED,
     }
+
+
+async def test_an_ffmpeg_timeout_is_export_timed_out(
+    export_client: httpx.AsyncClient,
+    export_app: FastAPI,
+    recorder: EventRecorder,
+    audio_id: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wedged encoder is a 504 of its own, and the request still returns.
+
+    The runner is stubbed, so nothing waits for a real timeout. The code is
+    distinct from ``export_failed`` on purpose: that one means the encode was
+    attempted and failed, which is a claim about the audio; a timeout is a
+    claim about the server, and the client's remedy differs.
+    """
+    job_id = await run_to_completion(export_client, recorder, audio_id)
+
+    def wedged(command: Sequence[str], **_kwargs: Any) -> NoReturn:
+        raise FFmpegTimeout(command[0], 600.0)
+
+    monkeypatch.setattr(export_module, "run_ffmpeg", wedged)
+
+    error = assert_envelope(await export(export_client, job_id), "export_timed_out", 504)
+    assert error["detail"] == {"job_id": job_id, "format": ExportFormat.WAV_PCM24.value}
+
+    # A timed-out build publishes nothing: no artifact, no .part file.
+    exports_dir = (
+        job_output_dir(cast(Settings, export_app.state.settings).data_dir, job_id)
+        / EXPORTS_DIRECTORY
+    )
+    assert not exports_dir.exists() or not any(exports_dir.iterdir())
 
 
 async def test_a_real_ffmpeg_failure_is_export_failed(

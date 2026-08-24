@@ -3,14 +3,19 @@
 Metadata always comes from probing the actual media bytes — the filename
 extension is never consulted. Anything ffprobe cannot decode, or that
 contains no audio stream, raises :class:`AudioProbeError`.
+
+A probe that never *finishes* is a different event and raises
+:class:`~straticate.audio.ffmpeg.FFmpegTimeout` instead — see
+:mod:`straticate.audio.ffmpeg`. Folding it into :class:`AudioProbeError` would
+tell the user their file is not decodable, which is a claim ffprobe never made.
 """
 
 import asyncio
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
+from straticate.audio.ffmpeg import run_ffmpeg
 from straticate.schemas import AudioMetadata
 
 
@@ -27,6 +32,7 @@ async def probe_audio(path: Path) -> AudioMetadata:
     Raises:
         AudioProbeError: The file is not decodable audio (ffprobe failed,
             produced no audio stream, or reported unusable fields).
+        FFmpegTimeout: ffprobe exceeded ``Settings.ffmpeg_timeout_seconds``.
     """
     return await asyncio.to_thread(_probe_sync, path)
 
@@ -43,12 +49,13 @@ def _probe_sync(path: Path) -> AudioMetadata:
         "-show_streams",
         str(path),
     ]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    result = run_ffmpeg(command)
     if result.returncode != 0:
-        raise AudioProbeError(f"ffprobe could not decode the file: {result.stderr.strip()}")
+        message = result.stderr.decode("utf-8", "replace").strip()
+        raise AudioProbeError(f"ffprobe could not decode the file: {message}")
 
     try:
-        report: dict[str, Any] = json.loads(result.stdout)
+        report: dict[str, Any] = json.loads(result.stdout.decode("utf-8", "replace"))
     except json.JSONDecodeError as exc:
         raise AudioProbeError("ffprobe produced unparseable output.") from exc
 

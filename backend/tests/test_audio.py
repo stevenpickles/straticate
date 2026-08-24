@@ -2,12 +2,16 @@
 
 import io
 import wave
+from collections.abc import Sequence
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
+from straticate.audio import probe as probe_module
+from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.config import Settings
 from straticate.main import create_app
 
@@ -87,6 +91,32 @@ async def test_upload_over_size_limit_rejected(tmp_path: Path) -> None:
     body = response.json()
     assert body["error"]["code"] == "audio_too_large"
     assert body["error"]["detail"]["max_upload_bytes"] == 1024
+    audio_root = settings.data_dir / "audio"
+    assert not audio_root.exists() or not any(audio_root.iterdir())
+
+
+async def test_probe_timeout_is_its_own_error_not_not_decodable(
+    client: httpx.AsyncClient, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged ffprobe is a 504 with its own code — never a wait, never a 500.
+
+    The runner is stubbed, so nothing here waits for a real timeout. Reusing
+    ``audio_not_decodable`` would tell the user their file is broken; ffprobe
+    never said that, it just ran out of time.
+    """
+
+    def wedged(command: Sequence[str], **_kwargs: object) -> NoReturn:
+        raise FFmpegTimeout(command[0], 600.0)
+
+    monkeypatch.setattr(probe_module, "run_ffmpeg", wedged)
+
+    response = await upload(client, "song.wav", make_wav_bytes())
+
+    assert response.status_code == 504
+    error = response.json()["error"]
+    assert error["code"] == "audio_probe_timed_out"
+    assert error["detail"] == {"timeout_seconds": 600.0}
+    # The rejected upload leaves nothing behind, exactly like the other paths.
     audio_root = settings.data_dir / "audio"
     assert not audio_root.exists() or not any(audio_root.iterdir())
 

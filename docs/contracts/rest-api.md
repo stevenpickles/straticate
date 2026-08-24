@@ -60,8 +60,14 @@ and stem streaming (audio bytes). IDs are ULIDs.
 Upload validation runs in order: size limit (configurable via
 `STRATICATE_MAX_UPLOAD_BYTES`, default 1 GiB) → ffprobe decodability.
 Error codes: `audio_too_large` (413), `audio_not_decodable` (422),
-`audio_not_found` (404, GET/DELETE); a missing `file` part is a standard
-`validation_error` (422).
+`audio_probe_timed_out` (504), `audio_not_found` (404, GET/DELETE); a missing
+`file` part is a standard `validation_error` (422).
+
+`audio_probe_timed_out` is deliberately *not* `audio_not_decodable`. Every
+FFmpeg and ffprobe invocation is bounded by `STRATICATE_FFMPEG_TIMEOUT_SECONDS`
+(default 600), and expiry means the tool was killed without reaching a verdict —
+so the client is told the probe timed out (`detail.timeout_seconds`) and may
+retry, rather than being told its file is broken. See **Timeouts** below.
 
 `AudioFile`:
 
@@ -379,6 +385,7 @@ finishes and publishes its artifact, so the next request for it is a cache hit.
 | `stem_not_found` | 404 | the job's result lists no stem with that name; `detail` carries `available_stems` |
 | `stem_file_missing` | 404 | the result lists the stem but its file is gone from disk (an orphaned job directory from a previous process — job records are in-memory only) |
 | `export_failed` | 500 | *(export only)* a transcode or archive step failed; `detail` carries `job_id`, `format` and a short `reason` classification |
+| `export_timed_out` | 504 | *(export only)* FFmpeg exceeded its bounded run time; `detail` carries `job_id` and `format` |
 | `validation_error` | 422 | *(export only)* an unknown `format`, or a present-but-empty `stems` |
 
 A stem name that could not be a stem name at all (path traversal, an absolute
@@ -393,3 +400,30 @@ strings name absolute server paths, so they are written to the server log and
 never to the response, exactly as `internal_error` does for an unhandled
 exception. Clients should branch on the code, show `reason` only in diagnostic
 output, and never parse it for detail it does not carry.
+
+`export_timed_out` is not one of those reasons but a code of its own:
+`export_failed` says the encode was attempted and failed, which is a statement
+about the audio or the disk, while a timeout is a statement about the server.
+The remedies differ, so the codes do.
+
+## Timeouts
+
+Every FFmpeg and ffprobe invocation runs with a wall-clock bound —
+`STRATICATE_FFMPEG_TIMEOUT_SECONDS`, default 600. The subprocesses run in
+worker threads drawn from one shared pool, so an unbounded one is not a slow
+request but a thread held forever, and enough of them would starve probing and
+separation as well as the export that started them.
+
+On expiry the subprocess is killed and the surface that started it reports its
+own code — never a generic one, and never a code that means something else:
+
+| surface | code | status |
+| --- | --- | --- |
+| `POST /audio` (ffprobe) | `audio_probe_timed_out` | 504 |
+| a separation job's decode (FFmpeg) | `audio_decode_timed_out` | *(job `error.code`)* |
+| `GET /jobs/{job_id}/export` (FFmpeg) | `export_timed_out` | 504 |
+
+`audio_decode_timed_out` never appears as an HTTP status: a job that times out
+while decoding fails, and the code arrives in the job's `error.code` (and in
+the `job_failed` WebSocket event), alongside `audio_decode_failed` for input
+that genuinely could not be decoded.

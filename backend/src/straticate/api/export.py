@@ -66,7 +66,6 @@ import asyncio
 import hashlib
 import logging
 import os
-import subprocess
 import zipfile
 from collections.abc import AsyncGenerator, Coroutine
 from contextlib import asynccontextmanager
@@ -85,6 +84,7 @@ from pydantic import AfterValidator, AwareDatetime, BaseModel, Field
 from straticate.api.audio import SettingsDep
 from straticate.api.job_outputs import completed_job, stem_not_found, stem_source_path
 from straticate.api.results import ManagerDep, stem_media_type
+from straticate.audio.ffmpeg import FFmpegTimeout, run_ffmpeg
 from straticate.errors import ApplicationError
 from straticate.inference import job_output_dir
 from straticate.schemas import SeparationResult
@@ -332,6 +332,23 @@ def _export_failed(job_id: str, export_format: ExportFormat, reason: str) -> App
     )
 
 
+def _export_timed_out(job_id: str, export_format: ExportFormat) -> ApplicationError:
+    """Build the 504 for an FFmpeg transcode that ran out of time.
+
+    Its own code, not an :data:`~ExportError` reason: ``export_failed`` says the
+    encode was attempted and failed, which is a fact about the audio or the
+    disk. A timeout says the server gave up on a subprocess, which is a fact
+    about the server — different cause, different remedy (retry, or raise
+    ``STRATICATE_FFMPEG_TIMEOUT_SECONDS``), and therefore a different code.
+    """
+    return ApplicationError(
+        "export_timed_out",
+        f"Encoding the {export_format.value} export for job {job_id!r} timed out.",
+        status_code=504,
+        detail={"job_id": job_id, "format": export_format.value},
+    )
+
+
 def parse_stem_selection(stems: str | None, available: list[str], job_id: str) -> list[str]:
     """Resolve the ``stems`` query parameter against the job's result.
 
@@ -400,6 +417,10 @@ def transcode_sync(source: Path, destination: Path, spec: _FormatSpec) -> None:
         ExportError: FFmpeg exited non-zero. Its stderr names absolute server
             paths, so it is logged here and the exception carries only
             :data:`TRANSCODE_FAILED`.
+        FFmpegTimeout: FFmpeg exceeded ``Settings.ffmpeg_timeout_seconds``.
+            Propagated as itself, not folded into :data:`TRANSCODE_FAILED`: a
+            wedged encoder is an operational fault with its own status code
+            (``export_timed_out``), not a failed encode.
     """
     command = [
         "ffmpeg",
@@ -417,7 +438,7 @@ def transcode_sync(source: Path, destination: Path, spec: _FormatSpec) -> None:
         spec.codec,
         str(destination),
     ]
-    result = subprocess.run(command, capture_output=True, check=False)
+    result = run_ffmpeg(command)
     if result.returncode != 0:
         logger.error(
             "ffmpeg exited %d encoding %s as %s: %s",
@@ -614,7 +635,8 @@ async def export_job_stems(
     Errors (see ``docs/contracts/rest-api.md``): ``job_not_found`` (404),
     ``result_not_available`` (409, with the job's current ``state`` in
     ``detail``), ``stem_not_found`` (404, with ``available_stems`` in
-    ``detail``), ``stem_file_missing`` (404), ``export_failed`` (500), and an
+    ``detail``), ``stem_file_missing`` (404), ``export_failed`` (500),
+    ``export_timed_out`` (504) when FFmpeg exceeds its bounded run time, and an
     unknown ``format`` as the standard ``validation_error`` (422).
     """
     job, result = completed_job(manager, job_id)
@@ -632,6 +654,8 @@ async def export_job_stems(
             await _shielded(
                 _build_cached(locks, artifact, sources, result, export_format, archive=archive)
             )
+        except FFmpegTimeout as exc:
+            raise _export_timed_out(job.id, export_format) from exc
         except ExportError as exc:
             raise _export_failed(job.id, export_format, exc.reason) from exc
 

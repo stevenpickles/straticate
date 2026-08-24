@@ -16,13 +16,13 @@ higher-precision export formats.
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import sys
 import wave
 from array import array
 from dataclasses import dataclass
 from pathlib import Path
 
+from straticate.audio.ffmpeg import run_ffmpeg
 from straticate.audio.probe import AudioProbeError, probe_audio
 
 SAMPLE_WIDTH_BYTES = 2
@@ -95,6 +95,11 @@ async def decode_to_pcm(
     Raises:
         AudioDecodeError: The file is not decodable audio, or decoded to no
             samples at all.
+        FFmpegTimeout: ffprobe or FFmpeg exceeded
+            ``Settings.ffmpeg_timeout_seconds``. Deliberately *not* converted
+            into :class:`AudioDecodeError`: a tool that ran out of time made no
+            claim about the media, and the separator maps it onto its own error
+            code.
     """
     try:
         metadata = await probe_audio(path)
@@ -166,7 +171,7 @@ def _decode_sync(path: Path, sample_rate: int, channels: int) -> bytes:
         str(channels),
         "-",
     ]
-    result = subprocess.run(command, capture_output=True, check=False)
+    result = run_ffmpeg(command)
     if result.returncode != 0:
         message = result.stderr.decode("utf-8", "replace").strip()
         raise AudioDecodeError(f"FFmpeg could not decode the file: {message}")

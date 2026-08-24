@@ -10,11 +10,13 @@ rather than from a timer, so nothing depends on wall-clock timing.
 import asyncio
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
+from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.errors import ApplicationError
 from straticate.inference import (
     FAKE_SEPARATOR_INFOS,
@@ -31,6 +33,7 @@ from straticate.inference import (
     job_stems_dir,
     stem_path,
 )
+from straticate.inference import pcm as pcm_module
 from straticate.inference.pcm import AudioDecodeError, decode_to_pcm
 from straticate.jobs import CancellationToken, JobCancelled
 from straticate.schemas.jobs import JobState, SeparationConfiguration
@@ -545,6 +548,38 @@ async def test_undecodable_input_is_an_application_error(tmp_path: Path) -> None
             output_dir=tmp_path / "stems",
         )
     assert excinfo.value.code == "audio_decode_failed"
+    assert not (tmp_path / "stems").exists()
+
+
+async def test_a_decode_timeout_is_its_own_error_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A wedged FFmpeg fails the job with its own code, and never hangs.
+
+    The runner is stubbed, so the expiry path runs instantly — the test asserts
+    the classification, not that waiting works. ``audio_decode_failed`` would
+    tell the user their file is undecodable, which FFmpeg never determined.
+    """
+    source = write_tone_wav(tmp_path / "source.wav", seconds=0.2)
+    separator = make_separator()
+
+    def wedged(command: Sequence[str], **_kwargs: object) -> NoReturn:
+        raise FFmpegTimeout(command[0], 600.0)
+
+    monkeypatch.setattr(pcm_module, "run_ffmpeg", wedged)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        await separator.separate(
+            source,
+            make_configuration(),
+            ProgressRecorder(),
+            CancellationToken(),
+            job_id=JOB_ID,
+            output_dir=tmp_path / "stems",
+        )
+    assert excinfo.value.code == "audio_decode_timed_out"
+    assert excinfo.value.status_code == 504
+    assert excinfo.value.detail == {"timeout_seconds": 600.0}
     assert not (tmp_path / "stems").exists()
 
 

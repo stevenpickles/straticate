@@ -70,6 +70,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 
+from straticate.audio.ffmpeg import FFmpegTimeout
 from straticate.errors import ApplicationError
 from straticate.inference.base import (
     DeviceStats,
@@ -360,8 +361,9 @@ class FakeSeparator:
             RuntimeError: A separation is already running on this instance.
             JobCancelled: Cancellation was observed.
             ApplicationError: ``audio_decode_failed`` if the input cannot be
-                decoded, ``separation_mode_mismatch`` if the requested mode is
-                not the one this separator serves.
+                decoded, ``audio_decode_timed_out`` if FFmpeg exceeded its
+                bounded run time, ``separation_mode_mismatch`` if the requested
+                mode is not the one this separator serves.
         """
         if self._active:
             raise RuntimeError("FakeSeparator supports one separation at a time")
@@ -468,6 +470,16 @@ class FakeSeparator:
                 "audio_decode_failed",
                 f"The input audio could not be decoded: {exc}",
                 status_code=422,
+            ) from exc
+        except FFmpegTimeout as exc:
+            # Its own code: "not decodable" is a claim about the audio, and a
+            # tool that ran out of time never made one. The distinction reaches
+            # the user, because a failed job's error code is what the UI shows.
+            raise ApplicationError(
+                "audio_decode_timed_out",
+                "Decoding the input audio timed out.",
+                status_code=504,
+                detail={"timeout_seconds": exc.timeout_seconds},
             ) from exc
 
     async def _run_chunks(
