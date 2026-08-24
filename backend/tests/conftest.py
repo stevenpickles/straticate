@@ -17,7 +17,15 @@ def app() -> FastAPI:
 
 @pytest.fixture
 async def client(app: FastAPI) -> AsyncIterator[httpx2.AsyncClient]:
-    """An HTTP client bound to the app via in-process ASGI transport."""
+    """An HTTP client bound to the app via in-process ASGI transport.
+
+    ``raise_app_exceptions`` is left at its default ``True``, and that default
+    is load-bearing: an unexpected route exception must surface here as a
+    failing test rather than as a quiet 500 envelope. It only does so because
+    :class:`~straticate.errors.ErrorEnvelopeMiddleware` re-raises after sending
+    the envelope — a test that wants to *inspect* a 500 body opts out
+    explicitly with ``raise_app_exceptions=False`` (see ``test_errors.py``).
+    """
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

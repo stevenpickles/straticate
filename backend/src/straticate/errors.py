@@ -169,14 +169,33 @@ async def _handle_validation_error(request: Request, exc: Exception) -> JSONResp
     )
 
 
+def internal_error_response() -> JSONResponse:
+    """The generic ``internal_error`` envelope, leaking nothing about the cause.
+
+    Deliberately silent: it builds a response and logs nothing, so the single
+    place an unexpected exception is reported by this application stays
+    :func:`_handle_unexpected_error`. :class:`ErrorEnvelopeMiddleware` sends
+    this and then re-raises, which is what gets it there.
+    """
+    return error_response(500, "internal_error", "An internal server error occurred.")
+
+
 async def _handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     """Map any unhandled exception to a 500 envelope without leaking details.
 
     The traceback is logged server-side; the response body contains only the
     generic ``internal_error`` envelope.
+
+    This is the application's **only** report of an unexpected exception.
+    Registered as the ``Exception`` handler, it runs in Starlette's outermost
+    ``ServerErrorMiddleware``, which every such exception reaches — including
+    the ones :class:`ErrorEnvelopeMiddleware` has already answered, because it
+    re-raises. Its *response* is discarded in that case (one is already on the
+    wire, and ``ServerErrorMiddleware`` checks) but the log is not, so moving
+    the logging into the middleware would only duplicate it.
     """
     logger.exception("Unhandled error while processing %s %s", request.method, request.url.path)
-    return error_response(500, "internal_error", "An internal server error occurred.")
+    return internal_error_response()
 
 
 class ErrorEnvelopeMiddleware:
@@ -194,16 +213,29 @@ class ErrorEnvelopeMiddleware:
     CORS, this class catches the same exceptions one layer lower, and its
     response travels out through CORS like any other.
 
-    The exception is logged and not re-raised: it has been fully handled, the
-    client has its documented envelope, and re-raising would only ask
-    ``ServerErrorMiddleware`` to answer a request that is already answered.
-    Nothing is lost — the traceback that uvicorn would have logged is logged
-    here, by the same code that logged it before
-    (:func:`_handle_unexpected_error`).
+    **The exception is always re-raised**, after the envelope has been sent.
+    That is ``ServerErrorMiddleware``'s own contract ("we always continue to
+    raise the exception … allows test clients to optionally raise the error
+    within the test case") and it is not optional for a test suite: swallowing
+    it made ``raise_app_exceptions=True`` inert, so a route that started
+    raising ``AttributeError`` quietly returned a 500 envelope and every
+    assertion that did not check ``status_code`` still passed.
 
-    If the response has already started there is nothing to salvage: the status
-    line and headers are on the wire, so the exception is re-raised and the
-    connection breaks, which is the honest outcome.
+    Re-raising costs the client nothing. The response has already gone out
+    through ``send``, so ``ServerErrorMiddleware``'s own ``response_started``
+    flag is set: it will not send a second response, and the envelope reaches
+    the caller with the CORS headers this class exists to give it. It does
+    still invoke the registered ``Exception`` handler, which is where the
+    traceback is logged — hence :func:`internal_error_response` here rather
+    than :func:`_handle_unexpected_error`, so one exception produces one
+    application log line rather than two. At the edge of the process a real
+    server logs it as well, exactly as it does for any unhandled ASGI
+    exception.
+
+    If the response has already started there is nothing to salvage either:
+    the status line and headers are on the wire, so the exception is re-raised
+    with no envelope at all and the connection breaks, which is the honest
+    outcome.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -225,21 +257,22 @@ class ErrorEnvelopeMiddleware:
 
         try:
             await self.app(scope, receive, watched_send)
-        except Exception as exc:
-            if started:
-                raise
-            response = await _handle_unexpected_error(Request(scope, receive), exc)
-            await response(scope, receive, send)
+        except Exception:
+            if not started:
+                await internal_error_response()(scope, receive, send)
+            raise
 
 
 def register_error_handlers(app: FastAPI) -> None:
     """Register the exception handlers that enforce the error envelope.
 
     The ``Exception`` handler is registered as well as
-    :class:`ErrorEnvelopeMiddleware`, and is not redundant: it covers anything
+    :class:`ErrorEnvelopeMiddleware`, and is not redundant. It covers anything
     raised *outside* the middleware (in ``CORSMiddleware`` itself, or in
     lifespan-adjacent code), where an enveloped 500 without CORS headers still
-    beats a bare ASGI error.
+    beats a bare ASGI error — and because the middleware re-raises, it is also
+    the one place every unexpected exception is logged, whether or not an
+    envelope was already sent.
     """
     app.add_exception_handler(ApplicationError, _handle_application_error)
     app.add_exception_handler(StarletteHTTPException, _handle_http_exception)
