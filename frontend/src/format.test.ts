@@ -6,7 +6,10 @@ import {
   formatChannels,
   formatDuration,
   formatFileSize,
+  formatPercentage,
+  formatRealtimeFactor,
   formatSampleRate,
+  formatTemperature,
 } from './format'
 
 describe('formatDuration', () => {
@@ -116,5 +119,63 @@ describe('formatFileSize', () => {
     [5629499534213120, '5120 TB'],
   ])('formats %p bytes as %p', (bytes, expected) => {
     expect(formatFileSize(bytes)).toBe(expected)
+  })
+})
+
+describe('formatPercentage', () => {
+  it.each([
+    [0, '0%'],
+    [0.004, '0%'],
+    [0.005, '1%'],
+    [0.42, '42%'],
+    [0.91, '91%'],
+    [0.995, '100%'],
+    [1, '100%'],
+    // Out of the documented [0, 1] range: clamped, never "140%".
+    [1.4, '100%'],
+    [-0.2, '0%'],
+    [Number.NaN, '0%'],
+    [Number.POSITIVE_INFINITY, '0%'],
+    [Number.NEGATIVE_INFINITY, '0%'],
+  ])('formats %p as %p', (fraction, expected) => {
+    expect(formatPercentage(fraction)).toBe(expected)
+  })
+})
+
+describe('formatTemperature', () => {
+  it.each([
+    [63, '63 °C'],
+    [71.4, '71 °C'],
+    [71.5, '72 °C'],
+    [0, '0 °C'],
+    // Negative readings are kept; -0 must not render as "-0 °C".
+    [-3, '-3 °C'],
+    [-0.2, '0 °C'],
+    [Number.NaN, '0 °C'],
+    [Number.POSITIVE_INFINITY, '0 °C'],
+  ])('formats %p as %p', (celsius, expected) => {
+    expect(formatTemperature(celsius)).toBe(expected)
+  })
+})
+
+describe('formatRealtimeFactor', () => {
+  it.each([
+    [7.9, '7.9×'],
+    [7.84, '7.8×'],
+    [1, '1×'],
+    [12, '12×'],
+    [12.04, '12×'],
+    // Below 1x (slower than real time) keeps two decimals.
+    [0.999, '1×'],
+    [0.42, '0.42×'],
+    [0.4, '0.4×'],
+    [0.005, '0.01×'],
+    [0.001, '0×'],
+    [0, '0×'],
+    [-5, '0×'],
+    [Number.NaN, '0×'],
+    [Number.POSITIVE_INFINITY, '0×'],
+  ])('formats %p as %p', (factor, expected) => {
+    expect(formatRealtimeFactor(factor)).toBe(expected)
   })
 })
