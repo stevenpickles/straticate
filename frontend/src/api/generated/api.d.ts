@@ -136,6 +136,10 @@ export interface paths {
         /**
          * List Models
          * @description List every logical model in the catalog, in catalog order.
+         *
+         *     Served by the installer rather than the catalog directly: it holds the same
+         *     catalog and adds each model's live ``installation`` block, so a client can
+         *     tell an offered model from a ready one without a second request.
          */
         get: operations["list_models_api_v1_models_get"];
         put?: never;
@@ -155,12 +159,81 @@ export interface paths {
         };
         /**
          * Get Model
-         * @description Fetch one model; 404 ``model_not_found`` if the ID is unknown.
+         * @description Fetch one model, including installation state and download progress.
+         *
+         *     While an install runs, ``installation`` reports ``downloading`` with
+         *     ``downloaded_bytes`` and ``progress``; this route is where that progress is
+         *     read (see ``docs/features/025-model-download-manager.md`` for why it is not
+         *     a WebSocket event). 404 ``model_not_found`` if the ID is unknown.
          */
         get: operations["get_model_api_v1_models__model_id__get"];
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Install Model
+         * @description Start downloading a model's weights; return immediately.
+         *
+         *     Answers ``202`` with the model in state ``downloading`` — the transfer is
+         *     hundreds of megabytes and never holds the request open (AGENTS.md principle
+         *     4). Progress and the final outcome are read from
+         *     ``GET /models/{model_id}``; a failed install reports ``failed`` with the
+         *     reason in ``installation.error``.
+         *
+         *     Installing a model whose weights are already present is an idempotent no-op
+         *     that reports ``installed``. Errors:
+         *     ``model_not_found`` (404), ``model_not_downloadable`` (409) for a built-in
+         *     model with no artifact, ``model_busy`` (409) when an install is already
+         *     running for this model.
+         */
+        post: operations["install_model_api_v1_models__model_id__install_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{model_id}/weights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Model Weights
+         * @description Delete a model's weights, returning it to ``available``.
+         *
+         *     **A running install is cancelled first**, and this is also how a download
+         *     that will not finish is escaped: the network bound is per-operation, not a
+         *     total budget, so a trickling host could otherwise hold a model in
+         *     ``downloading`` indefinitely. The cancelled download removes its own partial
+         *     file before this responds.
+         *
+         *     Idempotent: removing weights that are not installed succeeds. The updated
+         *     model is returned rather than ``204`` so the caller sees the state it just
+         *     produced, as ``POST /jobs/{job_id}/cancel`` does. Errors:
+         *     ``model_not_found`` (404), ``model_not_downloadable`` (409) for a built-in
+         *     model.
+         */
+        delete: operations["remove_model_weights_api_v1_models__model_id__weights_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -675,6 +748,114 @@ export interface components {
             capabilities: {
                 [key: string]: boolean;
             };
+            /** @description Licence and permission terms from the manifest; null when the manifest declares none. */
+            licensing?: components["schemas"]["ModelLicensing"] | null;
+            /** @description Whether this model's weights are on disk, and the progress of a running install. The default describes a model that needs no weights. */
+            installation?: components["schemas"]["ModelInstallation"];
+        };
+        /**
+         * ModelInstallState
+         * @description Whether a catalogued model's weights are on disk, and how that is going.
+         *
+         *     A model with no downloadable artifact — every built-in separator, the fake
+         *     ones included — is :attr:`INSTALLED` by definition: it needs no weights, so
+         *     it is never presented as something to download.
+         *
+         *     Transitions (feature 025)::
+         *
+         *         available ──install──▶ downloading ──verified──▶ installed
+         *              ▲                      │                        │
+         *              │                      └──failed──▶ failed      │
+         *              └──────────── remove ◀─────────────────────────-┘
+         *
+         *     ``failed`` is a *terminal report*, not a resting place: it says the last
+         *     install attempt did not produce weights, and the failure's code and message
+         *     are in :attr:`ModelInstallation.error`. Nothing is on disk in that state —
+         *     an incomplete or hash-mismatched artifact is never installed
+         *     (ARCHITECTURE.md §9) — so starting another install clears it.
+         * @enum {string}
+         */
+        ModelInstallState: "available" | "downloading" | "installed" | "failed";
+        /**
+         * ModelInstallation
+         * @description Installation state and download progress for one model.
+         *
+         *     **Progress is served here rather than pushed as a WebSocket event.** The
+         *     reasoning is written up in ``docs/features/025-model-download-manager.md``;
+         *     in short, ARCHITECTURE.md §11's rule is that REST is the source of truth for
+         *     reconnect and refresh, and an install is a rare, user-initiated,
+         *     coarse-grained operation whose state a client needs on every plain
+         *     ``GET /models`` anyway.
+         *
+         *     The defaults describe a model that needs no weights — which is exactly what
+         *     a :class:`Model` built from a manifest with no ``artifact`` block is.
+         */
+        ModelInstallation: {
+            /**
+             * @description Current installation state.
+             * @default installed
+             */
+            state: components["schemas"]["ModelInstallState"];
+            /**
+             * Requires Download
+             * @description Whether this model has a downloadable weights artifact at all. False for built-in separators, which are always installed and can never be removed.
+             * @default false
+             */
+            requires_download: boolean;
+            /**
+             * Total Bytes
+             * @description Size of the weights artifact in bytes; null when there is none.
+             */
+            total_bytes?: number | null;
+            /**
+             * Downloaded Bytes
+             * @description Bytes received so far; null unless an install is running.
+             */
+            downloaded_bytes?: number | null;
+            /**
+             * Progress
+             * @description Download progress in [0, 1] (downloaded_bytes / total_bytes); null unless an install is running.
+             */
+            progress?: number | null;
+            /** @description Why the last install attempt failed; null unless state is `failed`. Carries the same shape as the REST error envelope's `error`. */
+            error?: components["schemas"]["ErrorInfo"] | null;
+        };
+        /**
+         * ModelLicensing
+         * @description Licence and permission terms declared by a model manifest.
+         *
+         *     Surfaced on :class:`Model` so a user can read a model's terms **before**
+         *     installing its weights, which is the only moment the terms can still change
+         *     the decision. Every field is optional: a manifest may declare as much or as
+         *     little as its upstream publishes, and ``null`` means "not declared", never
+         *     "not permitted".
+         */
+        ModelLicensing: {
+            /**
+             * Code License
+             * @description SPDX-style licence of the implementation code; null if unknown.
+             */
+            code_license?: string | null;
+            /**
+             * Weights License
+             * @description Licence of the weights themselves; null if unknown.
+             */
+            weights_license?: string | null;
+            /**
+             * Redistribution Permitted
+             * @description Whether the weights may be redistributed; null if unknown.
+             */
+            redistribution_permitted?: boolean | null;
+            /**
+             * Commercial Use Permitted
+             * @description Whether commercial use is permitted; null if unknown.
+             */
+            commercial_use_permitted?: boolean | null;
+            /**
+             * Attribution
+             * @description Attribution text the licence requires; null if none.
+             */
+            attribution?: string | null;
         };
         /**
          * ModelRequirements
@@ -1368,6 +1549,68 @@ export interface operations {
         };
     };
     get_model_api_v1_models__model_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    install_model_api_v1_models__model_id__install_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_model_weights_api_v1_models__model_id__weights_delete: {
         parameters: {
             query?: never;
             header?: never;

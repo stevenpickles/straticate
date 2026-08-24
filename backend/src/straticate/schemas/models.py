@@ -3,12 +3,22 @@
 ``Model`` mirrors the model manifest (``models/schemas/model-manifest.schema.json``)
 fields that are part of the API surface. ``SeparationMode`` is what the frontend
 renders — derived from model capabilities, never hardcoded client-side.
+
+``Model`` also carries the model's **installation state** (feature 025): being
+in the catalog and having weights on disk are different facts, and a client that
+cannot tell "offered" from "ready" cannot offer to install anything. The state
+lives on ``Model`` rather than on a sibling resource because every place a model
+is presented is a place the distinction matters, and because ``GET /models`` and
+``GET /models/{model_id}`` are already the two routes a client reads models
+from — a sibling resource would mean a second fetch per model to answer a
+question about the model it just fetched.
 """
 
 from enum import StrEnum
 
 from pydantic import BaseModel, Field, field_validator
 
+from straticate.schemas.common import ErrorInfo
 from straticate.schemas.stems import StemName
 
 
@@ -34,6 +44,112 @@ class ModelRequirements(BaseModel):
     )
     minimum_ram_mb: int | None = Field(
         default=None, ge=0, description="Minimum system RAM in MiB; null when not specified."
+    )
+
+
+class ModelInstallState(StrEnum):
+    """Whether a catalogued model's weights are on disk, and how that is going.
+
+    A model with no downloadable artifact — every built-in separator, the fake
+    ones included — is :attr:`INSTALLED` by definition: it needs no weights, so
+    it is never presented as something to download.
+
+    Transitions (feature 025)::
+
+        available ──install──▶ downloading ──verified──▶ installed
+             ▲                      │                        │
+             │                      └──failed──▶ failed      │
+             └──────────── remove ◀─────────────────────────-┘
+
+    ``failed`` is a *terminal report*, not a resting place: it says the last
+    install attempt did not produce weights, and the failure's code and message
+    are in :attr:`ModelInstallation.error`. Nothing is on disk in that state —
+    an incomplete or hash-mismatched artifact is never installed
+    (ARCHITECTURE.md §9) — so starting another install clears it.
+    """
+
+    AVAILABLE = "available"
+    DOWNLOADING = "downloading"
+    INSTALLED = "installed"
+    FAILED = "failed"
+
+
+class ModelLicensing(BaseModel):
+    """Licence and permission terms declared by a model manifest.
+
+    Surfaced on :class:`Model` so a user can read a model's terms **before**
+    installing its weights, which is the only moment the terms can still change
+    the decision. Every field is optional: a manifest may declare as much or as
+    little as its upstream publishes, and ``null`` means "not declared", never
+    "not permitted".
+    """
+
+    code_license: str | None = Field(
+        default=None, description="SPDX-style licence of the implementation code; null if unknown."
+    )
+    weights_license: str | None = Field(
+        default=None, description="Licence of the weights themselves; null if unknown."
+    )
+    redistribution_permitted: bool | None = Field(
+        default=None, description="Whether the weights may be redistributed; null if unknown."
+    )
+    commercial_use_permitted: bool | None = Field(
+        default=None, description="Whether commercial use is permitted; null if unknown."
+    )
+    attribution: str | None = Field(
+        default=None, description="Attribution text the licence requires; null if none."
+    )
+
+
+class ModelInstallation(BaseModel):
+    """Installation state and download progress for one model.
+
+    **Progress is served here rather than pushed as a WebSocket event.** The
+    reasoning is written up in ``docs/features/025-model-download-manager.md``;
+    in short, ARCHITECTURE.md §11's rule is that REST is the source of truth for
+    reconnect and refresh, and an install is a rare, user-initiated,
+    coarse-grained operation whose state a client needs on every plain
+    ``GET /models`` anyway.
+
+    The defaults describe a model that needs no weights — which is exactly what
+    a :class:`Model` built from a manifest with no ``artifact`` block is.
+    """
+
+    state: ModelInstallState = Field(
+        default=ModelInstallState.INSTALLED, description="Current installation state."
+    )
+    requires_download: bool = Field(
+        default=False,
+        description=(
+            "Whether this model has a downloadable weights artifact at all. False for "
+            "built-in separators, which are always installed and can never be removed."
+        ),
+    )
+    total_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Size of the weights artifact in bytes; null when there is none.",
+    )
+    downloaded_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        description="Bytes received so far; null unless an install is running.",
+    )
+    progress: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Download progress in [0, 1] (downloaded_bytes / total_bytes); "
+            "null unless an install is running."
+        ),
+    )
+    error: ErrorInfo | None = Field(
+        default=None,
+        description=(
+            "Why the last install attempt failed; null unless state is `failed`. "
+            "Carries the same shape as the REST error envelope's `error`."
+        ),
     )
 
 
@@ -74,6 +190,19 @@ class Model(BaseModel):
     )
     capabilities: dict[str, bool] = Field(
         description="Compute backends this model supports (open set of backend IDs)."
+    )
+    licensing: ModelLicensing | None = Field(
+        default=None,
+        description=(
+            "Licence and permission terms from the manifest; null when the manifest declares none."
+        ),
+    )
+    installation: ModelInstallation = Field(
+        default_factory=ModelInstallation,
+        description=(
+            "Whether this model's weights are on disk, and the progress of a running "
+            "install. The default describes a model that needs no weights."
+        ),
     )
 
     @field_validator("stems")

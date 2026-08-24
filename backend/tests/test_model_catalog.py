@@ -11,6 +11,13 @@ from straticate.errors import ApplicationError
 from straticate.main import create_app
 from straticate.models import CATALOG_FILENAME, ModelCatalog, ModelCatalogError
 
+ARTIFACT: dict[str, Any] = {
+    "download_url": "https://weights.invalid/model.ckpt",
+    "size_bytes": 1024,
+    "sha256": "0" * 64,
+}
+"""A syntactically valid manifest ``artifact`` block (never fetched)."""
+
 
 def make_model(model_id: str, **overrides: Any) -> dict[str, Any]:
     """A minimal valid catalog entry, with ``overrides`` applied."""
@@ -124,21 +131,36 @@ def test_application_refuses_to_start_on_an_invalid_stem_name(tmp_path: Path) ->
         create_app(Settings(models_dir=models_dir, data_dir=tmp_path / "data"))
 
 
-def test_manifest_only_fields_are_dropped_on_load(tmp_path: Path) -> None:
-    """``default_inference_parameters`` and friends never reach the API model."""
+def test_inference_only_fields_are_dropped_on_load(tmp_path: Path) -> None:
+    """``default_inference_parameters`` never reaches the API model."""
     write_catalog(
         tmp_path,
-        [
-            make_model(
-                "m-001",
-                default_inference_parameters={"segment_size": 256, "overlap": 4},
-                licensing={"code_license": "MIT"},
-            )
-        ],
+        [make_model("m-001", default_inference_parameters={"segment_size": 256, "overlap": 4})],
     )
     model = ModelCatalog.from_directory(tmp_path).get_model("m-001")
     assert "default_inference_parameters" not in model.model_dump()
-    assert "licensing" not in model.model_dump()
+
+
+def test_licensing_is_surfaced_on_the_model(tmp_path: Path) -> None:
+    """A user can read a model's terms before installing its weights (025)."""
+    write_catalog(
+        tmp_path,
+        [make_model("m-001", licensing={"code_license": "MIT", "commercial_use_permitted": True})],
+    )
+    licensing = ModelCatalog.from_directory(tmp_path).get_model("m-001").licensing
+    assert licensing is not None
+    assert licensing.code_license == "MIT"
+    assert licensing.commercial_use_permitted is True
+    assert licensing.weights_license is None
+
+
+def test_the_artifact_block_never_reaches_the_public_model(tmp_path: Path) -> None:
+    """``download_url``/``sha256`` are the installer's, not the API's."""
+    write_catalog(tmp_path, [make_model("m-001", artifact=ARTIFACT)])
+    entry = ModelCatalog.from_directory(tmp_path).get_entry("m-001")
+    assert entry.artifact is not None
+    assert entry.artifact.download_url == ARTIFACT["download_url"]
+    assert "artifact" not in entry.model.model_dump()
 
 
 # --- Model lookup -----------------------------------------------------------

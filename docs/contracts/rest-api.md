@@ -94,11 +94,13 @@ extension. `bit_depth`/`bit_rate_bps` are nullable (lossy formats).
 
 ## Models and modes
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/models` | Installed/available logical models → `Model[]` |
-| GET | `/models/{model_id}` | One `Model` |
-| GET | `/separation-modes` | `SeparationMode[]` derived from model capabilities |
+| Method | Path | Purpose | Status |
+| --- | --- | --- | --- |
+| GET | `/models` | Every catalogued logical model → `Model[]` | `200` |
+| GET | `/models/{model_id}` | One `Model`, including installation state and progress | `200` |
+| POST | `/models/{model_id}/install` | Start downloading the model's weights; returns immediately | `202` |
+| DELETE | `/models/{model_id}/weights` | Remove installed weights → the updated `Model` | `200` |
+| GET | `/separation-modes` | `SeparationMode[]` derived from model capabilities | `200` |
 
 Unknown model ID → `404` with code `model_not_found`.
 
@@ -116,19 +118,161 @@ Unknown model ID → `404` with code `model_not_found`.
   "stems": ["vocals", "instrumental"],
   "sample_rate": 44100,
   "requirements": { "recommended_vram_mb": 0, "minimum_ram_mb": null },
-  "capabilities": { "cuda": true, "cpu": true }
+  "capabilities": { "cuda": true, "cpu": true },
+  "licensing": null,
+  "installation": {
+    "state": "installed",
+    "requires_download": false,
+    "total_bytes": null,
+    "downloaded_bytes": null,
+    "progress": null,
+    "error": null
+  }
 }
 ```
 
-Manifest fields that are *not* user-facing — `artifact`, `licensing`,
+Manifest fields that are *not* user-facing — `artifact` and
 `default_inference_parameters` — are deliberately absent from `Model` and never
 appear in any response: users choose modes and quality tiers, never
-architectures or inference parameters (ARCHITECTURE.md §1, §9).
+architectures, download URLs, checksums or inference parameters
+(ARCHITECTURE.md §1, §9).
+
+`licensing` **is** user-facing (feature 025). A user should be able to read a
+model's terms *before* installing its weights, which is the only moment the
+terms can still change the decision. It is the manifest's `licensing` block
+verbatim, or `null` when the manifest declares none; every field inside is
+nullable, and `null` means "not declared", never "not permitted":
+
+```json
+{
+  "code_license": "MIT",
+  "weights_license": "MIT",
+  "redistribution_permitted": true,
+  "commercial_use_permitted": true,
+  "attribution": "Upstream Author"
+}
+```
 
 `quality_tier` is `fast | balanced | high_quality | null` (feature 010; `null`
 means `balanced`). It is the tier this model backs inside its separation mode,
 and it is unique per mode — the tier ID is what `SeparationConfiguration.quality_id`
 selects.
+
+### Installation state
+
+`installation` answers a question the catalog alone cannot: **are this model's
+weights on disk?** Being catalogued and being ready to run are different facts.
+
+| field | meaning |
+| --- | --- |
+| `state` | `available` · `downloading` · `installed` · `failed` |
+| `requires_download` | whether the model has a weights artifact at all |
+| `total_bytes` | artifact size from the manifest; `null` when there is none |
+| `downloaded_bytes` | bytes received so far; `null` unless downloading |
+| `progress` | `downloaded_bytes / total_bytes` in `[0, 1]`; `null` unless downloading |
+| `error` | why the last attempt failed; `null` unless `state` is `failed` — same shape as the envelope's `error` |
+
+**A model with no `artifact` block is `installed` by definition** and
+`requires_download` is `false`: it needs no weights, so it is never presented as
+something to download, and installing or removing its weights is a
+`model_not_downloadable` (409). Every built-in model — the fake development
+models today — is in this state permanently.
+
+```text
+available ──POST install──▶ downloading ──verified──▶ installed
+     ▲                           │                        │
+     │                           └── failure ──▶ failed    │
+     └────────── DELETE weights ◀──────────────────────────┘
+```
+
+`failed` is a report, not a resting place: **nothing is on disk in that state**,
+and the next install clears it. There is no `update` — remove and install again.
+
+**Progress is polled from this resource, not pushed as a WebSocket event.** The
+"no polling loops" rule (ARCHITECTURE.md §3, §11) is about *job progress*:
+chunk-grained, ~4 Hz, during inference. A model install is rare, user-initiated
+and coarse, its state is part of the model resource a client fetches anyway, and
+REST is already the documented source of truth for reconnect and refresh. The
+reasoning is written up in
+[docs/features/025-model-download-manager.md](../features/025-model-download-manager.md);
+adding a `model_install_progress` event later would be purely additive.
+
+**`POST /models/{model_id}/install` returns immediately** (`202`), like every
+command that starts long work. A multi-hundred-megabyte transfer never holds an
+HTTP request open. The response body is the model in state `downloading`;
+progress and the outcome are read from `GET /models/{model_id}`. Installing a
+model whose weights are already present is an idempotent no-op reporting
+`installed`. Removing weights that are not installed is likewise a no-op
+reporting `available`.
+
+**`DELETE /models/{model_id}/weights` cancels a running install** rather than
+refusing it. "I do not want this model's weights" includes the ones being
+fetched, and it is also the escape hatch from a download that will not finish:
+the network bound is *per operation*, not a total budget, so a host trickling
+bytes just under the timeout could otherwise hold a model in `downloading` until
+the process was restarted. The cancelled download removes its own partial file
+before the response is sent.
+
+Model management error codes:
+
+| code | status | when |
+| --- | --- | --- |
+| `model_not_found` | 404 | unknown `model_id` (get / install / remove). An ID that could not be a model ID at all — a traversal attempt, an absolute path — is simply not a catalog key and exits here |
+| `model_not_downloadable` | 409 | the model declares no `artifact`; it is built in and always installed. `detail` carries `model_id` |
+| `model_busy` | 409 | an install is already running for this model. `detail` carries `model_id`. **Install only** — `DELETE .../weights` cancels a running install instead of refusing |
+
+**`download_failed` and `checksum_mismatch` are install-failure codes, not HTTP
+statuses.** The request that started the install returned long before the
+download could fail, so — exactly as `audio_decode_timed_out` does for a job
+(see **Timeouts**) — the code arrives in `installation.error`:
+
+| code | when | `detail` |
+| --- | --- | --- |
+| `download_failed` | the artifact could not be fetched in full | `model_id`, `reason`, plus the sizes involved |
+| `checksum_mismatch` | the bytes are not the SHA-256 the catalog pins | `model_id`, `actual` (the digest that arrived) |
+
+`download_failed`'s `reason` is a **classification, not a message**:
+`http_status` (the host answered, but not `200` — `detail.status_code` says
+what), `connection_failed` (refused, reset, or timed out), `size_exceeded` (the
+body is larger than the manifest's `size_bytes`, refused from the declared
+`Content-Length` or stopped mid-stream), `size_mismatch` (it ended short),
+`filesystem_error` (the artifact could not be written), or `unexpected_error`
+(the install raised something the manager does not classify — reported rather
+than swallowed, because a model silently returning to `available` is
+indistinguishable from "never tried"). OS error strings and FFmpeg-style
+diagnostics name absolute server paths, so they are logged and never returned —
+the same discipline `export_failed` applies.
+
+**No failure ever names the download URL, and `checksum_mismatch` never returns
+the pinned digest.** `installation.error` is served to every API caller, and
+large weights are routinely hosted behind presigned URLs whose query string *is*
+the credential — so the URL is logged, never returned, and the message names the
+model instead. By the same rule the failure `detail` carries facts about *what
+happened* (the digest and byte count that actually arrived) plus `size_bytes`,
+which the model resource already publishes as `installation.total_bytes`. It
+never carries a field copied out of the private `artifact` block.
+
+**An incomplete or hash-mismatched artifact is never installed and never
+loadable** (ARCHITECTURE.md §9). The download streams to a temporary `.part`
+file, the pinned SHA-256 is verified *before* anything is published, the file is
+`fsync`ed so the bytes are on stable storage rather than in the page cache, and
+only then is it `os.replace`d into place (with the containing directory synced
+afterwards where the platform allows). Nothing ever re-hashes installed weights,
+so a file that is published torn would be loaded silently forever — the sync is
+what stops a power loss just after a "successful" install from producing one.
+The `.part` is removed on every failure path, including cancellation and
+shutdown. A pinned checksum is
+*enforced*, never trusted: a checkpoint host that is renamed or taken down
+serves a 404 page, not weights, and installing something plausible-looking would
+be the exact failure this exists to prevent.
+
+Weights live under `Settings.models_dir` at
+`{models_dir}/weights/{model_id}/weights.bin` and are **never committed to the
+repository**. Resumable downloads, mirrors and in-place updates are out of scope.
+
+**Which models a mode offers is unaffected by installation state.**
+`GET /separation-modes` still lists every catalogued model's tier, installed or
+not (feature 010's open question, deliberately left open until 026).
 
 `SeparationMode` (what the frontend renders — never hardcoded client-side):
 

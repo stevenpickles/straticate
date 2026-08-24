@@ -34,6 +34,9 @@ from straticate.schemas.jobs import (
 )
 from straticate.schemas.models import (
     Model,
+    ModelInstallation,
+    ModelInstallState,
+    ModelLicensing,
     ModelRequirements,
     QualityOption,
     QualityTier,
@@ -62,6 +65,9 @@ __all__ = [
     "JobState",
     "Model",
     "ModelInfo",
+    "ModelInstallState",
+    "ModelInstallation",
+    "ModelLicensing",
     "ModelRequirements",
     "ProcessingMetrics",
     "QualityOption",

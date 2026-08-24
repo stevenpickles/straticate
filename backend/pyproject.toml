@@ -10,13 +10,16 @@ dependencies = [
     "pydantic-settings>=2.3",
     "python-ulid>=4.0.1",
     "python-multipart>=0.0.32",
+    # The model download manager (feature 025) streams weights over HTTPS.
+    # Already the test suite's HTTP client (see DEVELOPMENT.md); promoted to a
+    # runtime dependency rather than adding a second client library.
+    "httpx2>=2.12",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "httpx2>=2.12",
     "ruff>=0.6",
     "pyright>=1.1.380",
 ]
