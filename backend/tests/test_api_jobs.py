@@ -12,6 +12,7 @@ sleep is ever used as synchronization.
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,7 +26,10 @@ from starlette.testclient import TestClient, WebSocketTestSession
 from straticate.config import Settings
 from straticate.inference import (
     FAKE_ARCHITECTURE,
+    ROFORMER_ARCHITECTURE,
+    FakeSeparator,
     SeparationProgress,
+    Separator,
     SeparatorInfo,
     SeparatorRegistry,
     fake_separator_builder,
@@ -35,6 +39,7 @@ from straticate.inference import (
 from straticate.jobs import CancellationToken, JobEvent, JobManager
 from straticate.main import create_app
 from straticate.models import CATALOG_FILENAME
+from straticate.models.layout import weights_path
 from straticate.schemas import AudioFile, AudioMetadata, ComputeDevice, Model
 from straticate.schemas.events import JobCancelledEvent, JobCompletedEvent, JobFailedEvent
 from straticate.schemas.jobs import (
@@ -46,6 +51,7 @@ from straticate.schemas.jobs import (
 )
 from straticate.system import CPU_DEVICE_ID, CUDA_BACKEND, DeviceDetector
 from tests.audio_fixtures import write_tone_wav
+from tests.roformer_fixtures import TINY_SAMPLE_RATE, tiny_catalog_block, write_tiny_weights
 
 JOBS_URL = "/api/v1/jobs"
 WS_URL = "/api/v1/ws"
@@ -696,3 +702,130 @@ def test_a_websocket_client_observes_the_full_sequence_for_an_api_created_job(
     completed = cast(dict[str, Any], events[-1]["result"])
     assert completed["job_id"] == job_id
     assert [stem["name"] for stem in completed["stems"]] == ["vocals", "instrumental"]
+
+
+# -- feature 026: capabilities, weights, and a loop that keeps serving -------
+
+
+def write_catalog_with(models: list[dict[str, Any]], models_dir: Path) -> Path:
+    """Write a one-off catalog so a test can describe the model it needs."""
+    models_dir.mkdir(parents=True, exist_ok=True)
+    (models_dir / CATALOG_FILENAME).write_text(
+        json.dumps({"catalog_version": 1, "models": models}), encoding="utf-8"
+    )
+    return models_dir
+
+
+def roformer_entry(**overrides: Any) -> dict[str, Any]:
+    """A catalog entry for the real architecture, tuned tiny for tests."""
+    entry: dict[str, Any] = {
+        "schema_version": 1,
+        "id": "tiny-vocals-001",
+        "display_name": "Tiny Vocals",
+        "architecture": ROFORMER_ARCHITECTURE,
+        "version": "test",
+        "separation_mode": "vocals",
+        "stems": ["vocals", "instrumental"],
+        "sample_rate": TINY_SAMPLE_RATE,
+        "capabilities": {"cuda": True, "cpu": True},
+        "default_inference_parameters": tiny_catalog_block(),
+    }
+    entry.update(overrides)
+    return entry
+
+
+async def post_job(app: FastAPI, audio: str, **overrides: Any) -> httpx2.Response:
+    async with app.router.lifespan_context(app):
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(JOBS_URL, json=configuration(audio, **overrides))
+
+
+async def test_a_model_the_resolved_device_cannot_run_is_a_409(tmp_path: Path) -> None:
+    """A CUDA-only model on a CPU-only host is refused at *create* time.
+
+    The alternative — what the code did before feature 026 — was ``201``
+    followed by a generic ``separation_failed`` event minutes later.
+    """
+    models_dir = write_catalog_with(
+        [roformer_entry(capabilities={"cuda": True, "cpu": False})], tmp_path / "models"
+    )
+    app = create_app(Settings(data_dir=tmp_path / "data", models_dir=models_dir))
+    app.state.device_detector = DeviceDetector(probes=[])  # CPU only
+    audio = register_audio(app)
+
+    error = assert_envelope(await post_job(app, audio), "model_device_unsupported", 409)
+    assert error["detail"] == {
+        "model_id": "tiny-vocals-001",
+        "device_id": CPU_DEVICE_ID,
+        "device_backend": "cpu",
+        "supported_backends": ["cuda"],
+    }
+
+
+async def test_a_model_whose_weights_are_not_installed_is_a_409(tmp_path: Path) -> None:
+    """``model_weights_missing``, not a crash and not a 500."""
+    models_dir = write_catalog_with([roformer_entry()], tmp_path / "models")
+    app = create_app(Settings(data_dir=tmp_path / "data", models_dir=models_dir))
+    app.state.device_detector = DeviceDetector(probes=[])
+    audio = register_audio(app)
+
+    error = assert_envelope(await post_job(app, audio), "model_weights_missing", 409)
+    assert error["detail"] == {"model_id": "tiny-vocals-001"}
+
+
+async def test_installed_weights_make_the_same_request_succeed(tmp_path: Path) -> None:
+    """The 409 above is about the weights, not about the wiring around them."""
+    models_dir = write_catalog_with([roformer_entry()], tmp_path / "models")
+    write_tiny_weights(weights_path(models_dir, "tiny-vocals-001"))
+    app = create_app(Settings(data_dir=tmp_path / "data", models_dir=models_dir))
+    app.state.device_detector = DeviceDetector(probes=[])
+    audio = register_audio(app)
+
+    response = await post_job(app, audio)
+    assert response.status_code == 201, response.text
+    body = cast(dict[str, Any], response.json())
+    assert body["model_id"] == "tiny-vocals-001"
+    assert body["configuration"]["device_id"] == CPU_DEVICE_ID
+
+
+async def test_loading_a_separator_does_not_stall_the_application(tmp_path: Path) -> None:
+    """``POST /jobs`` may not freeze the server while weights load.
+
+    Feature 029 recorded this as 026's to fix: ``SeparatorRegistry.get()`` built
+    on a cache miss *inside* the ``async def`` handler, so a real backend's
+    several-hundred-megabyte load blocked the job worker, the event dispatcher,
+    every other request and all WebSocket delivery. The proof is the same shape
+    features 022 and 025 used: park the expensive step and serve other routes
+    while it is parked.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    build_threads: set[int] = set()
+
+    def gated_builder(model: Model) -> Separator:
+        build_threads.add(threading.get_ident())
+        entered.set()
+        release.wait(timeout=30)
+        return FakeSeparator(separator_info_from_model(model), chunk_delay_seconds=0.0)
+
+    app = build_app(tmp_path)
+    app.state.separator_registry = SeparatorRegistry({FAKE_ARCHITECTURE: gated_builder})
+    audio = register_audio(app)
+
+    async with app.router.lifespan_context(app):
+        transport = httpx2.ASGITransport(app=app)
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            creating = asyncio.create_task(client.post(JOBS_URL, json=configuration(audio)))
+            await asyncio.to_thread(entered.wait, 30)
+
+            # The separator is loading in a worker thread; the loop is free.
+            assert (await client.get("/api/v1/health")).status_code == 200
+            assert (await client.get("/api/v1/models")).status_code == 200
+            assert (await client.get(JOBS_URL)).status_code == 200
+
+            release.set()
+            created = await creating
+
+    assert created.status_code == 201, created.text
+    assert threading.get_ident() not in build_threads

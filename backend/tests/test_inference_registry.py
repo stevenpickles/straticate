@@ -4,7 +4,16 @@ The point of the registry is that the *catalog* decides what a separator
 claims: adding a fake model to ``models/catalog.json`` must need no code
 change, and no built-in descriptor constant may be consulted on the resolution
 path.
+
+Since feature 026 the registry also owns *when* a separator is built. A real
+backend reads hundreds of megabytes on a cache miss, so ``aget`` offloads the
+build to a worker thread; the tests at the bottom of this file prove the event
+loop stays responsive while that happens and that two racing callers build once.
 """
+
+import asyncio
+import threading
+from pathlib import Path
 
 import pytest
 
@@ -12,14 +21,19 @@ from straticate.config import Settings
 from straticate.errors import ApplicationError
 from straticate.inference import (
     FAKE_ARCHITECTURE,
+    ROFORMER_ARCHITECTURE,
     FakeSeparator,
     Separator,
     SeparatorRegistry,
     fake_separator_builder,
     separator_info_from_model,
 )
+from straticate.inference.registry import roformer_separator_builder
+from straticate.inference.roformer import RoFormerSeparator
 from straticate.models import ModelCatalog
+from straticate.models.layout import weights_path
 from straticate.schemas import Model
+from tests.roformer_fixtures import tiny_catalog_block, write_tiny_weights
 
 
 def make_catalog_model(model_id: str, **overrides: object) -> Model:
@@ -44,11 +58,22 @@ def real_models() -> list[Model]:
     return ModelCatalog.from_directory(Settings().models_dir).list_models()
 
 
+@pytest.fixture
+def real_fake_models(real_models: list[Model]) -> list[Model]:
+    """The repository's entries served by the fake engine.
+
+    Since feature 026 the catalog also holds a real model, whose separator
+    cannot be built without installed weights — so tests about the *fake* engine
+    say so rather than iterating everything and hoping.
+    """
+    return [model for model in real_models if model.architecture == FAKE_ARCHITECTURE]
+
+
 def test_fake_architecture_model_yields_a_fake_separator_mirroring_the_catalog(
-    real_models: list[Model],
+    real_fake_models: list[Model],
 ) -> None:
     registry = SeparatorRegistry()
-    for model in real_models:
+    for model in real_fake_models:
         separator = registry.get(model)
         assert isinstance(separator, FakeSeparator)
         info = separator.info
@@ -78,16 +103,16 @@ def test_a_catalog_only_model_needs_no_code_change() -> None:
     assert separator.info.sample_rate == 48000
 
 
-def test_get_caches_one_instance_per_model(real_models: list[Model]) -> None:
+def test_get_caches_one_instance_per_model(real_fake_models: list[Model]) -> None:
     registry = SeparatorRegistry()
-    first, second = real_models[0], real_models[1]
+    first, second = real_fake_models[0], real_fake_models[1]
 
     assert registry.get(first) is registry.get(first)
     assert registry.get(first) is not registry.get(second)
 
 
-def test_an_unregistered_architecture_is_a_501(real_models: list[Model]) -> None:
-    model = make_catalog_model("roformer-hq-001", architecture="mel_band_roformer")
+def test_an_unregistered_architecture_is_a_501(real_fake_models: list[Model]) -> None:
+    model = make_catalog_model("demucs-hq-001", architecture="demucs")
     registry = SeparatorRegistry()
 
     with pytest.raises(ApplicationError) as excinfo:
@@ -96,14 +121,14 @@ def test_an_unregistered_architecture_is_a_501(real_models: list[Model]) -> None
     error = excinfo.value
     assert error.code == "separator_unavailable"
     assert error.status_code == 501
-    assert "roformer-hq-001" in error.message
-    assert "mel_band_roformer" in error.message
+    assert "demucs-hq-001" in error.message
+    assert "demucs" in error.message
     assert error.detail == {
-        "model_id": "roformer-hq-001",
-        "architecture": "mel_band_roformer",
+        "model_id": "demucs-hq-001",
+        "architecture": "demucs",
     }
     # An architecture that does exist is unaffected.
-    assert registry.get(real_models[0]) is not None
+    assert registry.get(real_fake_models[0]) is not None
 
 
 def test_a_custom_builder_map_is_honoured() -> None:
@@ -136,8 +161,10 @@ def test_register_adds_an_architecture_after_construction() -> None:
     assert isinstance(registry.get(model), FakeSeparator)
 
 
-def test_the_default_registry_covers_exactly_the_fake_architecture() -> None:
-    assert SeparatorRegistry().architectures == frozenset({FAKE_ARCHITECTURE})
+def test_the_default_registry_covers_the_architectures_this_build_implements() -> None:
+    assert SeparatorRegistry().architectures == frozenset(
+        {FAKE_ARCHITECTURE, ROFORMER_ARCHITECTURE}
+    )
 
 
 def test_the_fake_builder_passes_its_tuning_through() -> None:
@@ -151,3 +178,168 @@ def test_the_fake_builder_passes_its_tuning_through() -> None:
     separator = builder(make_catalog_model("fake-001"))
     assert isinstance(separator, FakeSeparator)
     assert separator.runtime_stats() is None
+
+
+# --------------------------------------------------------------------------
+# The RoFormer builder: a catalog entry is all it takes
+# --------------------------------------------------------------------------
+
+
+def test_the_roformer_builder_configures_itself_from_the_catalog(tmp_path: Path) -> None:
+    """Adding a Mel-Band RoFormer model must be a data edit, not a code change."""
+    models_dir = tmp_path / "models"
+    write_tiny_weights(weights_path(models_dir, "tiny-vocals-001"))
+    block = tiny_catalog_block()
+
+    builder = roformer_separator_builder(
+        models_dir=models_dir,
+        inference_parameters=lambda model_id: block if model_id == "tiny-vocals-001" else None,
+        ffmpeg_timeout_seconds=11.0,
+    )
+    model = make_catalog_model(
+        "tiny-vocals-001",
+        architecture=ROFORMER_ARCHITECTURE,
+        sample_rate=block["model"]["sample_rate"],
+    )
+
+    separator = builder(model)
+    assert isinstance(separator, RoFormerSeparator)
+    assert separator.info == separator_info_from_model(model)
+    assert separator.parameters.chunk_samples == block["inference"]["chunk_size"]
+    assert separator.ffmpeg_timeout_seconds == 11.0
+
+
+def test_the_roformer_builder_reports_missing_weights_as_a_409(tmp_path: Path) -> None:
+    builder = roformer_separator_builder(
+        models_dir=tmp_path / "models", inference_parameters=lambda _: tiny_catalog_block()
+    )
+    model = make_catalog_model("tiny-vocals-001", architecture=ROFORMER_ARCHITECTURE)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        builder(model)
+
+    assert excinfo.value.code == "model_weights_missing"
+    assert excinfo.value.status_code == 409
+
+
+def test_a_registry_built_without_a_models_directory_says_so(tmp_path: Path) -> None:
+    """A wiring mistake is reported, never guessed around."""
+    registry = SeparatorRegistry()  # no models_dir, no parameter source
+    model = make_catalog_model("tiny-vocals-001", architecture=ROFORMER_ARCHITECTURE)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        registry.get(model)
+
+    assert excinfo.value.code == "separator_unavailable"
+    assert excinfo.value.status_code == 501
+    assert "models directory" in excinfo.value.message
+    assert not list(tmp_path.iterdir())
+
+
+# --------------------------------------------------------------------------
+# Building must not block the event loop (feature 029's deferred finding)
+# --------------------------------------------------------------------------
+
+
+class GatedBuilder:
+    """A builder that parks inside a worker thread until it is released."""
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.builds: list[str] = []
+        self.threads: set[int] = set()
+
+    def __call__(self, model: Model) -> Separator:
+        self.builds.append(model.id)
+        self.threads.add(threading.get_ident())
+        self.entered.set()
+        self.release.wait(timeout=30)
+        return FakeSeparator(separator_info_from_model(model), chunk_delay_seconds=0.0)
+
+
+async def test_aget_builds_off_the_event_loop() -> None:
+    """The loop keeps running while a separator loads — proved, not asserted.
+
+    A slow builder is parked in its worker thread; a task scheduled on the loop
+    goes on ticking meanwhile. Against the pre-026 code (``registry.get`` called
+    directly from ``create_job``) the ticker could not run at all, because the
+    build held the only thread the loop had.
+    """
+    builder = GatedBuilder()
+    registry = SeparatorRegistry({"gated": builder})
+    model = make_catalog_model("gated-001", architecture="gated")
+
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        while not builder.release.is_set():
+            ticks += 1
+            await asyncio.sleep(0)
+
+    ticker = asyncio.create_task(tick())
+    build = asyncio.create_task(registry.aget(model))
+
+    await asyncio.to_thread(builder.entered.wait, 30)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert ticks > 0, "the event loop was blocked while the separator was built"
+
+    builder.release.set()
+    await ticker
+    separator = await build
+
+    assert isinstance(separator, FakeSeparator)
+    assert threading.get_ident() not in builder.threads
+
+
+async def test_aget_builds_once_for_racing_callers() -> None:
+    """Two submissions for one model share the instance rather than loading twice."""
+    builder = GatedBuilder()
+    builder.release.set()
+    registry = SeparatorRegistry({"gated": builder})
+    model = make_catalog_model("gated-001", architecture="gated")
+
+    first, second = await asyncio.gather(registry.aget(model), registry.aget(model))
+
+    assert first is second
+    assert builder.builds == ["gated-001"]
+
+
+async def test_aget_returns_a_cached_separator_without_suspending() -> None:
+    """A cache hit is the common case and must cost nothing at all."""
+    registry = SeparatorRegistry()
+    model = make_catalog_model("fake-001")
+    first = registry.get(model)
+
+    coroutine = registry.aget(model)
+    try:
+        coroutine.send(None)
+    except StopIteration as done:
+        assert done.value is first
+    else:  # pragma: no cover - would mean the fast path suspended
+        coroutine.close()
+        pytest.fail("aget suspended on a cache hit")
+
+
+async def test_aget_surfaces_a_builder_failure_and_does_not_cache_it() -> None:
+    attempts = 0
+
+    def build(model: Model) -> Separator:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ApplicationError("model_weights_missing", "no weights", status_code=409)
+        return FakeSeparator(separator_info_from_model(model), chunk_delay_seconds=0.0)
+
+    registry = SeparatorRegistry({"flaky": build})
+    model = make_catalog_model("flaky-001", architecture="flaky")
+
+    with pytest.raises(ApplicationError) as excinfo:
+        await registry.aget(model)
+    assert excinfo.value.code == "model_weights_missing"
+
+    # Installing the weights and retrying works: nothing negative was cached.
+    assert isinstance(await registry.aget(model), FakeSeparator)
+    assert attempts == 2

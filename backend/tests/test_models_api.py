@@ -69,7 +69,11 @@ async def test_list_models_returns_the_catalog(client: httpx2.AsyncClient) -> No
     response = await client.get(MODELS_URL)
     assert response.status_code == 200
     body: list[dict[str, Any]] = response.json()
-    assert [model["id"] for model in body] == ["fake-vocals-001", "fake-standard-001"]
+    assert [model["id"] for model in body] == [
+        "fake-vocals-001",
+        "fake-standard-001",
+        "vocals-hq-001",
+    ]
     assert set(body[0]) == MODEL_KEYS
 
 

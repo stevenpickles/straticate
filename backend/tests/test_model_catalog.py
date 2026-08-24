@@ -60,7 +60,7 @@ def test_default_models_dir_holds_the_repository_catalog() -> None:
 
 def test_real_catalog_loads(real_catalog: ModelCatalog) -> None:
     ids = [model.id for model in real_catalog.list_models()]
-    assert ids == ["fake-vocals-001", "fake-standard-001"]
+    assert ids == ["fake-vocals-001", "fake-standard-001", "vocals-hq-001"]
 
 
 def test_missing_catalog_file_fails_loudly(tmp_path: Path) -> None:
@@ -182,19 +182,40 @@ def test_get_model_raises_model_not_found(real_catalog: ModelCatalog) -> None:
 # --- Separation mode derivation ---------------------------------------------
 
 
-def test_modes_derived_from_the_two_fake_models(real_catalog: ModelCatalog) -> None:
+def test_modes_derived_from_the_repository_catalog(real_catalog: ModelCatalog) -> None:
     modes = {mode.id: mode for mode in real_catalog.list_separation_modes()}
     assert set(modes) == {"vocals", "standard_stems"}
 
     vocals = modes["vocals"]
     assert vocals.display_name == "Vocal Isolation"
     assert vocals.stems == ["vocals", "instrumental"]
-    assert [option.model_id for option in vocals.quality_options] == ["fake-vocals-001"]
+    # Two tiers since feature 026: the fake development model is untiered (hence
+    # balanced) and the Mel-Band RoFormer backs high_quality. Both advertise the
+    # same stems, which is what lets one mode offer both.
+    assert [(option.id, option.model_id) for option in vocals.quality_options] == [
+        ("balanced", "fake-vocals-001"),
+        ("high_quality", "vocals-hq-001"),
+    ]
 
     standard = modes["standard_stems"]
     assert standard.display_name == "Standard Stems"
     assert standard.stems == ["vocals", "drums", "bass", "other"]
     assert [option.model_id for option in standard.quality_options] == ["fake-standard-001"]
+
+
+def test_the_real_model_keeps_its_inference_parameters_off_the_public_model(
+    real_catalog: ModelCatalog,
+) -> None:
+    """``default_inference_parameters`` reaches the separator, never a response."""
+    entry = real_catalog.get_entry("vocals-hq-001")
+    parameters = entry.default_inference_parameters
+    assert parameters is not None
+    assert parameters["model"]["num_bands"] == 60
+    assert parameters["inference"]["chunk_size"] == 352800
+    assert real_catalog.inference_parameters("vocals-hq-001") == parameters
+    assert "default_inference_parameters" not in entry.model.model_dump()
+    # A model that declares none says so, rather than inventing an empty block.
+    assert real_catalog.inference_parameters("fake-vocals-001") is None
 
 
 def test_single_untiered_model_yields_one_balanced_option(tmp_path: Path) -> None:
