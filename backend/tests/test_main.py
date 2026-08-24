@@ -1,5 +1,6 @@
 """Entry points and application wiring: settings really reach the server."""
 
+import logging
 from collections.abc import Iterator
 from typing import Any
 
@@ -8,6 +9,10 @@ import pytest
 
 from straticate import main
 from straticate.config import Settings, get_settings
+
+
+def _no_server(*_args: Any, **_kwargs: Any) -> None:
+    """Stand in for ``uvicorn.run`` — serve() must be callable without a socket."""
 
 
 @pytest.fixture
@@ -56,7 +61,11 @@ def test_serve_defaults_to_the_documented_loopback_port(
 
     main.serve()
 
-    assert captured == {"host": "127.0.0.1", "port": 8000}
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 8000
+    # Our own root configuration must survive: uvicorn's dictConfig would
+    # replace it.
+    assert captured["log_config"] is None
 
 
 def test_main_module_calls_serve() -> None:
@@ -83,6 +92,38 @@ def test_settings_read_cors_origins_from_the_environment(
 ) -> None:
     monkeypatch.setenv("STRATICATE_CORS_ORIGINS", '["https://one.example","https://two.example"]')
     assert get_settings().cors_origins == ["https://one.example", "https://two.example"]
+
+
+def test_serve_configures_logging_but_create_app_does_not(
+    monkeypatch: pytest.MonkeyPatch, fresh_settings: None
+) -> None:
+    configured: list[str] = []
+    monkeypatch.setattr(main, "configure_logging", configured.append)
+    monkeypatch.setattr(main.uvicorn, "run", _no_server)
+
+    main.create_app()
+    assert configured == [], "building an application must not touch global logging"
+
+    main.serve()
+    assert configured == ["INFO"]
+
+
+def test_caplog_still_captures_after_create_app(caplog: pytest.LogCaptureFixture) -> None:
+    # configure_logging() calls logging.basicConfig(force=True), which removes
+    # every root handler — caplog's included. Building an application must
+    # therefore never call it: this test fails outright (zero records) if the
+    # call moves back into create_app().
+    with caplog.at_level(logging.WARNING, logger="straticate.test"):
+        main.create_app()
+        logging.getLogger("straticate.test").warning("still captured")
+
+    assert [record.message for record in caplog.records] == ["still captured"]
+
+
+def test_module_level_app_is_an_application_instance() -> None:
+    # ``uvicorn straticate.main:app`` is documented in DEVELOPMENT.md and used
+    # by CI; the instance is deliberate, not an accident of import.
+    assert main.app.title == "Straticate"
 
 
 def test_ffmpeg_timeout_is_configurable_and_must_be_positive(

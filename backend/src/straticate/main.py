@@ -103,8 +103,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             process-wide settings loaded from the environment.
 
     Returns:
-        A fully configured :class:`FastAPI` instance with logging, CORS,
-        routers, and error handlers installed.
+        A fully configured :class:`FastAPI` instance with CORS, routers, and
+        error handlers installed.
+
+    **Building an application configures nothing process-global**, logging
+    least of all. :func:`straticate.logging.configure_logging` calls
+    ``logging.basicConfig(force=True)``, which replaces the root logger's
+    handlers for the whole interpreter; doing that here meant every
+    ``create_app()`` — one per test using the ``app`` fixture — tore down
+    whatever the caller had installed, including pytest's ``caplog`` handler.
+    Log configuration belongs to whoever owns the process, so it lives in
+    :func:`serve` (and is uvicorn's business on the uvicorn command line).
 
     Compute devices are detected here rather than in the lifespan: they cannot
     change during a run, and detection never raises (a failing probe only logs
@@ -118,7 +127,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             serve an empty set of separation choices.
     """
     settings = settings or get_settings()
-    configure_logging(settings.log_level)
 
     app = FastAPI(title="Straticate", version=__version__, lifespan=lifespan)
     app.state.settings = settings
@@ -152,14 +160,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 app = create_app()
+"""The ASGI application ``uvicorn straticate.main:app`` serves.
+
+**Deliberately a module-level instance, not a factory.** DEVELOPMENT.md, CI and
+day-to-day development all name ``straticate.main:app``, and ``--factory``
+would be a documented-interface change for no gain: now that
+:func:`create_app` has no process-global side effects, building it at import
+time costs a catalog read and a device probe and changes nothing outside the
+returned object. Tests that want an isolated instance call
+:func:`create_app` themselves (see ``tests/conftest.py``).
+"""
 
 
 def serve() -> None:
-    """Run the application with uvicorn, bound per :class:`Settings`.
+    """Run the application with uvicorn, bound and logging per :class:`Settings`.
 
-    This is what makes ``STRATICATE_HOST`` and ``STRATICATE_PORT`` real: the
-    settings are read here and handed to uvicorn, so
+    This is what makes ``STRATICATE_HOST``, ``STRATICATE_PORT`` and
+    ``STRATICATE_LOG_LEVEL`` real: the settings are read here and applied, so
     ``STRATICATE_PORT=9000 uv run python -m straticate`` listens on 9000.
+
+    Logging is configured **here** rather than in :func:`create_app` because
+    this function owns the process, and ``logging.basicConfig(force=True)``
+    is a process-global act (see :func:`create_app`).
 
     The already-built module-level :data:`app` is passed as an object rather
     than as the ``"straticate.main:app"`` import string: the string form makes
@@ -170,4 +192,5 @@ def serve() -> None:
     uvicorn's own command line (see DEVELOPMENT.md).
     """
     settings = get_settings()
-    uvicorn.run(app, host=settings.host, port=settings.port)
+    configure_logging(settings.log_level)
+    uvicorn.run(app, host=settings.host, port=settings.port, log_config=None)
