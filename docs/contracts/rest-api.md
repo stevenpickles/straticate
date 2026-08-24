@@ -366,6 +366,8 @@ Job error codes:
 | `separation_mode_not_found` | 404 | `mode_id` is not one of the derived separation modes |
 | `quality_option_not_found` | 404 | `quality_id` is not an option of that mode |
 | `device_not_found` | 404 | `device_id` is not a detected compute device |
+| `model_device_unsupported` | 409 | the resolved model's `capabilities` do not include the resolved device's `backend`. `detail` carries `model_id`, `device_id`, `device_backend` and `supported_backends` |
+| `model_weights_missing` | 409 | the resolved model is catalogued but its weights are not installed. `detail` carries `model_id` |
 | `separator_unavailable` | 501 | no separator implementation exists for the resolved model's architecture |
 | `job_not_found` | 404 | unknown `job_id` (get/cancel) |
 | `service_unavailable` | 503 | the job manager is shutting down (create/cancel) |
@@ -373,6 +375,26 @@ Job error codes:
 A malformed create body is the standard `validation_error` (422). References are
 resolved in the order audio → mode → quality → device → separator, so the first
 unresolvable one is what the client is told about.
+
+### Device selection and model capabilities
+
+A model manifest declares which compute backends its weights run on
+(`capabilities`, ARCHITECTURE.md §9), and job creation consults it. The two
+cases differ deliberately:
+
+- **`device_id` was given.** It is honoured or refused with
+  `model_device_unsupported` — never silently swapped for a different device.
+- **`device_id` was `null`** ("let the backend pick"). The first *detected*
+  device the model supports is chosen, still preferring CUDA over CPU. Only when
+  no detected device can run the model at all is `model_device_unsupported`
+  returned.
+
+`model_weights_missing` follows from the same principle: a model whose
+downloadable artifact has not been installed cannot run, and that is knowable at
+create time. Install it with `POST /models/{model_id}/install` and retry; the
+model's `installation` block on `GET /models` says which models need it. Quality
+options are **not** hidden for uninstalled models — a client that wants to
+present an "Install" affordance has everything it needs from `GET /models`.
 
 ## Results, stems, export
 
@@ -579,3 +601,23 @@ own code — never a generic one, and never a code that means something else:
 while decoding fails, and the code arrives in the job's `error.code` (and in
 the `job_failed` WebSocket event), alongside `audio_decode_failed` for input
 that genuinely could not be decoded.
+
+## Codes a running separation can report
+
+These reach a client as a failed job's `error.code` (and in the `job_failed`
+event), not as the status of the request that created the job:
+
+| code | when |
+| --- | --- |
+| `audio_decode_failed` | FFmpeg could not decode the input |
+| `audio_decode_timed_out` | FFmpeg exceeded its bounded run time (above) |
+| `separation_mode_mismatch` | the separator was handed a configuration for a mode it does not serve — a wiring bug, reported rather than silently producing the wrong stems |
+| `compute_device_unavailable` | the device the job resolved to is no longer usable by this process (for example a CUDA runtime that has gone away since detection) |
+| `model_weights_missing` | the weights disappeared between job creation and the run |
+| `model_weights_invalid` | the installed weights do not load into this build's architecture |
+| `model_parameters_invalid` | the model's catalog entry carries inference parameters this build cannot use |
+
+The last three are deployment faults rather than client mistakes, and
+`model_weights_invalid` / `model_parameters_invalid` carry a `500`-shaped status
+if they ever surface on a request (they normally surface at job creation, when
+the separator is first built).

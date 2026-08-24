@@ -223,8 +223,19 @@ Rules:
 - A separator instance is long-lived and runs **one separation at a time**,
   which is what makes `runtime_stats()` unambiguous. Compute that would block
   the event loop is offloaded by the separator itself.
+- **Constructing** one is offloaded by the *registry*, not the separator: a real
+  backend reads hundreds of megabytes of weights on a cache miss, so
+  `SeparatorRegistry.aget()` runs the builder in a worker thread and serializes
+  concurrent misses for the same model behind one lock. `get()` remains for
+  synchronous callers and is documented as blocking; request handlers use
+  `aget`.
 - Implementations: `FakeSeparator` first (see §8), then RoFormer-, MDX/MDXC-,
-  and Demucs-family separators.
+  and Demucs-family separators. The first real one is `RoFormerSeparator`
+  (feature 026): a **vendored**, pinned Mel-Band RoFormer architecture under
+  `inference/roformer/vendor/` plus Straticate's own chunked overlap-add loop.
+  Architecture code that a published checkpoint loads into is pinned source, not
+  a dependency — a dependency's next release can rename a module or reshape a
+  layer, and the first symptom is a state dict that no longer loads.
 - A separator declares nothing about UI; the frontend renders choices from
   model capabilities served by the backend.
 
@@ -282,6 +293,20 @@ validated against the manifest's own pattern before it becomes a path. A model
 whose manifest declares no `artifact` — every built-in separator — is *installed*
 by definition and is never offered as a download. `update` (as distinct from
 remove-then-install) and resumable transfers remain future work.
+
+Two manifest blocks are **retained but private**, carried on the loader's
+`CatalogEntry` rather than on the public `Model`: `artifact` (feature 025 — the
+download URL and the pinned digest) and `default_inference_parameters` (feature
+026 — the checkpoint's own hyperparameters plus its chunking). Only the
+separator registered for that `architecture` knows what the latter means, which
+is what makes adding another checkpoint of a known architecture a pure data
+edit.
+
+A model's `capabilities` are consulted **when a job is created**: an explicit
+`device_id` the model does not support is refused with `model_device_unsupported`
+(409), and a job that pinned no device gets the first detected device the model
+does support. Weights that are catalogued but not installed are likewise refused
+at create time (`model_weights_missing`, 409) rather than failing mid-run.
 
 **User-facing quality tiers** (Fast / Balanced / High Quality) are a mapping
 over catalog entries; users are never asked to choose architectures or
@@ -369,5 +394,13 @@ or a distributed job scheduler unless a concrete requirement emerges: the first
 version is a locally hosted application using the local machine and its GPU.
 
 Normal CI never requires CUDA, a GPU, or multi-gigabyte model downloads — the
-fake separator covers it. Real GPU/model validation is a separate,
-manually-triggered integration tier.
+fake separator covers it, and the real separator's plumbing is tested against a
+synthetic few-kilobyte checkpoint built at test time. Real GPU/model validation
+is a separate, manually-triggered integration tier (`pytest -m integration`).
+
+PyTorch is a runtime dependency from feature 026 onwards, and it is pinned to
+PyTorch's **CPU wheel index** so that this constraint survives contact with it:
+the default PyPI wheel bundles a multi-gigabyte CUDA runtime on Linux, which CI
+would download on every run for a machine with no GPU. Installing a CUDA build
+is one documented command and changes no code, no settings and no API
+(DEVELOPMENT.md, *PyTorch and CUDA*).
