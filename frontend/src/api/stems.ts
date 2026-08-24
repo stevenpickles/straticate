@@ -53,9 +53,17 @@ export function getSeparationResult(jobId: string): Promise<SeparationResult> {
  * Failures are translated into the same {@link ApiError} envelope the JSON
  * helpers raise, so `stem_file_missing` is a code the caller can branch on
  * rather than an opaque HTTP status.
+ *
+ * A stem is a whole audio file, so the transfer is worth cancelling: pass an
+ * `AbortSignal` and aborting it rejects the returned promise and stops the
+ * download, instead of letting it run to completion after the player that
+ * asked for it is gone.
  */
-export async function fetchStemAudio(url: string): Promise<ArrayBuffer> {
-  const response = await fetch(url)
+export async function fetchStemAudio(
+  url: string,
+  signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+  const response = await fetch(url, { signal })
   if (!response.ok) {
     const text = await response.text().catch(() => '')
     throw new ApiError(

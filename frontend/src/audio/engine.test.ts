@@ -27,10 +27,11 @@ function sources(durations: Record<string, number>): StemSource[] {
   }))
 }
 
+/** Loader signature the engine calls: a URL plus a cancellation signal. */
+type StemLoader = (url: string, signal?: AbortSignal) => Promise<ArrayBuffer>
+
 /** A loader that answers each stem URL with bytes of that stem's duration. */
-function loaderFor(
-  durations: Record<string, number>,
-): (url: string) => Promise<ArrayBuffer> {
+function loaderFor(durations: Record<string, number>): StemLoader {
   return (url: string) => {
     const name = url.slice(url.lastIndexOf('/') + 1)
     const duration = durations[name]
@@ -46,6 +47,15 @@ function loaderFor(
   }
 }
 
+/** A promise plus its resolver, for holding a stem download in flight. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settle) => {
+    resolve = settle
+  })
+  return { promise, resolve }
+}
+
 const twoStems = { vocals: 10, instrumental: 10 }
 const fourStems = { vocals: 10, drums: 10, bass: 10, other: 10 }
 
@@ -54,10 +64,7 @@ let engine: StemPlayerEngine
 
 function makeEngine(
   durations: Record<string, number>,
-  options: {
-    state?: string
-    load?: (url: string) => Promise<ArrayBuffer>
-  } = {},
+  options: { state?: string; load?: StemLoader } = {},
 ): StemPlayerEngine {
   context = new FakeAudioContext(options.state ?? 'running')
   return createStemAudioEngine({
@@ -69,10 +76,7 @@ function makeEngine(
 
 async function loadEngine(
   durations: Record<string, number>,
-  options: {
-    state?: string
-    load?: (url: string) => Promise<ArrayBuffer>
-  } = {},
+  options: { state?: string; load?: StemLoader } = {},
 ): Promise<StemPlayerEngine> {
   engine = makeEngine(durations, options)
   await engine.load(sources(durations))
@@ -559,6 +563,254 @@ describe('StemAudioEngine disposal', () => {
     engine = createStemAudioEngine({ createContext })
     engine.dispose()
     expect(createContext).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Regressions from the PR #26 review.
+// ---------------------------------------------------------------------------
+
+describe('StemAudioEngine transport failures (review finding 3)', () => {
+  /** A context whose first `resume()` rejects, as the autoplay policy does. */
+  class RefusingContext extends FakeAudioContext {
+    refuse = true
+
+    override resume(): Promise<void> {
+      this.resumeCount += 1
+      if (this.refuse) {
+        return Promise.reject(new Error('The user gesture was not accepted.'))
+      }
+      this.state = 'running'
+      return Promise.resolve()
+    }
+  }
+
+  it('reports a refused resume without rejecting', async () => {
+    const refusing = new RefusingContext('suspended')
+    engine = createStemAudioEngine({
+      createContext: () => refusing,
+      loadStemAudio: loaderFor(twoStems),
+      lookaheadSeconds: LOOKAHEAD,
+    })
+    await engine.load(sources(twoStems))
+
+    await expect(engine.play()).resolves.toBeUndefined()
+
+    expect(engine.getSnapshot().playing).toBe(false)
+    expect(engine.getSnapshot().error).toBeInstanceOf(Error)
+  })
+
+  it('clears the failure once a later play succeeds', async () => {
+    const refusing = new RefusingContext('suspended')
+    engine = createStemAudioEngine({
+      createContext: () => refusing,
+      loadStemAudio: loaderFor(twoStems),
+      lookaheadSeconds: LOOKAHEAD,
+    })
+    await engine.load(sources(twoStems))
+    await engine.play()
+    expect(engine.getSnapshot().error).not.toBeNull()
+
+    // The user clicks Play again, and this time the gesture is accepted.
+    refusing.refuse = false
+    await engine.play()
+
+    expect(engine.getSnapshot().error).toBeNull()
+    expect(engine.getSnapshot().playing).toBe(true)
+  })
+
+  it('does not let a transport failure erase a load failure', async () => {
+    const refusing = new RefusingContext('suspended')
+    engine = createStemAudioEngine({
+      createContext: () => refusing,
+      // One stem's file is gone; the other plays.
+      loadStemAudio: loaderFor({ vocals: 10 }),
+      lookaheadSeconds: LOOKAHEAD,
+    })
+    await engine.load(sources(twoStems))
+    expect((engine.getSnapshot().error as ApiError).code).toBe(
+      'stem_file_missing',
+    )
+
+    await engine.play()
+    expect(engine.getSnapshot().error).toBeInstanceOf(Error)
+
+    refusing.refuse = false
+    await engine.play()
+
+    // The missing stem has no remedy, so its failure outlives the transient.
+    expect((engine.getSnapshot().error as ApiError).code).toBe(
+      'stem_file_missing',
+    )
+  })
+})
+
+describe('StemAudioEngine never rejects (review finding 4)', () => {
+  /** A context that dies the way a discarded tab's does. */
+  class ClosingContext extends FakeAudioContext {
+    override createGain(): never {
+      throw new Error('AudioContext is closed')
+    }
+  }
+
+  it('turns a context that dies mid-load into an error state', async () => {
+    engine = createStemAudioEngine({
+      createContext: () => new ClosingContext(),
+      loadStemAudio: loaderFor(twoStems),
+    })
+
+    await expect(engine.load(sources(twoStems))).resolves.toBeUndefined()
+
+    expect(engine.getSnapshot().status).toBe('error')
+    expect(engine.getSnapshot().error).toBeInstanceOf(Error)
+  })
+
+  it('turns a context that dies at play time into an error state', async () => {
+    class DyingContext extends FakeAudioContext {
+      dying = false
+
+      override createBufferSource(): FakeSourceNode {
+        if (this.dying) {
+          throw new Error('AudioContext is closed')
+        }
+        return super.createBufferSource()
+      }
+    }
+    const dying = new DyingContext()
+    engine = createStemAudioEngine({
+      createContext: () => dying,
+      loadStemAudio: loaderFor(twoStems),
+    })
+    await engine.load(sources(twoStems))
+    dying.dying = true
+
+    await expect(engine.play()).resolves.toBeUndefined()
+
+    expect(engine.getSnapshot().playing).toBe(false)
+    expect(engine.getSnapshot().error).toBeInstanceOf(Error)
+  })
+
+  it('turns a context that dies at seek time into an error state', async () => {
+    class DyingContext extends FakeAudioContext {
+      dying = false
+
+      override createBufferSource(): FakeSourceNode {
+        if (this.dying) {
+          throw new Error('AudioContext is closed')
+        }
+        return super.createBufferSource()
+      }
+    }
+    const dying = new DyingContext()
+    engine = createStemAudioEngine({
+      createContext: () => dying,
+      loadStemAudio: loaderFor(twoStems),
+    })
+    await engine.load(sources(twoStems))
+    await engine.play()
+    dying.dying = true
+
+    expect(() => {
+      engine.seek(4)
+    }).not.toThrow()
+    expect(engine.getSnapshot().playing).toBe(false)
+    expect(engine.getSnapshot().error).toBeInstanceOf(Error)
+  })
+})
+
+describe('StemAudioEngine cancels downloads (review finding 5)', () => {
+  it('aborts every in-flight stem download on dispose', async () => {
+    const signals: (AbortSignal | undefined)[] = []
+    const held = deferred<ArrayBuffer>()
+    context = new FakeAudioContext()
+    engine = createStemAudioEngine({
+      createContext: () => context,
+      loadStemAudio: (_url, signal) => {
+        signals.push(signal)
+        return held.promise
+      },
+    })
+    const loading = engine.load(sources(fourStems))
+
+    expect(signals).toHaveLength(4)
+    expect(signals.every((signal) => signal?.aborted === false)).toBe(true)
+
+    engine.dispose()
+
+    expect(signals.every((signal) => signal?.aborted === true)).toBe(true)
+    held.resolve(stemBytes(10))
+    await expect(loading).resolves.toBeUndefined()
+  })
+
+  it('aborts the previous downloads when a new load supersedes them', async () => {
+    const signals: (AbortSignal | undefined)[] = []
+    context = new FakeAudioContext()
+    engine = createStemAudioEngine({
+      createContext: () => context,
+      loadStemAudio: (url, signal) => {
+        signals.push(signal)
+        return loaderFor(twoStems)(url)
+      },
+    })
+
+    const first = engine.load(sources(twoStems))
+    const firstSignals = [...signals]
+    const second = engine.load(sources(twoStems))
+
+    expect(firstSignals.every((signal) => signal?.aborted === true)).toBe(true)
+    await Promise.all([first, second])
+    expect(engine.getSnapshot().status).toBe('ready')
+  })
+})
+
+describe('StemAudioEngine load re-entrancy (review finding 6)', () => {
+  it('never lets a superseded load publish its buffers', async () => {
+    const first = deferred<ArrayBuffer>()
+    let call = 0
+    context = new FakeAudioContext()
+    engine = createStemAudioEngine({
+      createContext: () => context,
+      loadStemAudio: () => {
+        call += 1
+        // The first load's two downloads hang; the second load's resolve.
+        return call <= 2 ? first.promise : Promise.resolve(stemBytes(30))
+      },
+    })
+
+    const slow = engine.load(sources({ vocals: 10, instrumental: 10 }))
+    const fast = engine.load(sources({ drums: 30, bass: 30, other: 30 }))
+    await fast
+
+    expect(engine.getSnapshot().stems.map((stem) => stem.name)).toEqual([
+      'drums',
+      'bass',
+      'other',
+    ])
+    expect(engine.getSnapshot().durationSeconds).toBe(30)
+    const afterFast = context.gains.length
+
+    // The superseded load now finishes. It must change nothing.
+    first.resolve(stemBytes(10))
+    await slow
+
+    expect(engine.getSnapshot().stems.map((stem) => stem.name)).toEqual([
+      'drums',
+      'bass',
+      'other',
+    ])
+    expect(engine.getSnapshot().durationSeconds).toBe(30)
+    expect(engine.getSnapshot().status).toBe('ready')
+    expect(context.gains).toHaveLength(afterFast)
+  })
+
+  it('drops the gain nodes of the load it supersedes', async () => {
+    await loadEngine(twoStems)
+    const firstGains = [...context.gains]
+
+    await engine.load(sources(fourStems))
+
+    expect(firstGains.every((gain) => gain.disconnectCount === 1)).toBe(true)
+    expect(engine.getSnapshot().stems).toHaveLength(4)
   })
 })
 

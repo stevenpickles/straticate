@@ -139,3 +139,26 @@
   font-size: 0.9rem;
   color: var(--color-danger);
 }
+
+/* The route out of the inspect phase; always present, whatever the body is. */
+.stem-player-restart {
+  align-self: flex-start;
+  padding: 0.4rem 1rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.stem-player-restart:hover,
+.stem-player-restart:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}

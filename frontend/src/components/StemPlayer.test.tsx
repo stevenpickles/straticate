@@ -4,8 +4,15 @@ import userEvent from '@testing-library/user-event'
 import { StemPlayer } from './StemPlayer'
 import { ApiError } from '../api/client'
 import {
+  AppStateProvider,
+  initialAppState,
+  useAppState,
+  type AppState,
+} from '../state/appState'
+import {
   JobStateProvider,
   initialJobState,
+  useJobState,
   type JobStateValue,
 } from '../state/jobState'
 import type { Job, SeparationResult, Stem } from '../api/types'
@@ -16,7 +23,7 @@ import {
   type StemSource,
 } from '../audio/engine'
 import { FakeAudioContext, stemBytes } from '../test/fakeAudioContext'
-import { sampleJob, sampleJobId } from '../test/fixtures'
+import { sampleAudioFile, sampleJob, sampleJobId } from '../test/fixtures'
 
 /** Every stem in these fixtures is this long, so the readout is predictable. */
 const STEM_SECONDS = 60
@@ -241,15 +248,41 @@ function errorResponse(
   return jsonResponse({ error: { code, message, detail } }, status)
 }
 
+/** Surfaces the workflow phase and the tracked job, for the route-out tests. */
+function WorkflowState() {
+  const { phase } = useAppState()
+  const { job } = useJobState()
+  return (
+    <>
+      <p data-testid="workflow-phase">{phase}</p>
+      <p data-testid="tracked-job">{job?.id ?? 'none'}</p>
+    </>
+  )
+}
+
+/** Application state as it stands in the `inspect` phase. */
+function inspectingState(overrides: Partial<AppState> = {}): AppState {
+  return {
+    ...initialAppState,
+    phase: 'inspect',
+    upload: { status: 'uploaded', file: sampleAudioFile },
+    ...overrides,
+  }
+}
+
 function renderPlayer(
   engine: StemPlayerEngine,
   jobState: Partial<JobStateValue> = { job: completedJob },
+  appState: AppState = inspectingState(),
 ) {
   const createEngine = () => engine
   return render(
-    <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
-      <StemPlayer createEngine={createEngine} />
-    </JobStateProvider>,
+    <AppStateProvider initialState={appState}>
+      <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
+        <StemPlayer createEngine={createEngine} />
+        <WorkflowState />
+      </JobStateProvider>
+    </AppStateProvider>,
   )
 }
 
@@ -272,6 +305,36 @@ async function renderReady(
     expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
   })
   return { engine }
+}
+
+/**
+ * The fake context behind {@link renderReal}. Module-scoped so the tests that
+ * assert on *what was scheduled* can reach it wherever they live.
+ */
+let context: FakeAudioContext
+
+/** Gain values in stem order, which is the engine's node order. */
+function gains(): number[] {
+  return context.gains.map((gain) => gain.gain.value)
+}
+
+/**
+ * Render over the **real** engine with a fake `AudioContext` underneath, so a
+ * test exercises the audio graph the user actually gets rather than a double.
+ */
+async function renderReal(names: readonly string[]): Promise<StemPlayerEngine> {
+  context = new FakeAudioContext()
+  const engine = createStemAudioEngine({
+    createContext: () => context,
+    loadStemAudio: () => Promise.resolve(stemBytes(STEM_SECONDS)),
+    lookaheadSeconds: 0,
+  })
+  stubResultFetch(jsonResponse(resultOver(names)))
+  renderPlayer(engine)
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
+  })
+  return engine
 }
 
 beforeEach(() => {
@@ -484,13 +547,23 @@ describe('StemPlayer transport', () => {
 
   it('seeks the engine and moves the readout', async () => {
     const { engine } = await renderReady(twoStemNames)
+    const slider = screen.getByRole('slider', { name: 'Seek' })
 
-    fireEvent.change(screen.getByRole('slider', { name: 'Seek' }), {
-      target: { value: '18' },
-    })
+    fireEvent.change(slider, { target: { value: '18' } })
+    fireEvent.pointerUp(slider)
 
     expect(engine.seeks).toEqual([18])
     expect(screen.getByText('0:18 / 1:00')).toBeInTheDocument()
+  })
+
+  it('commits a keyboard scrub on key up', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+
+    fireEvent.change(slider, { target: { value: '5' } })
+    fireEvent.keyUp(slider, { key: 'ArrowRight' })
+
+    expect(engine.seeks).toEqual([5])
   })
 
   it('spans the full mix duration', async () => {
@@ -572,30 +645,6 @@ describe('StemPlayer mute and solo', () => {
 // ---------------------------------------------------------------------------
 
 describe('StemPlayer over the real engine', () => {
-  let context: FakeAudioContext
-
-  /** Gain values in stem order, which is the engine's node order. */
-  function gains(): number[] {
-    return context.gains.map((gain) => gain.gain.value)
-  }
-
-  async function renderReal(
-    names: readonly string[],
-  ): Promise<StemPlayerEngine> {
-    context = new FakeAudioContext()
-    const engine = createStemAudioEngine({
-      createContext: () => context,
-      loadStemAudio: () => Promise.resolve(stemBytes(STEM_SECONDS)),
-      lookaheadSeconds: 0,
-    })
-    stubResultFetch(jsonResponse(resultOver(names)))
-    renderPlayer(engine)
-    await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
-    })
-    return engine
-  }
-
   it('silences a muted stem and restores it', async () => {
     await renderReal(fourStemNames)
 
@@ -650,9 +699,9 @@ describe('StemPlayer over the real engine', () => {
     await renderReal(fourStemNames)
     await userEvent.click(screen.getByRole('button', { name: 'Play' }))
 
-    fireEvent.change(screen.getByRole('slider', { name: 'Seek' }), {
-      target: { value: '30' },
-    })
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+    fireEvent.change(slider, { target: { value: '30' } })
+    fireEvent.pointerUp(slider)
 
     const restarted = context.sourcesFrom(4)
     expect(restarted).toHaveLength(4)
@@ -710,6 +759,164 @@ describe('StemPlayer over the real engine', () => {
       screen.getByRole('button', { name: 'Mute instrumental' }),
     ).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Mute vocals' })).toBeEnabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Regressions from the PR #26 review.
+// ---------------------------------------------------------------------------
+
+describe('StemPlayer scrubbing (review finding 1)', () => {
+  /** The `change` events a drag across the bar really produces. */
+  const dragPath = ['6', '13', '21', '28', '34', '41', '47']
+
+  it('commits one seek for a whole drag, not one per input event', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+
+    for (const value of dragPath) {
+      fireEvent.change(slider, { target: { value } })
+    }
+    expect(engine.seeks).toEqual([])
+
+    fireEvent.pointerUp(slider)
+
+    expect(engine.seeks).toEqual([47])
+  })
+
+  it('follows the drag on screen before the seek is committed', async () => {
+    await renderReady(twoStemNames)
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+
+    fireEvent.change(slider, { target: { value: '21' } })
+
+    expect(screen.getByText('0:21 / 1:00')).toBeInTheDocument()
+    expect(slider).toHaveValue('21')
+  })
+
+  it('rebuilds the source graph once per drag, not once per input event', async () => {
+    await renderReal(fourStemNames)
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    // One source per stem for the initial play.
+    expect(context.sources).toHaveLength(4)
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+
+    for (const value of dragPath) {
+      fireEvent.change(slider, { target: { value } })
+    }
+
+    // Nothing was torn down or rescheduled while the pointer was still down:
+    // a rebuild per event would be seven silent 50 ms lookaheads.
+    expect(context.sources).toHaveLength(4)
+
+    fireEvent.pointerUp(slider)
+
+    const restarted = context.sourcesFrom(4)
+    expect(restarted).toHaveLength(4)
+    expect(new Set(restarted.map((source) => source.started?.offset))).toEqual(
+      new Set([47]),
+    )
+    expect(new Set(restarted.map((source) => source.started?.when)).size).toBe(
+      1,
+    )
+  })
+
+  it('treats a pointer up and its mouse up as a single seek', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+
+    fireEvent.change(slider, { target: { value: '12' } })
+    fireEvent.pointerUp(slider)
+    fireEvent.mouseUp(slider)
+    fireEvent.blur(slider)
+
+    expect(engine.seeks).toEqual([12])
+  })
+
+  it('lets the audio clock drive the readout again after the drag', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    const slider = screen.getByRole('slider', { name: 'Seek' })
+
+    fireEvent.change(slider, { target: { value: '30' } })
+    engine.time = 9
+    flushFrame()
+    // Still showing the drag, not the clock.
+    expect(screen.getByText('0:30 / 1:00')).toBeInTheDocument()
+
+    fireEvent.pointerUp(slider)
+    engine.time = 31
+    flushFrame()
+
+    expect(screen.getByText('0:31 / 1:00')).toBeInTheDocument()
+  })
+})
+
+describe('StemPlayer route out of the inspect phase (review finding 2)', () => {
+  it('offers a way to start another separation', async () => {
+    await renderReady(twoStemNames)
+
+    expect(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    ).toBeInTheDocument()
+  })
+
+  it('clears the tracked job and returns to configure', async () => {
+    await renderReady(twoStemNames)
+    expect(screen.getByTestId('workflow-phase')).toHaveTextContent('inspect')
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+
+    expect(screen.getByTestId('workflow-phase')).toHaveTextContent('configure')
+    expect(screen.getByTestId('tracked-job')).toHaveTextContent('none')
+  })
+
+  it.each([
+    [
+      'a 409 for a cancelled job',
+      errorResponse(409, 'result_not_available', 'No result.', {
+        state: 'cancelled',
+      }),
+    ],
+    [
+      'a 404 for a forgotten job',
+      errorResponse(404, 'job_not_found', 'No such job.'),
+    ],
+  ])(
+    'survives %s, so an error is never a dead end',
+    async (_label, response) => {
+      stubResultFetch(response)
+      renderPlayer(new FakeEngine())
+
+      await screen.findByRole('alert')
+
+      expect(
+        screen.getByRole('button', { name: 'Start another separation' }),
+      ).toBeInTheDocument()
+    },
+  )
+
+  it('falls back to file selection when the upload is gone', async () => {
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    renderPlayer(
+      new FakeEngine(),
+      { job: completedJob },
+      {
+        ...initialAppState,
+        phase: 'inspect',
+      },
+    )
+    await screen.findByRole('button', { name: 'Mute vocals' })
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+
+    // Both stores always move together: never a cleared job on a stale phase.
+    expect(screen.getByTestId('workflow-phase')).toHaveTextContent('select')
+    expect(screen.getByTestId('tracked-job')).toHaveTextContent('none')
   })
 })
 

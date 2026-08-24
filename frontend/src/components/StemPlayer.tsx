@@ -1,9 +1,11 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type ChangeEvent,
+  type ReactNode,
 } from 'react'
 import { ApiError } from '../api/client'
 import { getSeparationResult, stemUrl } from '../api/stems'
@@ -14,7 +16,8 @@ import {
   type StemPlayerEngine,
 } from '../audio/engine'
 import { formatDuration } from '../format'
-import { useJobState } from '../state/jobState'
+import { useAppDispatch } from '../state/appState'
+import { useJobDispatch, useJobState } from '../state/jobState'
 import './StemPlayer.css'
 
 /** Envelope-shaped view of any rejection. */
@@ -130,12 +133,18 @@ export interface StemPlayerProps {
  * Playback is an **inspection tool** (ARCHITECTURE.md §13): transport, solo
  * and mute, and nothing that edits audio.
  *
- * Must be rendered under a `JobStateProvider`.
+ * It also carries the route out of the `inspect` phase ("Start another
+ * separation"), because the progress panel that offers the same control is
+ * mounted only for `separate` — see the handler for why that matters.
+ *
+ * Must be rendered under an `AppStateProvider` and a `JobStateProvider`.
  */
 export function StemPlayer({
   createEngine = createStemAudioEngine,
 }: StemPlayerProps = {}) {
   const { job } = useJobState()
+  const jobDispatch = useJobDispatch()
+  const appDispatch = useAppDispatch()
   const jobId = job?.id ?? null
 
   const [result, setResult] = useState<ResultState>({ status: 'idle' })
@@ -228,139 +237,176 @@ export function StemPlayer({
     }
   }, [engine, snapshot.playing])
 
-  const handleSeek = useCallback(
-    (event: ChangeEvent<HTMLInputElement>) => {
-      const seconds = Number(event.target.value)
-      setCurrentTime(seconds)
-      engine?.seek(seconds)
-    },
-    [engine],
-  )
+  // Dragging a range input fires `change` continuously — it *is* the native
+  // `input` event — so seeking on every one of them would stop, discard and
+  // rebuild every source node dozens of times a second, each rebuild opening
+  // a fresh scheduling lookahead. That is audible gapping, not scrubbing. So
+  // the drag only moves the displayed value and the seek is committed once,
+  // on release.
+  const scrubRef = useRef<number | null>(null)
+  const [scrubValue, setScrubValue] = useState<number | null>(null)
 
+  const handleScrub = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const seconds = Number(event.target.value)
+    scrubRef.current = seconds
+    setScrubValue(seconds)
+  }, [])
+
+  const commitScrub = useCallback(() => {
+    const seconds = scrubRef.current
+    if (seconds === null) {
+      return
+    }
+    // The ref, not the state, is what makes a pointerup and its mouseup one
+    // seek: it clears synchronously, before React re-renders.
+    scrubRef.current = null
+    setScrubValue(null)
+    setCurrentTime(seconds)
+    engine?.seek(seconds)
+  }, [engine])
+
+  /**
+   * The route out of the `inspect` phase. It lives here rather than only on
+   * the progress panel because that panel is mounted for `separate` alone:
+   * without this control, opening the results would strand the user in
+   * `inspect` until a page reload.
+   */
+  const startAnother = useCallback(() => {
+    jobDispatch({ type: 'job/clear' })
+    appDispatch({ type: 'results/startAnother' })
+  }, [jobDispatch, appDispatch])
+
+  let body: ReactNode
   if (jobId === null) {
-    return (
-      <section className="stem-player" aria-label="Stem player">
-        <p className="workspace-hint">No separation job is being tracked.</p>
-      </section>
+    body = <p className="workspace-hint">No separation job is being tracked.</p>
+  } else if (result.status === 'error') {
+    body = (
+      <p className="stem-player-error" role="alert">
+        {explainError(result.error)}
+      </p>
+    )
+  } else if (result.status !== 'loaded') {
+    body = (
+      <p className="workspace-hint" role="status">
+        Loading the separation result…
+      </p>
+    )
+  } else {
+    const stems = result.result.stems
+    const stemStates = new Map(snapshot.stems.map((stem) => [stem.name, stem]))
+    const longestStem = stems.reduce(
+      (longest, stem) => Math.max(longest, stem.duration_seconds),
+      0,
+    )
+    const duration =
+      snapshot.durationSeconds > 0 ? snapshot.durationSeconds : longestStem
+    const ready = snapshot.status === 'ready'
+    const engineError =
+      snapshot.error === null ? null : errorInfo(snapshot.error)
+
+    body = (
+      <>
+        {snapshot.status !== 'ready' && snapshot.status !== 'error' && (
+          <p className="workspace-hint" role="status">
+            Decoding stems…
+          </p>
+        )}
+
+        {engineError !== null && (
+          <p className="stem-player-error" role="alert">
+            {explainError(engineError)}
+          </p>
+        )}
+
+        <ul className="stem-player-stems">
+          {stems.map((stem) => {
+            const state = stemStates.get(stem.name)
+            const status = state?.status ?? 'loading'
+            const muted = state?.muted ?? false
+            const soloed = state?.soloed ?? false
+            return (
+              <li className="stem-player-stem" key={stem.name}>
+                <span className="stem-player-stem-name">{stem.name}</span>
+                <span className="stem-player-stem-detail">
+                  {status === 'loaded'
+                    ? formatDuration(stem.duration_seconds)
+                    : status === 'error'
+                      ? 'Unavailable'
+                      : 'Loading…'}
+                </span>
+                <button
+                  type="button"
+                  className="stem-player-toggle"
+                  aria-label={`Mute ${stem.name}`}
+                  aria-pressed={muted}
+                  disabled={status !== 'loaded'}
+                  onClick={() => {
+                    engine?.toggleMute(stem.name)
+                  }}
+                >
+                  Mute
+                </button>
+                <button
+                  type="button"
+                  className="stem-player-toggle"
+                  aria-label={`Solo ${stem.name}`}
+                  aria-pressed={soloed}
+                  disabled={status !== 'loaded'}
+                  onClick={() => {
+                    engine?.toggleSolo(stem.name)
+                  }}
+                >
+                  Solo
+                </button>
+              </li>
+            )
+          })}
+        </ul>
+
+        <div className="stem-player-transport">
+          <button
+            type="button"
+            className="stem-player-play"
+            disabled={!ready}
+            onClick={togglePlayback}
+          >
+            {snapshot.playing ? 'Pause' : 'Play'}
+          </button>
+          <input
+            type="range"
+            className="stem-player-seek"
+            aria-label="Seek"
+            min={0}
+            max={duration}
+            step={0.01}
+            value={Math.min(scrubValue ?? currentTime, duration)}
+            disabled={!ready}
+            onChange={handleScrub}
+            onPointerUp={commitScrub}
+            onMouseUp={commitScrub}
+            onKeyUp={commitScrub}
+            onBlur={commitScrub}
+          />
+          <p className="stem-player-time">
+            {formatDuration(scrubValue ?? currentTime)} /{' '}
+            {formatDuration(duration)}
+          </p>
+        </div>
+      </>
     )
   }
-
-  if (result.status === 'error') {
-    return (
-      <section className="stem-player" aria-label="Stem player">
-        <p className="stem-player-error" role="alert">
-          {explainError(result.error)}
-        </p>
-      </section>
-    )
-  }
-
-  if (result.status !== 'loaded') {
-    return (
-      <section className="stem-player" aria-label="Stem player">
-        <p className="workspace-hint" role="status">
-          Loading the separation result…
-        </p>
-      </section>
-    )
-  }
-
-  const stems = result.result.stems
-  const stemStates = new Map(snapshot.stems.map((stem) => [stem.name, stem]))
-  const longestStem = stems.reduce(
-    (longest, stem) => Math.max(longest, stem.duration_seconds),
-    0,
-  )
-  const duration =
-    snapshot.durationSeconds > 0 ? snapshot.durationSeconds : longestStem
-  const ready = snapshot.status === 'ready'
-  const engineError = snapshot.error === null ? null : errorInfo(snapshot.error)
 
   return (
     <section className="stem-player" aria-label="Stem player">
       <h2 className="stem-player-title">Stems</h2>
-
-      {snapshot.status !== 'ready' && snapshot.status !== 'error' && (
-        <p className="workspace-hint" role="status">
-          Decoding stems…
-        </p>
-      )}
-
-      {engineError !== null && (
-        <p className="stem-player-error" role="alert">
-          {explainError(engineError)}
-        </p>
-      )}
-
-      <ul className="stem-player-stems">
-        {stems.map((stem) => {
-          const state = stemStates.get(stem.name)
-          const status = state?.status ?? 'loading'
-          const muted = state?.muted ?? false
-          const soloed = state?.soloed ?? false
-          return (
-            <li className="stem-player-stem" key={stem.name}>
-              <span className="stem-player-stem-name">{stem.name}</span>
-              <span className="stem-player-stem-detail">
-                {status === 'loaded'
-                  ? formatDuration(stem.duration_seconds)
-                  : status === 'error'
-                    ? 'Unavailable'
-                    : 'Loading…'}
-              </span>
-              <button
-                type="button"
-                className="stem-player-toggle"
-                aria-label={`Mute ${stem.name}`}
-                aria-pressed={muted}
-                disabled={status !== 'loaded'}
-                onClick={() => {
-                  engine?.toggleMute(stem.name)
-                }}
-              >
-                Mute
-              </button>
-              <button
-                type="button"
-                className="stem-player-toggle"
-                aria-label={`Solo ${stem.name}`}
-                aria-pressed={soloed}
-                disabled={status !== 'loaded'}
-                onClick={() => {
-                  engine?.toggleSolo(stem.name)
-                }}
-              >
-                Solo
-              </button>
-            </li>
-          )
-        })}
-      </ul>
-
-      <div className="stem-player-transport">
-        <button
-          type="button"
-          className="stem-player-play"
-          disabled={!ready}
-          onClick={togglePlayback}
-        >
-          {snapshot.playing ? 'Pause' : 'Play'}
-        </button>
-        <input
-          type="range"
-          className="stem-player-seek"
-          aria-label="Seek"
-          min={0}
-          max={duration}
-          step={0.01}
-          value={Math.min(currentTime, duration)}
-          disabled={!ready}
-          onChange={handleSeek}
-        />
-        <p className="stem-player-time">
-          {formatDuration(currentTime)} / {formatDuration(duration)}
-        </p>
-      </div>
+      {body}
+      <button
+        type="button"
+        className="stem-player-restart"
+        onClick={startAnother}
+      >
+        Start another separation
+      </button>
     </section>
   )
 }

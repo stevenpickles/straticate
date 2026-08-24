@@ -87,12 +87,16 @@ output inspectable and closes the second-to-last gap in milestone M1.
       need not edit `Workspace.tsx`, `appState.tsx` or `index.css`.
 - [x] Resources are released on unmount: sources stopped, gain nodes
       disconnected, context closed.
+- [x] Scrubbing commits **one** seek per drag, not one per input event, so the
+      source graph is rebuilt once.
+- [x] The `inspect` phase is never a dead end: the route back to another
+      separation survives the phase change, in every state of the player.
 - [x] `index.css` untouched; `npm run format:check` · `lint` · `typecheck` ·
-      `test` · `build` all green (421 frontend tests).
+      `test` · `build` all green (448 frontend tests).
 
 ## Required tests
 
-- `audio/engine.test.ts` (43 tests) — against an injected fake `AudioContext`
+- `audio/engine.test.ts` (53 tests) — against an injected fake `AudioContext`
   that records scheduled start times, offsets, gain values and node
   connect/disconnect. Covers: loading two and four stems with one gain node
   each wired to the destination; the longest stem as the transport duration; a
@@ -110,7 +114,7 @@ output inspectable and closes the second-to-last gap in milestone M1.
   prior mutes), solo overriding mute, level scaling, and unknown stem names;
   subscribe/unsubscribe and snapshot stability; and disposal — sources stopped,
   nodes disconnected, context closed, idempotent, and inert afterwards.
-- `components/StemPlayer.test.tsx` (30 tests) — with a recording fake engine
+- `components/StemPlayer.test.tsx` (41 tests) — with a recording fake engine
   for intent, and with the **real** engine over the fake `AudioContext` for
   semantics. Covers: a row per stem for a two-stem and a four-stem result; the
   stem URLs the engine is asked to load; a stem marked unavailable; the result
@@ -125,7 +129,7 @@ output inspectable and closes the second-to-last gap in milestone M1.
   starting together, a seek restarting them together, a suspended context
   resumed from the click, a missing stem reported while the rest still play,
   and disposal on unmount.
-- `api/stems.test.ts` (11 tests) — URL construction and percent-encoding for
+- `api/stems.test.ts` (13 tests) — URL construction and percent-encoding for
   both the job ID and the stem name; the result fetch and its 409 `detail`,
   404 and four-stem payloads; stem bytes; and `stem_file_missing` and
   non-JSON failures both surfacing as `ApiError`.
@@ -140,10 +144,73 @@ output inspectable and closes the second-to-last gap in milestone M1.
 - `components/Workspace.test.tsx` — the `inspect` phase mounts both the stem
   player and the export panel and renders the stem rows.
 
+Regressions for the PR review findings, each failing against the code as first
+written: a seven-event drag producing **one** `seek` and **one** source-graph
+rebuild (counted on the fake context) rather than one per event; the drag
+following the pointer on screen before it commits; a pointerup and its mouseup
+counting once; the route out of `inspect` present in the playable, 409 and 404
+states, clearing the tracked job and landing on `configure` (or `select` with
+no upload); the whole `complete → inspect → configure` round trip through
+`Workspace`; a refused `resume()` reported and then cleared by a later
+successful play, without erasing a load failure; `load()`/`play()`/`seek()`
+surviving a context that dies mid-flight; `dispose()` and a superseding
+`load()` aborting every in-flight download; and a superseded `load()` unable to
+publish its buffers or orphan its gain nodes.
+
 Every test drives React with `findBy*`/`waitFor`/`act`; animation frames are
 stubbed with a hand-driven queue. Nothing waits on wall-clock time.
 
 ## Notes / decisions
+
+### PR review findings (PR #26)
+
+Seven findings, all fixed in-branch with regressions that fail against the code
+as first written.
+
+1. **Scrubbing rebuilt the source graph on every input event.** React's
+   `onChange` on `<input type="range">` *is* the native `input` event, so it
+   fires continuously while dragging; seeking on each one stopped, discarded
+   and recreated every source dozens of times a second, each rebuild opening a
+   fresh 50 ms lookahead — audible gapping, not scrubbing. The drag now moves
+   only the displayed value and the seek is **committed once, on release**
+   (`pointerup`/`mouseup`/`keyup`/`blur`). A ref that clears synchronously
+   makes a pointerup and its mouseup one seek, the same idiom 011 and 017 use
+   for double-submit.
+2. **The `inspect` phase was a dead end.** "Start another separation" lived
+   only on `SeparationProgress`, which is mounted for `separate` alone, so
+   opening the results stranded the user until a page reload — contradicting
+   this feature's own acceptance criterion. The control now also lives in
+   `StemPlayer`, outside its body switch, so it is present in the loading,
+   error and playable states alike. `Workspace.test.tsx` walks the whole round
+   trip (complete → view results → start another → configure) through the real
+   components and reducers.
+3. **A transient `resume()` failure stuck forever.** An autoplay-policy
+   rejection was written to the engine's single `error` field and nothing ever
+   cleared it, so the banner outlived the click that fixed it. The engine now
+   separates `transportError` (cleared by the next `play()`) from `loadError`
+   (no remedy but another load); the snapshot shows the transport failure while
+   it stands and falls back to the load failure — so a missing stem is *not*
+   erased by a successful retry.
+4. **`load()` and `play()` could reject**, against their documented contract
+   and the `void instance.load(...)` the component relies on: the post-`await`
+   graph wiring and `startSources` were outside any `try`, and a context the
+   browser closed (tab discard, memory pressure) throws there. Both now catch
+   and land the failure in the snapshot; `seek()` and `stopSources()` too.
+5. **`dispose()` left downloads running.** A stem is a whole audio file, so a
+   four-stem teardown leaked four full transfers — twice over under React
+   StrictMode's double-invoked mount effect. `fetchStemAudio` takes an
+   `AbortSignal`, the engine threads one through `loadStemAudio`, and both
+   `dispose()` and a superseding `load()` abort it.
+6. **`load()` was not re-entrancy-safe.** It reassigned `this.entries` up
+   front, then wired the *first* call's buffers onto the *second* call's
+   entries after the await. It is now generation-guarded — entries held in a
+   local, results published only while no later load has started — and tears
+   down the previous graph instead of orphaning its gain nodes.
+7. **`startAnother` dispatched to two stores with mismatched guards.**
+   `job/clear` always applied while `results/startAnother` was a no-op without
+   an uploaded file, which would clear the job while leaving the phase behind —
+   another unrecoverable state. The reducer now always transitions, falling
+   back to `select` when there is no file to configure.
 
 ### Component ownership from now on
 
@@ -311,6 +378,11 @@ otherwise untouched.
   or `error`; there is no byte-level progress bar.
 - **The playhead does not survive a phase change.** Leaving `inspect` disposes
   the engine, so returning starts from zero and re-downloads the stems.
+- **The scrubber commits on release, not continuously.** That is what stops the
+  source graph being rebuilt per input event, but it also means there is no
+  scrub-while-playing preview: the audio jumps once, when the pointer is let
+  go. A preview would need a separate short-lived source, which is out of scope
+  here.
 - **`stem_not_found` is not specially phrased.** The player only ever asks for
   stems the result listed, so that code cannot occur here; it falls through to
   the envelope's own message.

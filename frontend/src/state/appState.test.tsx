@@ -368,10 +368,25 @@ describe('appReducer results slice', () => {
     expect(state.configure.create).toEqual({ status: 'idle' })
   })
 
-  it('results/startAnother is ignored when no file is uploaded', () => {
+  it('results/startAnother falls back to select when no file is uploaded', () => {
+    // It is the escape hatch out of a finished job, so it always moves the
+    // workflow: its dispatcher pairs it with an unconditional `job/clear`,
+    // and a no-op here would strand the user on a phase with no job.
     const state = { ...initialAppState, phase: 'separate' as const }
-    expect(appReducer(state, { type: 'results/startAnother' })).toBe(state)
+    const next = appReducer(state, { type: 'results/startAnother' })
+    expect(next.phase).toBe<WorkflowPhase>('select')
   })
+
+  it.each<WorkflowPhase>(['separate', 'inspect', 'export'])(
+    'results/startAnother always transitions, from the %s phase',
+    (phase) => {
+      const next = appReducer(
+        { ...separating, phase },
+        { type: 'results/startAnother' },
+      )
+      expect(next.phase).toBe<WorkflowPhase>('configure')
+    },
+  )
 })
 
 describe('useAppState / useAppDispatch', () => {

@@ -27,6 +27,13 @@
  * this injection is what makes the engine testable at all: tests pass a fake
  * context that records scheduled start times, offsets, gain values and node
  * connections, and assert on what was *scheduled* rather than on sound.
+ *
+ * **Failure and teardown.** `load()` and `play()` never reject — every
+ * failure, including a context the browser closed underneath us, lands in the
+ * snapshot — so callers may `void` them. `dispose()` aborts any stem download
+ * still in flight rather than letting whole-file transfers outlive the graph,
+ * and `load()` is generation-guarded so two overlapping calls cannot cross
+ * their buffers.
  */
 
 import { fetchStemAudio } from '../api/stems'
@@ -126,7 +133,11 @@ export interface StemEngineSnapshot {
   readonly playing: boolean
   /** Longest stem duration in seconds — the transport's full extent. */
   readonly durationSeconds: number
-  /** The first load failure, or `null` when every stem loaded. */
+  /**
+   * The failure worth showing, or `null`. A transport failure (a rejected
+   * `resume()`) shadows a load failure while it stands and is cleared by the
+   * next `play()`; a load failure survives until the next `load()`.
+   */
   readonly error: unknown
 }
 
@@ -135,9 +146,17 @@ export interface StemEngineSnapshot {
  * can substitute any other object with the same shape.
  */
 export interface StemPlayerEngine {
-  /** Fetch and decode every stem. Never rejects: failures land in the snapshot. */
+  /**
+   * Fetch and decode every stem. **Never rejects** — every failure, including
+   * a context the browser closed underneath us, lands in the snapshot — so a
+   * caller may `void` the result.
+   */
   load(sources: readonly StemSource[]): Promise<void>
-  /** Resume the context if suspended, then start every stem together. */
+  /**
+   * Resume the context if suspended, then start every stem together.
+   * **Never rejects**, for the same reason {@link StemPlayerEngine.load}
+   * does not.
+   */
   play(): Promise<void>
   /** Stop playback, keeping the playhead where it is. */
   pause(): void
@@ -159,7 +178,10 @@ export interface StemPlayerEngine {
   getSnapshot(): StemEngineSnapshot
   /** Subscribe to snapshot changes; returns an unsubscribe function. */
   subscribe(listener: () => void): () => void
-  /** Stop sources, disconnect nodes, and close the context. Idempotent. */
+  /**
+   * Stop sources, disconnect nodes, abort any in-flight stem download, and
+   * close the context. Idempotent.
+   */
   dispose(): void
 }
 
@@ -170,8 +192,16 @@ export interface StemAudioEngineOptions {
    * a fake, because jsdom has no Web Audio API.
    */
   readonly createContext?: () => AudioEngineContext
-  /** Fetches one stem's bytes. Defaults to the typed stem client. */
-  readonly loadStemAudio?: (url: string) => Promise<ArrayBuffer>
+  /**
+   * Fetches one stem's bytes. Defaults to the typed stem client. The
+   * `signal` is aborted by {@link StemAudioEngine.dispose} and by a
+   * superseding {@link StemAudioEngine.load}, so teardown does not leave
+   * whole-stem downloads running.
+   */
+  readonly loadStemAudio?: (
+    url: string,
+    signal?: AbortSignal,
+  ) => Promise<ArrayBuffer>
   /**
    * How far ahead of `currentTime` playback is scheduled, in seconds. Small
    * enough to feel instant, large enough that every source is created before
@@ -222,7 +252,10 @@ function clamp(value: number, min: number, max: number): number {
  */
 export class StemAudioEngine implements StemPlayerEngine {
   private readonly createContext: () => AudioEngineContext
-  private readonly loadStemAudio: (url: string) => Promise<ArrayBuffer>
+  private readonly loadStemAudio: (
+    url: string,
+    signal?: AbortSignal,
+  ) => Promise<ArrayBuffer>
   private readonly lookaheadSeconds: number
 
   private context: AudioEngineContext | null = null
@@ -230,10 +263,22 @@ export class StemAudioEngine implements StemPlayerEngine {
   private readonly listeners = new Set<() => void>()
 
   private status: StemEngineStatus = 'idle'
-  private error: unknown = null
+  /** The failure that made stems unplayable; survives transport commands. */
+  private loadError: unknown = null
+  /**
+   * The failure of the *last* transport command (a rejected `resume()`, a
+   * context the browser closed). Cleared by the next `play()`, because a
+   * later attempt that works is the answer to an earlier one that did not.
+   */
+  private transportError: unknown = null
   private durationSeconds = 0
   private playing = false
   private disposed = false
+
+  /** Bumped by every `load()`, so a superseded one can never publish. */
+  private loadGeneration = 0
+  /** Aborts the in-flight stem downloads of the current `load()`. */
+  private loadAbort: AbortController | null = null
 
   /** Context time the running sources were scheduled to start at. */
   private scheduledStart = 0
@@ -255,7 +300,17 @@ export class StemAudioEngine implements StemPlayerEngine {
     if (this.disposed) {
       return
     }
-    this.entries = sources.map((source) => ({
+    // `load` is public, so two calls can overlap. Everything below belongs to
+    // *this* generation: the entries are held in a local and the results are
+    // published only while no later load has started. Without that, the first
+    // call's buffers land on the second call's stem names.
+    const generation = ++this.loadGeneration
+    this.teardownGraph()
+    this.loadAbort?.abort()
+    const abort = new AbortController()
+    this.loadAbort = abort
+
+    const entries: StemEntry[] = sources.map((source) => ({
       name: source.name,
       url: source.url,
       status: 'loading',
@@ -268,14 +323,15 @@ export class StemAudioEngine implements StemPlayerEngine {
       audible: true,
       level: 1,
     }))
-    this.status = this.entries.length === 0 ? 'error' : 'loading'
-    this.error =
-      this.entries.length === 0 ? new Error('No stems to play') : null
+    this.entries = entries
+    this.status = entries.length === 0 ? 'error' : 'loading'
+    this.loadError = entries.length === 0 ? new Error('No stems to play') : null
+    this.transportError = null
     this.durationSeconds = 0
     this.position = 0
     this.playing = false
     this.notify()
-    if (this.entries.length === 0) {
+    if (entries.length === 0) {
       return
     }
 
@@ -284,17 +340,15 @@ export class StemAudioEngine implements StemPlayerEngine {
       context = this.ensureContext()
     } catch (reason) {
       // A browser (or jsdom) with no Web Audio API. Nothing is playable.
-      this.status = 'error'
-      this.error = reason
-      this.notify()
+      this.failLoad(generation, reason)
       return
     }
 
     // Fetch and decode concurrently…
     const buffers = await Promise.all(
-      this.entries.map(async (entry) => {
+      entries.map(async (entry) => {
         try {
-          const bytes = await this.loadStemAudio(entry.url)
+          const bytes = await this.loadStemAudio(entry.url, abort.signal)
           return await context.decodeAudioData(bytes)
         } catch (reason) {
           entry.status = 'error'
@@ -303,28 +357,37 @@ export class StemAudioEngine implements StemPlayerEngine {
         }
       }),
     )
-    if (this.disposed) {
+    if (this.disposed || generation !== this.loadGeneration) {
       return
     }
-    // …but wire the graph in stem order, so the mixer's node order is the
-    // result's stem order however the network happened to interleave.
-    this.entries.forEach((entry, index) => {
-      const buffer = buffers[index]
-      if (buffer === undefined || buffer === null) {
-        return
-      }
-      const gain = context.createGain()
-      gain.connect(context.destination)
-      entry.buffer = buffer
-      entry.gain = gain
-      entry.status = 'loaded'
-    })
 
-    const loaded = this.entries.filter((entry) => entry.status === 'loaded')
+    try {
+      // …but wire the graph in stem order, so the mixer's node order is the
+      // result's stem order however the network happened to interleave.
+      entries.forEach((entry, index) => {
+        const buffer = buffers[index]
+        if (buffer === undefined || buffer === null) {
+          return
+        }
+        const gain = context.createGain()
+        gain.connect(context.destination)
+        entry.buffer = buffer
+        entry.gain = gain
+        entry.status = 'loaded'
+      })
+    } catch (reason) {
+      // The browser can close a context underneath us (tab discard, memory
+      // pressure) and every node call then throws. The contract says `load`
+      // never rejects, so this is an error state, not an unhandled rejection.
+      this.failLoad(generation, reason)
+      return
+    }
+
+    const loaded = entries.filter((entry) => entry.status === 'loaded')
     // One missing stem must not silence the rest, but it must still be
     // reported: the player shows the remaining stems *and* the failure.
-    this.error =
-      this.entries.find((entry) => entry.error !== null)?.error ?? null
+    this.loadError =
+      entries.find((entry) => entry.error !== null)?.error ?? null
     this.status = loaded.length > 0 ? 'ready' : 'error'
     this.durationSeconds = loaded.reduce(
       (longest, entry) => Math.max(longest, entry.buffer?.duration ?? 0),
@@ -338,23 +401,24 @@ export class StemAudioEngine implements StemPlayerEngine {
     if (this.disposed || this.playing || this.status !== 'ready') {
       return
     }
-    const context = this.ensureContext()
-    if (context.state === 'suspended') {
-      // Autoplay policy: the context only starts from a user gesture, and
-      // `play()` is always reached from one.
-      try {
+    // This attempt answers the last one: an autoplay-policy rejection the
+    // user has since satisfied with a click must not stay on screen.
+    this.transportError = null
+    try {
+      const context = this.ensureContext()
+      if (context.state === 'suspended') {
+        // Autoplay policy: the context only starts from a user gesture, and
+        // `play()` is always reached from one.
         await context.resume()
-      } catch (reason) {
-        this.error = reason
-        this.notify()
-        return
       }
+      if (!this.disposed && !this.playing) {
+        const offset = this.position >= this.durationSeconds ? 0 : this.position
+        this.startSources(offset)
+      }
+    } catch (reason) {
+      this.transportError = reason
+      this.playing = false
     }
-    if (this.disposed || this.playing) {
-      return
-    }
-    const offset = this.position >= this.durationSeconds ? 0 : this.position
-    this.startSources(offset)
     this.notify()
   }
 
@@ -375,9 +439,15 @@ export class StemAudioEngine implements StemPlayerEngine {
     }
     const target = clamp(seconds, 0, this.durationSeconds)
     if (this.playing) {
-      // An AudioBufferSourceNode is single-use: seeking means new sources,
-      // started together at one new time with one new offset.
-      this.startSources(target)
+      try {
+        // An AudioBufferSourceNode is single-use: seeking means new sources,
+        // started together at one new time with one new offset.
+        this.startSources(target)
+      } catch (reason) {
+        this.transportError = reason
+        this.playing = false
+        this.position = target
+      }
     } else {
       this.position = target
     }
@@ -452,22 +522,52 @@ export class StemAudioEngine implements StemPlayerEngine {
       return
     }
     this.disposed = true
-    this.stopSources()
-    for (const entry of this.entries) {
-      entry.gain?.disconnect()
-      entry.gain = null
-      entry.buffer = null
-    }
+    // Downloads outlive the graph unless they are cancelled: a four-stem job
+    // is four whole-file transfers, and React's double-invoked mount effect
+    // starts the whole set twice in development.
+    this.loadAbort?.abort()
+    this.loadAbort = null
+    this.teardownGraph()
     this.playing = false
     this.status = 'idle'
+    this.loadError = null
+    this.transportError = null
     this.snapshot = IDLE_SNAPSHOT
     this.listeners.clear()
     const context = this.context
     this.context = null
     if (context !== null) {
-      void Promise.resolve(context.close()).catch(() => {
-        // Closing an already-closed context rejects; nothing to do about it.
-      })
+      try {
+        void Promise.resolve(context.close()).catch(() => {
+          // Closing an already-closed context rejects; nothing to do.
+        })
+      } catch {
+        // …and some browsers throw synchronously instead.
+      }
+    }
+  }
+
+  /** Record a failure that made a whole load unusable. */
+  private failLoad(generation: number, reason: unknown): void {
+    if (this.disposed || generation !== this.loadGeneration) {
+      return
+    }
+    this.status = 'error'
+    this.loadError = reason
+    this.notify()
+  }
+
+  /** Stop every source and drop every gain node the last load built. */
+  private teardownGraph(): void {
+    this.stopSources()
+    for (const entry of this.entries) {
+      try {
+        entry.gain?.disconnect()
+      } catch {
+        // A closed context refuses; the node is unreachable either way.
+      }
+      entry.gain = null
+      entry.buffer = null
     }
   }
 
@@ -522,10 +622,11 @@ export class StemAudioEngine implements StemPlayerEngine {
       source.onended = null
       try {
         source.stop()
+        source.disconnect()
       } catch {
-        // Stopping a source that never started (or already ended) throws.
+        // Stopping a source that never started (or already ended) throws,
+        // and so does touching a node whose context the browser closed.
       }
-      source.disconnect()
       entry.source = null
     }
   }
@@ -574,7 +675,10 @@ export class StemAudioEngine implements StemPlayerEngine {
       status: this.status,
       playing: this.playing,
       durationSeconds: this.durationSeconds,
-      error: this.error,
+      // A transient transport failure shadows a load failure while it stands
+      // and clears on the next transport command; a load failure has no such
+      // remedy and survives until the next load.
+      error: this.transportError ?? this.loadError,
       stems: this.entries.map((entry) => ({
         name: entry.name,
         status: entry.status,

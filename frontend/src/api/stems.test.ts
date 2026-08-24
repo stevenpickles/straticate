@@ -132,8 +132,39 @@ describe('fetchStemAudio', () => {
     const url = stemUrl(sampleJobId, 'vocals')
     const buffer = await fetchStemAudio(url)
 
-    expect(fetchMock).toHaveBeenCalledWith(url)
+    expect(fetchMock).toHaveBeenCalledWith(url, { signal: undefined })
     expect(new Uint8Array(buffer)).toEqual(bytes)
+  })
+
+  it('passes the abort signal through to fetch', async () => {
+    const fetchMock = stubFetch(
+      new Response(new Uint8Array([1]), { status: 200 }),
+    )
+    const controller = new AbortController()
+
+    await fetchStemAudio(stemUrl(sampleJobId, 'vocals'), controller.signal)
+
+    expect(fetchMock).toHaveBeenCalledWith(expect.any(String), {
+      signal: controller.signal,
+    })
+  })
+
+  it('rejects when the signal is already aborted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit) => {
+        if (init?.signal?.aborted === true) {
+          return Promise.reject(new DOMException('Aborted', 'AbortError'))
+        }
+        return Promise.resolve(new Response(new Uint8Array([1])))
+      }),
+    )
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(
+      fetchStemAudio(stemUrl(sampleJobId, 'vocals'), controller.signal),
+    ).rejects.toThrow(/Aborted/)
   })
 
   it('rejects with a typed ApiError when the stem file is gone', async () => {
