@@ -4,6 +4,11 @@ import { createJob } from '../api/jobs'
 import { listSeparationModes } from '../api/modes'
 import { useAppDispatch, useAppState } from '../state/appState'
 import { useJobDispatch } from '../state/jobState'
+import { ModelInstallPanel } from './ModelInstallPanel'
+import {
+  startBlockedReason,
+  useModelInstallation,
+} from './useModelInstallation'
 import './SeparationOptions.css'
 
 /** Fallback message for a rejection that is not an {@link ApiError}. */
@@ -19,6 +24,13 @@ function errorInfo(reason: unknown): { code: string; message: string } {
     : UNKNOWN_ERROR
 }
 
+/**
+ * DOM id of the sentence explaining why "Start separation" is disabled; the
+ * button points at it with `aria-describedby`, so the reason is announced and
+ * not merely visible.
+ */
+const START_REASON_ID = 'separation-start-reason'
+
 /** DOM id of the radio input for `kind`/`id`, and of its description. */
 function optionId(kind: string, id: string): string {
   return `separation-${kind}-${id}`
@@ -32,6 +44,14 @@ function optionId(kind: string, id: string): string {
  * names, stem lists and tier labels alike. The component knows nothing about
  * how many stems a mode has or which tiers exist (ARCHITECTURE.md §9), so a
  * catalog gaining a mode, a stem or a tier needs no change in this file.
+ *
+ * A tier's model may still need its weights: they are never shipped in the
+ * repository (ARCHITECTURE.md §9), and since feature 032 no development
+ * fixture stands in for one. When the selected tier's model reports weights it
+ * does not have, `<ModelInstallPanel>` says so with the download size and
+ * offers to install it, and "Start separation" is disabled with a visible,
+ * announced reason until the weights are there. Everything else on this screen
+ * stays usable while a download runs — the transfer belongs to the backend.
  *
  * Starting a separation posts the selection to `POST /api/v1/jobs` **without**
  * a `device_id`, letting the backend pick the best compute device (its
@@ -72,9 +92,33 @@ export function SeparationOptions() {
     modes.status === 'loaded'
       ? modes.modes.find((mode) => mode.id === modeId)
       : undefined
+  const selectedOption = selectedMode?.quality_options.find(
+    (option) => option.id === qualityId,
+  )
+
+  // Each tier names the model backing it, and a catalogued model is not
+  // necessarily a ready one: weights are a download (ARCHITECTURE.md §9).
+  const installation = useModelInstallation(selectedOption?.model_id ?? null)
+
+  // The single question "may a separation start?", asked of the whole handle:
+  // an unread model is not a ready one, so this also covers the round trip
+  // right after entering the step or switching mode.
+  const blockedReason = startBlockedReason(installation)
+
+  // Weights can vanish between the check and the job, so `POST /jobs` can
+  // still answer `model_weights_missing`. The install panel renders that
+  // answer as the actionable state, and the hook drops it as soon as a read
+  // supersedes it — so a raw duplicate here would only ever be stale.
+  const weightsMissing =
+    create.status === 'error' && create.code === 'model_weights_missing'
+
   const creating = create.status === 'creating'
   const canStart =
-    !creating && audioId !== null && modeId !== null && qualityId !== null
+    !creating &&
+    audioId !== null &&
+    modeId !== null &&
+    qualityId !== null &&
+    blockedReason === null
 
   const start = () => {
     // The ref, not `create.status`, is what makes a double click a single
@@ -96,6 +140,15 @@ export function SeparationOptions() {
       })
       .catch((reason: unknown) => {
         dispatch({ type: 'configure/createFailed', ...errorInfo(reason) })
+        if (
+          reason instanceof ApiError &&
+          reason.code === 'model_weights_missing'
+        ) {
+          // The record we based the check on is stale; hand the message to
+          // the panel and re-read, so what the user sees next is the real
+          // state with the install offered.
+          installation.noteWeightsMissing(reason.message)
+        }
       })
       .finally(() => {
         creatingRef.current = false
@@ -194,17 +247,29 @@ export function SeparationOptions() {
             </fieldset>
           )}
 
-          <button
-            type="button"
-            className="separation-options-start"
-            disabled={!canStart}
-            aria-busy={creating}
-            onClick={start}
-          >
-            Start separation
-          </button>
+          <ModelInstallPanel installation={installation} />
 
-          {create.status === 'error' && (
+          <div className="separation-options-start-row">
+            <button
+              type="button"
+              className="separation-options-start"
+              disabled={!canStart}
+              aria-busy={creating}
+              aria-describedby={
+                blockedReason === null ? undefined : START_REASON_ID
+              }
+              onClick={start}
+            >
+              Start separation
+            </button>
+            {blockedReason !== null && (
+              <p className="separation-options-hint" id={START_REASON_ID}>
+                {blockedReason}
+              </p>
+            )}
+          </div>
+
+          {create.status === 'error' && !weightsMissing && (
             <p className="separation-options-error" role="alert">
               {create.message}
             </p>

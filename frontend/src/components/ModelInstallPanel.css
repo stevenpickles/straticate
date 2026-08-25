@@ -1,0 +1,82 @@
+/* Styles for ModelInstallPanel.tsx, imported by that module (feature 035). */
+
+.model-install {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  background-color: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+}
+
+.model-install-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.model-install-note {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.model-install-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.model-install-ready {
+  color: var(--color-text-muted);
+}
+
+.model-install-error {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--color-danger);
+}
+
+.model-install-start {
+  align-self: flex-start;
+  padding: 0.4rem 1rem;
+  font: inherit;
+  font-size: 0.9rem;
+  color: var(--color-text);
+  background-color: transparent;
+  border: 1px solid var(--color-accent);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.model-install-start:hover:enabled,
+.model-install-start:focus-visible:enabled {
+  background-color: color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+
+.model-install-start:disabled {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  cursor: default;
+}
+
+.model-install-secondary {
+  padding: 0.3rem 0.8rem;
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  cursor: pointer;
+}
+
+.model-install-secondary:hover,
+.model-install-secondary:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
