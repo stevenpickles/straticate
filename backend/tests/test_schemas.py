@@ -54,7 +54,7 @@ MODEL_JSON: dict[str, Any] = {
     "separation_mode": "vocals",
     "stems": ["vocals", "instrumental"],
     "sample_rate": 44100,
-    "requirements": {"recommended_vram_mb": 8192},
+    "requirements": {"recommended_vram_mb": 6144, "minimum_vram_mb": 4096},
     "capabilities": {"cuda": True, "cpu": True},
 }
 
