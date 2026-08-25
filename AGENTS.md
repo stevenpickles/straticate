@@ -75,8 +75,16 @@ unmerged implementation.
 
 Before opening your PR, from the relevant directory:
 
-- Backend: `uv run ruff format --check .` · `uv run ruff check .` ·
-  `uv run pyright` · `uv run pytest` — all green.
+- Backend: `uv run --extra torch ruff format --check .` ·
+  `uv run --extra torch ruff check .` · `uv run --extra torch pyright` ·
+  `uv run --extra torch pytest` — all green.
+  **`--extra torch` on every one of them is not optional.** Since feature 034
+  PyTorch is an optional extra, and `uv run` re-syncs the environment to the
+  extras it is given — so a bare `uv run pytest` *uninstalls* torch and then
+  fails at collection in every module that imports it. The `backend` CI job
+  passes the flag on every step for the same reason. (The application itself
+  runs fine without it; that is the point of 034. It is the *test suite* that
+  needs it, because it covers the real separator.)
 - Frontend: `npm run format:check` · `npm run lint` · `npm run typecheck` ·
   `npm test` · `npm run build` — all green.
 - Tests exist for new behavior (see the test strategy in
