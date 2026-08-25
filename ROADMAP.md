@@ -34,8 +34,29 @@ model download, real chunk progress, real telemetry. Features 025–026.
 
 ### M3 — v0.1.0 release
 
-Fast + HQ vocal models, 4-stem model, capability-driven mode selection,
-production build, release automation. Release PR `dev → main`, tag `v0.1.0`.
+**Redefined 2026-08-25.** The original wording required "Fast + HQ vocal
+models", but feature 027 (fast vocals, MDX-family) is closed `WONTFIX`: no party
+with standing has stated a licence for those weights, and restrictive terms are
+workable where silence is not. The milestone is restated to what the project can
+actually deliver rather than left asserting something unreachable.
+
+| Requirement | State |
+| --- | --- |
+| HQ vocal separation | **done** — 026, Mel-Band RoFormer |
+| 4-stem separation | **done** — 028, Demucs |
+| Capability-driven mode selection | **done** — 010 derives modes from the catalog; 026 honours `Model.capabilities` at device resolution |
+| Bounded VRAM | **038** — blocking; peak currently grows with track length |
+| Production build | **042** — the backend serves the built frontend, one process |
+| Release preparation | **043** — CHANGELOG, version bump, manual `dev → main` tag |
+
+**The gap this milestone ships with, stated plainly:** the `vocals` mode has only
+a high-quality tier, which runs at ~0.3× real time on CPU — roughly ten minutes
+for a three-minute song without a GPU. `standard_stems` is the mode with a fast
+CPU path (Demucs, 1.63× real time). Reopening the fast-vocals question needs a
+model whose terms somebody with standing has stated; see
+`docs/features/027-mdx-fast-separator.md`.
+
+Release PR `dev → main`, annotated tag `v0.1.0`.
 
 ## Current state (2026-08-24)
 
@@ -190,6 +211,8 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |
+| 042 | Production build (backend serves frontend)   | PLANNED | 003, 024   | | |
+| 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
