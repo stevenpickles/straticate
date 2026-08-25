@@ -7,12 +7,19 @@ every test here carries ``@pytest.mark.integration``, which ``pyproject.toml``
 deselects by default::
 
     cd backend
-    uv run pytest -m integration          # the whole tier
-    uv run pytest -m "integration and gpu"
+    uv run --extra torch pytest -m integration          # the whole tier
+    uv run --extra torch pytest -m "integration and gpu"
+
+**On a host with the CUDA wheel installed, use ``--no-sync`` instead of
+``--extra torch``** — the latter re-pins ``torch`` to the locked CPU wheel, and
+the ``gpu`` test then skips itself on a machine that has a GPU. DEVELOPMENT.md,
+*PyTorch and CUDA*, has both traps::
+
+    uv run --no-sync pytest -m integration
 
 They also need the real weights *installed*, which is feature 025's job::
 
-    uv run uvicorn straticate.main:app &
+    uv run --no-sync uvicorn straticate.main:app &
     curl -X POST localhost:8000/api/v1/models/vocals-hq-001/install
     curl localhost:8000/api/v1/models/vocals-hq-001    # watch installation.progress
 
@@ -187,8 +194,28 @@ async def test_cuda_runtime_stats_report_real_memory(
     parameters: RoFormerParameters,
     tmp_path: Path,
 ) -> None:
-    """The CUDA telemetry path. Never executed on a CPU-only host — including
-    the one this feature was developed on, where it was **not** run."""
+    """The CUDA telemetry path. Skips on a CPU-only host; **has now run.**
+
+    Feature 026 shipped with this test never executed, because the host it was
+    developed on had no GPU. It first ran on **2026-08-25**, on an NVIDIA
+    GeForce RTX 4060 Laptop GPU (8,188 MiB, driver 610.47 / CUDA 13.3) with
+    ``torch 2.13.0+cu130``, and passed — with the whole tier at 4/4.
+
+    What it measured on that run: ``cuda:0``, the real device name,
+    ``memory_total_bytes`` 8,585,281,536, and ``memory_peak_bytes`` of
+    **1,531.7 MiB** for the 5 s clip below at this model's
+    ``chunk_size: 352800`` (2 chunks). NVML was installed (``nvidia-ml-py``,
+    never ``pynvml`` — see DEVELOPMENT.md), so the two optional fields were
+    populated rather than ``None``: utilization 1.0 at 59 °C. Both branches of
+    the last two assertions are therefore real, not hypothetical.
+
+    Feature 036 measured the memory behaviour properly and corrected the
+    catalog's ``recommended_vram_mb`` from it; the peak here is **not** bounded
+    by chunking, and grows with the length of the input.
+
+    On a GPU host, run this with ``uv run --no-sync`` or it will not be a GPU
+    run — see DEVELOPMENT.md, *PyTorch and CUDA*.
+    """
     if not torch.cuda.is_available():
         pytest.skip("no CUDA device is available")
 

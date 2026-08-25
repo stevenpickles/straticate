@@ -117,8 +117,8 @@ parameters or chunk sizing. GPU support for any other separator.
 - [x] Following DEVELOPMENT.md's CUDA section end to end leaves a working CUDA
       build and reports it correctly — done from `rm -rf .venv`, all seven steps
 - [x] NVML guidance names `nvidia-ml-py` and explains the `pynvml` trap
-- [ ] The GPU test's docstring matches reality
-- [ ] Suite still clean under `-W error`
+- [x] The GPU test's docstring matches reality
+- [x] Suite still clean under `-W error`
 
 ## Required tests
 
@@ -431,6 +431,24 @@ So both of the old text's named examples are dead for this torch, and on Windows
 the real choice is `cu130` or `cu126`. The table is in DEVELOPMENT.md with the
 `curl` that produced it and a note that it is version-specific and must be
 re-checked when the torch pin moves.
+
+### The GPU test's docstring
+
+`test_cuda_runtime_stats_report_real_memory` claimed it had never executed. It
+now records when it did (2026-08-25), on what (RTX 4060 Laptop, 8,188 MiB,
+driver 610.47 / CUDA 13.3, `torch 2.13.0+cu130`), and what it measured:
+`cuda:0`, `memory_total_bytes` 8,585,281,536, `memory_peak_bytes` **1,531.7 MiB**
+for its own 5 s clip at `chunk_size: 352800` (2 chunks), and — because
+`nvidia-ml-py` was installed — utilization 1.0 at 59 °C, so the two
+`is None or …` assertions at the end exercised their populated branch rather
+than their `None` one. It also warns that the peak is not bounded by chunking.
+
+The 5 s figure was measured for this document rather than copied: the test
+asserts bounds, not values, and printing figures from a test that a CPU host
+skips would put an unverifiable number in the file. The module docstring's
+commands were corrected in the same pass — they said `uv run pytest -m
+integration`, which on this host is exactly the invocation that makes the test
+skip.
 
 ### NVML: `nvidia-ml-py`, and why `pynvml` is a trap rather than a synonym
 
