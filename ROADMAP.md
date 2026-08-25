@@ -137,12 +137,15 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 024 | Export UI                                    | MERGED  | 022, 023   | `024-export-ui` | #27 |
 | 025 | Model download manager (SHA-256, atomic)     | MERGED  | 010        | `025-model-download-manager` | #30 |
 | 026 | Real separator: HQ vocals (Mel-Band RoFormer)| MERGED  | 014, 018, 025 | `026-roformer-separator` | #33 |
-| 027 | Real separator: fast vocals (MDX-family)     | PLANNED | 026        | | |
+| 027 | Real separator: fast vocals (MDX-family)     | BLOCKED | 026        | | licence — see docs/features/027 |
 | 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
 | 029 | Skeleton hardening (deferred review finds)  | MERGED  | 004, 005   | `029-skeleton-hardening` | #29 |
-| 030 | Playwright E2E tier (fake separator)         | PR OPEN | 024        | `030-playwright-e2e` | #35 |
+| 030 | Playwright E2E tier (fake separator)         | MERGED  | 024        | `030-playwright-e2e` | #35 |
 | 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |
-| 032 | Hide development models from the catalog     | PR OPEN | 010, 026   | `032-hide-development-models` | #36 |
+| 032 | Keep development models out of user catalog  | MERGED  | 010, 026   | `032-hide-development-models` | #36 |
+| 033 | Session survives a page reload               | PLANNED | 016, 017   | | |
+| 034 | Lazy separator builders (torch optional again)| PLANNED | 026        | | |
+| 035 | First-run model install affordance (UI)      | PLANNED | 025, 032   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
