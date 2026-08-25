@@ -201,15 +201,37 @@ jobs:
           curl -sf "$base/" | grep -q '<div id="root">'
           curl -sf "$base/jobs/deep-link" | grep -q '<div id="root">'
 
-          # The asset the built index.html actually asks for resolves.
+          # The asset the built index.html actually asks for resolves — and is
+          # the *script*, not the entry document. Checking only that the fetch
+          # succeeds would prove nothing about the file existing: a fallback
+          # that answered every miss with index.html returns 200 for a chunk
+          # that is not there, so the content type is what makes this real.
           asset=$(curl -sf "$base/" | sed -n 's|.*src="\(/assets/[^"]*\)".*|\1|p' | head -1)
           test -n "$asset"
-          curl -sf "$base$asset" > /dev/null
+          type=$(curl -sf -o /dev/null -w '%{content_type}' "$base$asset")
+          case "$type" in
+            *javascript*) ;;
+            *) echo "::error::$asset was served as '$type', not JavaScript"; exit 1 ;;
+          esac
 
-          # …and the API is untouched: an unknown path is still the envelope.
-          status=$(curl -s -o "$RUNNER_TEMP/nope.json" -w '%{http_code}' "$base/api/v1/nope")
-          test "$status" = 404
-          grep -q '"not_found"' "$RUNNER_TEMP/nope.json"
+          # A genuine miss inside the bundle stays a 404: a stale chunk must not
+          # come back as HTML for the browser to choke on.
+          missing=$(curl -s -o /dev/null -w '%{http_code}' "$base/assets/no-such-chunk.js")
+          test "$missing" = 404
+
+          # …and the API is untouched: an unknown path is still the envelope, in
+          # every spelling. `--path-as-is` stops curl collapsing the `//` that a
+          # client concatenating onto a trailing-slash base emits.
+          for path in /api/v1/nope //api/v1/nope; do
+            status=$(curl -s --path-as-is -o "$RUNNER_TEMP/nope.json" \
+              -w '%{http_code}' "$base$path")
+            test "$status" = 404
+            grep -q '"not_found"' "$RUNNER_TEMP/nope.json"
+          done
+
+          # A trailing slash on a real route still redirects rather than
+          # silently becoming the app.
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/docs/")" = 307
 
       - name: Upload the Playwright report
         if: failure()
