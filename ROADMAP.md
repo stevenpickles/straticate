@@ -66,15 +66,33 @@ The mixture correlates with the voice at 0.23 and the extracted stem at 0.99:
 separation, not a passthrough. The baseline row is what makes it a measurement
 rather than a number.
 
-**What is not verified.** Development and validation happened on a **CPU-only**
-host. `torch.autocast`, flash-attention backend selection and the real CUDA
-allocator are **written and type-checked but never executed**; the
-`@pytest.mark.gpu` test skips. No GPU telemetry figure anywhere is measured, and
-none was invented. NVML was never exercised. CPU real-time factor is **0.21–0.30**
-(3.5–5× slower than real time), which is why feature 027's fast tier matters.
+**CUDA is verified.** Executed 2026-08-25 on an NVIDIA GeForce RTX 4060 Laptop
+GPU (8188 MiB, driver 610.47 / CUDA 13.3) with `torch 2.13.0+cu130`. Feature
+018's design held exactly as written — swapping the wheel made `cuda:0` appear
+first with **no code, settings, API or schema change**, and jobs resolved to it
+automatically.
 
-**Before a release claims CUDA support, someone must run the GPU tier on real
-hardware.** That is the single largest untested surface in the project.
+| | CPU | cuda:0 |
+| --- | --- | --- |
+| 30 s clip, wall clock | 100.5 s | **6.7 s** |
+| real-time factor | 0.299 | **4.496** |
+| gpu telemetry block | `null` (correct CPU shape) | measured |
+
+**~15× faster than CPU, and faster than real time** — a 3-minute track separates
+in about 40 s instead of 10 minutes. Measured VRAM: 1,082 MiB allocated,
+**1,634 MiB peak** of 8,188 MiB. With `nvidia-ml-py` present the optional NVML
+fields report too (utilization 1.0, 59–62 °C); without it they are `null`, which
+the contract permits.
+
+The full integration tier passes (4/4), including the previously-never-executed
+`@pytest.mark.gpu` test, and a job driven through the real API resolved to
+`cuda:0`, reported real chunk progress, and delivered a `runtime_metrics` event
+carrying genuine GPU figures over the WebSocket.
+
+Four defects that only a GPU could reveal are recorded as feature **036** —
+notably the catalog's `recommended_vram_mb: 8192`, which measurement shows is
+wrong by more than 5×.
+
 
 ### M1 — fake-separator end-to-end
 
@@ -146,6 +164,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 033 | Session survives a page reload               | PLANNED | 016, 017   | | |
 | 034 | Lazy separator builders (torch optional again)| PLANNED | 026        | | |
 | 035 | First-run model install affordance (UI)      | PLANNED | 025, 032   | | |
+| 036 | GPU validation follow-ups                    | PLANNED | 026, 029   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
