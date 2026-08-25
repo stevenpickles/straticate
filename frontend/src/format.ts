@@ -146,6 +146,20 @@ export function formatFileSize(bytes: number): string {
 }
 
 /**
+ * Format a memory figure given in **mebibytes** — the unit every
+ * `ModelRequirements` field uses (`recommended_vram_mb`, `minimum_vram_mb`,
+ * `minimum_ram_mb`) — with the same binary units and labels as
+ * {@link formatFileSize}, so "6 GB of VRAM" and "870 MB to download" are
+ * measured the same way on the same screen.
+ *
+ * @example formatMemorySize(6144) // "6 GB"
+ * @example formatMemorySize(512) // "512 MB"
+ */
+export function formatMemorySize(mebibytes: number): string {
+  return formatFileSize(mebibytes * BYTES_PER_UNIT * BYTES_PER_UNIT)
+}
+
+/**
  * Format a `0..1` fraction as a whole-number percentage (`0.91` → `91%`),
  * used for GPU utilization. The contract documents the range, so values
  * above `1` are clamped to `100%` rather than rendered as `140%`; negative
