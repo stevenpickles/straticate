@@ -162,6 +162,54 @@ jobs:
         working-directory: frontend
         run: npm run e2e
 
+      # Feature 042: the one-process claim, checked against a **real** Vite
+      # build. `backend/tests/test_frontend_mount.py` covers the routing
+      # hermetically with a synthetic bundle — which is the right place for it,
+      # and fast — but a synthetic bundle cannot notice the one thing only a
+      # real build decides: that its own asset URLs are root-relative and
+      # resolve against the mount. Change `base` in `vite.config.ts` and every
+      # hermetic test still passes while the served app loads nothing.
+      #
+      # It lives here because this job already has both toolchains installed,
+      # so the marginal cost is one `vite build` (~10 s) and one server start,
+      # not the ~1 min a job of its own would spend installing Python and Node
+      # to do it. It is deliberately *not* a Playwright spec: `webServer` is
+      # global to the config, so a production spec would make every local
+      # `npm run e2e` build the frontend and start a third server first.
+      #
+      # After the tier above, so a real end-to-end failure reports first, and
+      # so the tier itself runs against exactly the arrangement it always has.
+      - name: Build the frontend bundle
+        working-directory: frontend
+        run: npm run build
+
+      - name: The built app is served by the backend, and never over the API
+        working-directory: backend
+        env:
+          STRATICATE_PORT: '8124'
+        run: |
+          STRATICATE_DATA_DIR="$RUNNER_TEMP/production" \
+            uv run python -m straticate > "$RUNNER_TEMP/production.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          base="http://127.0.0.1:$STRATICATE_PORT"
+          curl -sf --retry 60 --retry-delay 1 --retry-all-errors \
+            --retry-connrefused "$base/api/v1/health" > /dev/null
+
+          # The root URL is the built app, and so is a deep link into it.
+          curl -sf "$base/" | grep -q '<div id="root">'
+          curl -sf "$base/jobs/deep-link" | grep -q '<div id="root">'
+
+          # The asset the built index.html actually asks for resolves.
+          asset=$(curl -sf "$base/" | sed -n 's|.*src="\(/assets/[^"]*\)".*|\1|p' | head -1)
+          test -n "$asset"
+          curl -sf "$base$asset" > /dev/null
+
+          # …and the API is untouched: an unknown path is still the envelope.
+          status=$(curl -s -o "$RUNNER_TEMP/nope.json" -w '%{http_code}' "$base/api/v1/nope")
+          test "$status" = 404
+          grep -q '"not_found"' "$RUNNER_TEMP/nope.json"
+
       - name: Upload the Playwright report
         if: failure()
         uses: actions/upload-artifact@v4
