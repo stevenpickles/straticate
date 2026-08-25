@@ -319,7 +319,8 @@ Playwright cache): **1 min 36 s** total — 24 s of apt FFmpeg, 6 s of `uv sync`
 `backend/uv.lock` and shared with the backend job), 9 s of Node and `npm ci`,
 17 s installing Chromium and its system libraries, and **34 s of tests**. The
 browser is cached by `actions/cache` (~110 MB, keyed on `package-lock.json`),
-so it is downloaded again only when `@playwright/test` moves. Only Chromium is
+so it is downloaded again only when `@playwright/test` moves — the next run,
+restoring it from the cache, took **1 min 13 s**. Only Chromium is
 installed — the tier tests correctness, not browser compatibility. It needs
 **no GPU, no weights and no download**: every job it runs goes to the fake
 separator. On failure it uploads the HTML report and the traces.

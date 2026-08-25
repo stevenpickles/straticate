@@ -137,6 +137,28 @@ are all observable for seconds), and the `job_progress` frames are recorded off
 the WebSocket, so "progress advanced through every chunk" is asserted on the
 whole event sequence rather than on whatever the DOM happened to be showing.
 
+### `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` is load-bearing
+
+The backend the suite launches sets it (`playwright.config.ts`). Feature 032
+hides the fake development models from the user-facing catalog by default —
+offering fixture output as a quality tier is a defect — which with default
+settings leaves `vocals` / `high_quality` (the real 913 MB RoFormer model, not
+installed in a fresh checkout) and **no `standard_stems` mode at all** until
+feature 028 lands a real four-stem model.
+
+This tier runs against the fake separator *deliberately*: that is what makes it
+need no GPU, no weights and no download, and it is why it can run on every PR.
+So it asks for the development models back, explicitly and in one place. The
+specs select the four-stem mode — they *find* it rather than name it, but it
+exists only because the flag is on. Remove the flag and the suite tests an
+empty configure screen; the failure would be mystifying if this were not
+written down.
+
+That also makes the tier more load-bearing than when it was assigned: after
+032, a fresh clone with default settings cannot separate anything until the
+user installs an ~870 MiB model, so **this is the only automated coverage of
+the whole workflow that runs without a network fetch.**
+
 ### Driving a socket drop
 
 Nothing in the UI can drop a connection, and feature 016's client owns its

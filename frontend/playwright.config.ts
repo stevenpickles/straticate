@@ -74,6 +74,16 @@ export default defineConfig({
         STRATICATE_PORT: String(BACKEND_PORT),
         STRATICATE_DATA_DIR: DATA_DIR,
         STRATICATE_LOG_LEVEL: 'WARNING',
+        // **Load-bearing, not boilerplate.** Feature 032 hides the fake
+        // development models from the user-facing catalog by default, because
+        // offering fixture output as a quality tier is a defect. This tier
+        // runs against the fake separator *deliberately* — that is what makes
+        // it need no GPU, no weights and no 870 MiB download — so it asks for
+        // them back explicitly. Without this flag the catalog offers only the
+        // real RoFormer model, which a fresh checkout has not installed: the
+        // four-stem mode the specs select would not exist, and the suite would
+        // be testing an empty configure screen. Do not "simplify" it away.
+        STRATICATE_INCLUDE_DEVELOPMENT_MODELS: '1',
       },
       // Never adopt a server this suite did not start: it would have the
       // wrong data directory, and the run would leave uploads behind in it.
