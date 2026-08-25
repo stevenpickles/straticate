@@ -55,26 +55,39 @@ _LAZY_FROM_SEPARATOR = frozenset(
 """Names re-exported from the torch-importing implementation module."""
 
 
-def __getattr__(name: str) -> Any:
-    """Resolve a torch-backed export on first access (PEP 562).
+# ``if not TYPE_CHECKING`` is **load-bearing, not decoration.** A module-level
+# ``__getattr__`` that the type checker can see makes *every* attribute of this
+# package resolve to whatever it returns, so a typo
+# (``from straticate.inference.roformer import RoFormerSeperator``) or a
+# deleted export stops being a type error — in a package the whole application
+# imports from. Pyright evaluates ``TYPE_CHECKING`` as true, so this branch is
+# statically unreachable and the ``if TYPE_CHECKING`` imports above are the
+# only surface it sees; at runtime the branch is the live one. Removing the
+# guard silently trades strict mode for a runtime convenience, which is why
+# ``tests/test_torch_optional.py`` runs pyright over a deliberate typo and
+# requires it to fail.
+if not TYPE_CHECKING:
 
-    The imported value is cached in this module's ``globals()``, so the second
-    access is an ordinary attribute lookup and the lazy layer costs nothing
-    after the first.
+    def __getattr__(name: str) -> Any:
+        """Resolve a torch-backed export on first access (PEP 562).
 
-    Raises:
-        ImportError: PyTorch (or another dependency of the vendored
-            architecture) is not installed. Callers that must degrade — the
-            registry's RoFormer builder — catch this; nothing else in the
-            application touches these names.
-        AttributeError: No such export.
-    """
-    if name in _LAZY_FROM_SEPARATOR:
-        module = importlib.import_module("straticate.inference.roformer.separator")
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        The imported value is cached in this module's ``globals()``, so the
+        second access is an ordinary attribute lookup and the lazy layer costs
+        nothing after the first.
+
+        Raises:
+            ImportError: PyTorch (or another dependency of the vendored
+                architecture) is not installed. Callers that must degrade — the
+                registry's RoFormer builder — catch this; nothing else in the
+                application touches these names.
+            AttributeError: No such export.
+        """
+        if name in _LAZY_FROM_SEPARATOR:
+            module = importlib.import_module("straticate.inference.roformer.separator")
+            value = getattr(module, name)
+            globals()[name] = value
+            return value
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

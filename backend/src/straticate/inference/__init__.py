@@ -78,23 +78,31 @@ _LAZY_FROM_ROFORMER = frozenset({"RoFormerParameters", "RoFormerSeparator"})
 """Names this package re-exports from the torch-importing RoFormer backend."""
 
 
-def __getattr__(name: str) -> Any:
-    """Resolve a torch-backed export on first access (PEP 562).
+# ``if not TYPE_CHECKING`` is **load-bearing** — see the same guard in
+# :mod:`straticate.inference.roformer` for why. A ``__getattr__`` visible to
+# pyright would make every attribute of *this* package — the one the API, the
+# job manager and ``main`` all import from — resolve to ``Any``, so a typo or a
+# deleted export would no longer fail type checking. The ``if TYPE_CHECKING``
+# imports above are the whole static surface; this branch is the runtime one.
+if not TYPE_CHECKING:
 
-    See :mod:`straticate.inference.roformer` — importing *this* package must
-    not import PyTorch (feature 034), because :mod:`straticate.main` imports it
-    to build the separator registry and an installation without torch must
-    still be able to start and run the fake engine.
+    def __getattr__(name: str) -> Any:
+        """Resolve a torch-backed export on first access (PEP 562).
 
-    Raises:
-        ImportError: PyTorch is not installed.
-        AttributeError: No such export.
-    """
-    if name in _LAZY_FROM_ROFORMER:
-        value = getattr(importlib.import_module("straticate.inference.roformer"), name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        See :mod:`straticate.inference.roformer` — importing *this* package
+        must not import PyTorch (feature 034), because :mod:`straticate.main`
+        imports it to build the separator registry and an installation without
+        torch must still be able to start and run the fake engine.
+
+        Raises:
+            ImportError: PyTorch is not installed.
+            AttributeError: No such export.
+        """
+        if name in _LAZY_FROM_ROFORMER:
+            value = getattr(importlib.import_module("straticate.inference.roformer"), name)
+            globals()[name] = value
+            return value
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
