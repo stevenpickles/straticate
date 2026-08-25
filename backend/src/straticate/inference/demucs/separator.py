@@ -69,6 +69,7 @@ from array import array
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
+from functools import cache
 from pathlib import Path
 from typing import Any, Final, Protocol, Self, cast
 
@@ -354,9 +355,10 @@ class DemucsSeparator:
         # user did not write; reporting a manifest fault instead of a missing
         # download would send them somewhere they cannot go.
         _require_installed_weights(info, weights_file)
+        _check_sample_rate(info, parameters)
         self._stem_sources = stem_source_indices(info, parameters)
         self._model = _load_model(info, weights_file, parameters)
-        self._loaded_device = torch.device("cpu")
+        self._loaded_device: torch.device | None = torch.device("cpu")
         self._active = False
         self._run: _RunState | None = None
 
@@ -569,9 +571,22 @@ class DemucsSeparator:
             ) from exc
 
     def _place_on_device(self, device: torch.device) -> None:
-        """Move the network onto ``device`` (a no-op when it is already there)."""
+        """Move the network onto ``device`` (a no-op when it is already there).
+
+        The network's location is forgotten *before* the move, not after it.
+        ``nn.Module.to`` walks the parameters and moves them one at a time, so a
+        failure part-way — a CUDA OOM is the realistic one — leaves the network
+        split across two devices. A separator is cached per model for the life of
+        the process, so recording the *intended* device only on success is not
+        the safe order it looks like: it is the order in which the next job, on
+        any device, takes the early-out above, skips the move, and dies with
+        "Expected all tensors to be on the same device" forever. ``None`` matches
+        no device, so the next run always re-places the network, which is the one
+        thing that can put it back together.
+        """
         if self._loaded_device == device:
             return
+        self._loaded_device = None
         self._model.to(device)
         self._loaded_device = device
 
@@ -744,16 +759,11 @@ class CheckpointArchitecture:
     """
 
 
-SAFE_PICKLE_GLOBALS: Final = frozenset(
+CHECKPOINT_PICKLE_GLOBALS: Final = frozenset(
     {
-        # The state dict itself.
-        "collections.OrderedDict",
         # ``segment``, the training window, stored as an exact rational.
         "fractions.Fraction",
-        # NumPy scalars inside ``training_args`` and ``metrics``. ``_codecs``
-        # is how pickle rebuilds the raw bytes such a scalar carries, and is on
-        # torch's own ``weights_only`` allowlist for exactly this reason.
-        "_codecs.encode",
+        # NumPy scalars inside ``training_args`` and ``metrics``.
         "numpy.dtype",
         "numpy.ndarray",
         "numpy.core.multiarray.scalar",
@@ -762,54 +772,139 @@ SAFE_PICKLE_GLOBALS: Final = frozenset(
         "numpy._core.multiarray._reconstruct",
     }
 )
-"""Exactly what a Demucs checkpoint may name outside ``torch`` and ``demucs``.
+"""What a Demucs checkpoint may name **beyond** torch's own allowlist.
 
-The first five were read out of the real ``htdemucs`` package; the rest are the
-other spellings NumPy's own rebuild path uses across versions (``numpy._core``
-is NumPy 2's private module), listed so that a different checkpoint of the same
-architecture does not need a code change to load. Everything else is refused.
+The first two spellings were read out of the real ``htdemucs`` package; the
+remaining numpy entries are the other spellings NumPy's rebuild path uses across
+versions (``numpy._core`` is NumPy 2's private module), listed so that a
+different checkpoint of the same architecture does not need a code change to
+load. Torch's own list already carries ``collections.OrderedDict`` and
+``_codecs.encode``, which is why they are not repeated here.
 """
 
-SAFE_PICKLE_MODULES: Final = frozenset({"torch", "torch._utils", "torch.storage"})
-"""Modules trusted wholesale: torch's own tensor and storage rebuild machinery.
+_FALLBACK_TORCH_PICKLE_GLOBALS: Final = frozenset(
+    {
+        "collections.OrderedDict",
+        "_codecs.encode",
+        "torch._utils._rebuild_tensor",
+        "torch._utils._rebuild_tensor_v2",
+        "torch._utils._rebuild_tensor_v3",
+        "torch._utils._rebuild_parameter",
+        "torch._utils._rebuild_meta_tensor_no_storage",
+        "torch._utils._rebuild_sparse_tensor",
+        "torch.Size",
+        "torch.device",
+        "torch.BFloat16Storage",
+        "torch.BoolStorage",
+        "torch.ByteStorage",
+        "torch.CharStorage",
+        "torch.DoubleStorage",
+        "torch.FloatStorage",
+        "torch.HalfStorage",
+        "torch.IntStorage",
+        "torch.LongStorage",
+        "torch.ShortStorage",
+        "torch.Storage",
+    }
+)
+"""What to allow from torch if :func:`torch_pickle_globals` cannot ask torch.
 
-Name-by-name here would be a list of torch internals that changes with every
-release — ``_rebuild_tensor_v2`` today, ``_rebuild_tensor_v3`` tomorrow, plus
-the dtype and ``torch.Size`` singletons — for no gain, since a file that can
-reach into ``torch`` has already reached the library that is about to run it.
-This is the same trust boundary torch's own ``weights_only`` unpickler draws.
+Deliberately the *minimum* a published Demucs package is known to need — a real
+``htdemucs`` file names exactly ``collections.OrderedDict``, ``_codecs.encode``
+and ``torch._utils._rebuild_tensor_v2`` — plus the storage and shape types a
+neighbouring checkpoint might. A build that falls back and then meets a
+checkpoint torch would rebuild some other way refuses it loudly, which is the
+right failure: refusing a valid file is recoverable, and widening an allowlist
+by guessing is not.
 """
 
 
-class _RestrictedUnpickler(pickle.Unpickler):
+@cache
+def torch_pickle_globals() -> frozenset[str]:
+    """The ``module.name`` set torch's own ``weights_only`` loader permits.
+
+    ``torch._weights_only_unpickler`` is where torch decides which globals are
+    safe to resolve while rebuilding tensors, and its answer is 144 individually
+    enumerated names: every ``_rebuild_*`` helper, every storage and tensor type,
+    the dtype and layout singletons, ``collections.OrderedDict`` and
+    ``_codecs.encode``. Crucially it does **not** contain ``torch.load``,
+    ``torch.save``, or anything else that is an entry point rather than a data
+    constructor.
+
+    Asking torch is what makes "the same boundary torch's own ``weights_only``
+    unpickler draws" a true statement rather than a claim. The list moves with
+    every release, and reproducing it by hand would drift into either refusing
+    valid checkpoints or -- the failure this exists to prevent -- permitting more
+    than torch does.
+
+    It is a private module, so the import is guarded, and a build where it has
+    moved falls back to :data:`_FALLBACK_TORCH_PICKLE_GLOBALS` with a warning.
+    Cached: it is asked once per checkpoint read and cannot change within a
+    process.
+    """
+    try:
+        from torch import _weights_only_unpickler
+
+        # Private on purpose, and reached on purpose: this *is* torch's
+        # allowlist, and duplicating it here is the mistake this call avoids.
+        # The guarded import and the fallback below are what make depending on
+        # a private name safe -- a torch that moves it degrades to refusing
+        # unusual checkpoints, never to permitting more.
+        resolve: Any = _weights_only_unpickler._get_allowed_globals  # pyright: ignore[reportPrivateUsage]
+        allowed = frozenset(cast("Mapping[str, Any]", resolve()))
+    except Exception:  # pragma: no cover - only on a torch that moved the module
+        logger.warning(
+            "torch._weights_only_unpickler._get_allowed_globals() is unavailable, so this "
+            "build falls back to a minimal allowlist when reading a model checkpoint. A "
+            "checkpoint needing a rebuild helper outside it is refused as "
+            "model_weights_invalid rather than loaded."
+        )
+        return _FALLBACK_TORCH_PICKLE_GLOBALS
+    return allowed or _FALLBACK_TORCH_PICKLE_GLOBALS
+
+
+class RestrictedUnpickler(pickle.Unpickler):
     """A pickle reader that resolves only the names a checkpoint is allowed to name.
 
     Feature 025 verifies a SHA-256 before publishing an artifact, which proves
-    the file is the file that was pinned — it does not make a pickle safe to
-    execute, and upstream's loader executes one. This is the cheap way to make
-    that irrelevant: the only class a Demucs package references is its own
-    architecture, and that reference is never *called*, so nothing in the file
-    can reach an arbitrary callable at all.
+    the file is the file that was pinned -- it does not make a pickle safe to
+    execute, and upstream's loader executes one. So this reader resolves the
+    architecture reference to an inert placeholder that is never called, and
+    checks every other name against **an enumeration**:
+    :func:`torch_pickle_globals` (torch's own ``weights_only`` allowlist -- 144
+    named data constructors, ``torch.load`` not among them) plus
+    :data:`CHECKPOINT_PICKLE_GLOBALS` (the rational and the numpy scalars a
+    Demucs package additionally carries). Anything else raises.
+
+    **Why an enumeration and not "trust the torch module".** A pickle's
+    ``GLOBAL`` opcode is a pair of raw strings and is not bound by any object's
+    real ``__module__``. The first version of this class admitted anything whose
+    module was ``torch``, so a hand-written ``c torch \n load \n ... R``
+    resolved **and called** ``torch.load`` -- which on the ``torch>=2.4`` this
+    project allows defaults to ``weights_only=False``, that is, a full unpickling
+    of a second file of the attacker's choosing. Code review found it; the
+    ``GLOBAL``-opcode path is now pinned by
+    ``tests/test_demucs_separator.py::test_the_reader_refuses_a_hand_written_global_opcode``.
 
     Defence in depth rather than a security boundary: the digest is the
     boundary. What this removes is the class of accident where a file that
-    passed the digest — because the digest itself was wrong, or the artifact was
-    hand-placed — still gets to run code at load time.
+    passed the digest -- because the digest itself was wrong, or the artifact was
+    hand-placed -- still gets to run code at load time.
     """
 
     def find_class(self, module: str, name: str) -> Any:
         """Resolve ``module.name``, or refuse.
 
         Raises:
-            pickle.UnpicklingError: The checkpoint names something outside
-                :data:`SAFE_PICKLE_GLOBALS` and :data:`SAFE_PICKLE_MODULES`, and
-                is not the architecture class.
+            pickle.UnpicklingError: The name is neither the architecture class
+                nor one of the enumerated data constructors.
         """
         if module == "demucs" or module.startswith("demucs."):
             return CheckpointArchitecture
-        if module in SAFE_PICKLE_MODULES or f"{module}.{name}" in SAFE_PICKLE_GLOBALS:
+        reference = f"{module}.{name}"
+        if reference in CHECKPOINT_PICKLE_GLOBALS or reference in torch_pickle_globals():
             return super().find_class(module, name)
-        raise pickle.UnpicklingError(f"a model checkpoint may not reference {module}.{name}")
+        raise pickle.UnpicklingError(f"a model checkpoint may not reference {reference}")
 
 
 def _restricted_pickle_module() -> Any:
@@ -821,7 +916,7 @@ def _restricted_pickle_module() -> Any:
     """
     module = types.ModuleType("straticate_restricted_pickle")
     module.__dict__.update(pickle.__dict__)
-    module.Unpickler = _RestrictedUnpickler  # pyright: ignore[reportAttributeAccessIssue]
+    module.Unpickler = RestrictedUnpickler  # pyright: ignore[reportAttributeAccessIssue]
     return module
 
 
@@ -893,6 +988,36 @@ def _architecture_parameter_names() -> frozenset[str]:
     return frozenset(signature.parameters) - {"self"}
 
 
+def _check_sample_rate(info: SeparatorInfo, parameters: DemucsParameters) -> None:
+    """Refuse a catalog entry whose two sample rates disagree.
+
+    The manifest states the rate twice, and both are load-bearing in different
+    places: the entry's top-level ``sample_rate`` is what FFmpeg resamples the
+    source to (:meth:`DemucsSeparator._decode`, via
+    :attr:`SeparatorInfo.sample_rate`), while
+    ``default_inference_parameters.model.samplerate`` is what the architecture is
+    built with and what sizes the training window. They are two edits apart, and
+    if they diverge the network is fed audio at one rate while its window is
+    sized for another — degraded output, from a data edit, with nothing anywhere
+    reporting a problem.
+
+    That is the same failure mode :func:`_check_sources` exists to prevent, so
+    the guard belongs in the same place: at construction, loudly.
+
+    Raises:
+        ApplicationError: ``model_parameters_invalid`` (500).
+    """
+    if info.sample_rate != parameters.sample_rate:
+        raise _parameters_invalid(
+            info.model_id,
+            (
+                f"the catalog entry decodes audio at {info.sample_rate} Hz (its sample_rate) "
+                f"but builds the network at {parameters.sample_rate} Hz "
+                f"(default_inference_parameters.model.samplerate); the two must agree"
+            ),
+        )
+
+
 def _require_installed_weights(info: SeparatorInfo, weights_file: Path) -> None:
     """Fail with ``model_weights_missing`` (409) when nothing is installed yet.
 
@@ -952,23 +1077,52 @@ def _check_sources(
 ) -> None:
     """Refuse a catalog entry whose ``sources`` disagree with the checkpoint's.
 
-    This is the second of the two guards that make stem assignment impossible to
-    get silently wrong. The first is that the mapping is by name
-    (:func:`stem_source_indices`); this one is that the names and *their order*
-    come from the file the tensors came from. A checkpoint carries the
-    ``sources`` list it was trained with, so a catalog entry that transposes two
-    of them — the exact edit that would swap two stems' audio while every test
-    on shapes and counts still passed — is a startup error rather than a quiet
-    mis-assignment.
+    This is the guard that decides stem **order**, and it is the only one that
+    can. :func:`stem_source_indices` maps advertised stem names onto the
+    catalog's ``sources`` list, which is correct given that list — but it can
+    only check that the two are the same *set*, so a catalog that transposes two
+    of the network's sources passes it, and every shape assertion and the strict
+    ``load_state_dict`` pass too, while two stems' **audio** is swapped. The only
+    authority on the order is the file the tensors came from, which records the
+    ``sources`` it was trained with.
+
+    So this refuses **both** a disagreement and an inability to check. Returning
+    quietly when a package carries no usable ``sources`` was the original
+    version, and code review was right that it defeated the guard: a
+    ``htdemucs``-family checkpoint saved without ``kwargs``, plus a transposed
+    catalog entry, would have written the drums into ``bass.wav`` with nothing
+    reporting a problem — the exact outcome this feature's acceptance criteria
+    say is impossible. A checkpoint whose order cannot be verified is a
+    checkpoint this backend will not run.
+
+    ``sources`` is read leniently on *type* and strictly on *content*: a
+    ``list``, a ``tuple`` and a ``numpy.ndarray`` of names are all fine (torch
+    checkpoints carry all three in practice), a string is not a list of names,
+    and anything whose elements are not strings is not a source list.
 
     Raises:
-        ApplicationError: ``model_parameters_invalid`` (500).
+        ApplicationError: ``model_weights_invalid`` (500) when the checkpoint
+            records no usable ``sources``, so the catalog's order cannot be
+            checked against it; ``model_parameters_invalid`` (500) when it does
+            and the two disagree.
     """
-    declared = cast("Mapping[str, Any]", package.get("kwargs") or {})
-    recorded = declared.get("sources")
-    if not isinstance(recorded, Sequence) or isinstance(recorded, str | bytes):
-        return
-    actual = tuple(str(name) for name in cast("Sequence[Any]", recorded))
+    declared = package.get("kwargs")
+    recorded: Any = (
+        cast("Mapping[str, Any]", declared).get("sources")
+        if isinstance(declared, Mapping)
+        else None
+    )
+    actual = _source_names(recorded)
+    if actual is None:
+        raise ApplicationError(
+            "model_weights_invalid",
+            (
+                f"The installed weights for model {model_id!r} record no source list, so the "
+                f"order the catalog claims the network emits cannot be verified against them."
+            ),
+            status_code=500,
+            detail={"model_id": model_id, "reason": "no_recorded_sources"},
+        )
     if actual != parameters.sources:
         raise _parameters_invalid(
             model_id,
@@ -977,6 +1131,24 @@ def _check_sources(
                 f"installed checkpoint was trained to emit {list(actual)}"
             ),
         )
+
+
+def _source_names(recorded: Any) -> tuple[str, ...] | None:
+    """The checkpoint's ``sources`` as a tuple of names, or ``None`` if unusable.
+
+    Deliberately not an ``isinstance(..., Sequence)`` test: ``numpy.ndarray`` is
+    not registered as one, and silently treating a numpy array of names as "no
+    source list" is how the caller's guard came to be skippable.
+    """
+    if recorded is None or isinstance(recorded, str | bytes):
+        return None
+    try:
+        names = list(cast("Iterable[Any]", recorded))
+    except TypeError:
+        return None
+    if not names or not all(isinstance(name, str) for name in names):
+        return None
+    return tuple(cast("list[str]", names))
 
 
 def stem_source_indices(info: SeparatorInfo, parameters: DemucsParameters) -> tuple[int, ...]:
@@ -992,6 +1164,13 @@ def stem_source_indices(info: SeparatorInfo, parameters: DemucsParameters) -> tu
     network's own order is *stated* in
     ``default_inference_parameters.model.sources`` and each advertised stem is
     looked up in it by name.
+
+    **What this function cannot decide is whether that stated order is right.**
+    It compares the two lists as *sets*, so a catalog that transposes two of the
+    network's sources passes here and every later assertion about shapes and
+    counts as well. Checking the order is :func:`_check_sources`'s job, against
+    the ``sources`` the checkpoint itself records, and it is mandatory for
+    exactly that reason.
 
     Returns:
         One index per advertised stem, in advertised order.
@@ -1397,15 +1576,16 @@ def _discard_outputs(output_dir: Path, stems: tuple[str, ...]) -> None:
 
 
 __all__ = [
+    "CHECKPOINT_PICKLE_GLOBALS",
     "DEFAULT_OVERLAP",
     "DEFAULT_TRANSITION_POWER",
     "DEMUCS_ARCHITECTURE",
-    "SAFE_PICKLE_GLOBALS",
-    "SAFE_PICKLE_MODULES",
     "CheckpointArchitecture",
     "DemucsParameters",
     "DemucsSeparator",
     "NvmlProbe",
+    "RestrictedUnpickler",
     "load_checkpoint_package",
     "stem_source_indices",
+    "torch_pickle_globals",
 ]

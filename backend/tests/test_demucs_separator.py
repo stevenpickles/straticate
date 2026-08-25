@@ -13,6 +13,7 @@ sleeps for a duration as a way of synchronising.
 
 import asyncio
 import hashlib
+import io
 import pickle
 import sys
 import threading
@@ -22,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy
 import pytest
 import torch
 
@@ -35,13 +37,16 @@ from straticate.inference.demucs import (
 )
 from straticate.inference.demucs import separator as separator_module
 from straticate.inference.demucs.separator import (
+    CHECKPOINT_PICKLE_GLOBALS,
     CheckpointArchitecture,
+    RestrictedUnpickler,
     device_stats,
     load_checkpoint_package,
     pcm_to_tensor,
     reset_peak_memory,
     stem_source_indices,
     tensor_to_pcm,
+    torch_pickle_globals,
 )
 from straticate.inference.pcm import PcmAudio, interleave
 from straticate.jobs.cancellation import CancellationToken, JobCancelled
@@ -577,6 +582,69 @@ async def test_one_separation_at_a_time(weights: Path, source: Path, tmp_path: P
     await first
 
 
+async def test_a_failed_device_move_does_not_wedge_the_cached_separator(
+    weights: Path, source: Path, tmp_path: Path
+) -> None:
+    """A CUDA OOM part-way through ``.to()`` must not poison every later job.
+
+    ``nn.Module.to`` moves parameters one at a time, so a failure leaves the
+    network split across devices. Recording the intended device only *after* the
+    move succeeds looks like the safe order and is not: a separator is cached per
+    model for the life of the process, so the next job takes the "already there"
+    early-out, skips the move, and fails forever. Forgetting where the network is
+    *before* moving it is what makes the next run repair it.
+    """
+    separator = make_separator(weights)
+    model: Any = separator._model  # pyright: ignore[reportPrivateUsage]
+    moves: list[str] = []
+    original = model.to
+
+    def flaky_to(target: object) -> object:
+        moves.append(str(target))
+        if len(moves) == 1:
+            raise RuntimeError("CUDA out of memory")
+        return original(target)
+
+    model.to = flaky_to
+
+    # A job that resolves elsewhere fails part-way through the move, leaving the
+    # network split. (Called directly so the test needs no CUDA device.)
+    with pytest.raises(RuntimeError, match="out of memory"):
+        separator._place_on_device(torch.device("cuda:0"))  # pyright: ignore[reportPrivateUsage]
+
+    assert separator._loaded_device is None, (  # pyright: ignore[reportPrivateUsage]
+        "after a partial move the separator must not claim to know where the network is"
+    )
+
+    # The next job resolves back to the device the network *used* to be on. It
+    # must still move it -- half of it is somewhere else -- rather than taking
+    # the "already there" early-out and failing on mismatched devices forever.
+    result = await run(separator, source, tmp_path / "after")
+    assert moves == ["cuda:0", "cpu"], "the repairing move was skipped"
+    assert [stem.name for stem in result.stems] == list(TINY_STEMS)
+
+
+def test_the_decode_rate_and_the_network_rate_must_agree(weights: Path) -> None:
+    """Two catalog fields, two edits apart, that must never diverge.
+
+    ``sample_rate`` is what FFmpeg resamples the source to;
+    ``model.samplerate`` is what the network is built with and what sizes the
+    training window. Change one and the network is fed audio at the wrong rate
+    while its window is sized from the other — degraded output from a data edit,
+    with nothing reporting anything.
+    """
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(
+            tiny_info(sample_rate=TINY_SAMPLE_RATE * 2),
+            weights_file=weights,
+            parameters=tiny_parameters(),
+        )
+    error = excinfo.value
+    assert error.code == "model_parameters_invalid"
+    assert "must agree" in error.message
+    assert str(TINY_SAMPLE_RATE * 2) in error.message
+
+
 def test_it_refuses_a_nonsense_ffmpeg_timeout(weights: Path) -> None:
     with pytest.raises(ValueError, match="ffmpeg_timeout_seconds"):
         make_separator(weights, ffmpeg_timeout_seconds=0.0)
@@ -605,6 +673,76 @@ def test_the_architecture_reference_in_a_checkpoint_is_never_imported(weights: P
     assert list(package["kwargs"]["sources"]) == TINY_SOURCES
 
 
+def global_opcode_pickle(module: str, name: str, argument: str = "pwnd") -> bytes:
+    """A pickle that resolves ``module.name`` and **calls** it with one string.
+
+    Hand-assembled, because that is the whole point: a ``GLOBAL`` opcode is a
+    pair of raw strings and is not bound by any object's real ``__module__``.
+    ``pickle.dumps`` cannot produce ``c torch\nload\n`` — it would look up
+    ``torch.load.__module__``, find ``torch.serialization`` and write that — so a
+    reader that allowlists by *module* cannot be tested through it, which is how
+    the hole below survived the first round of tests.
+    """
+    encoded = argument.encode()
+    return (
+        b"\x80\x04"  # PROTO 4
+        + f"c{module}\n{name}\n".encode()  # GLOBAL module name
+        + b"X"
+        + len(encoded).to_bytes(4, "little")
+        + encoded  # BINUNICODE argument
+        + b"\x85"  # TUPLE1
+        + b"R"  # REDUCE  -- i.e. call it
+        + b"."  # STOP
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        # The one code review found: this resolved, and was *called*. It failed
+        # on its argument, not on the allowlist. ``torch.load`` on the
+        # ``torch>=4`` this project allows defaults to ``weights_only=False``,
+        # so a checkpoint could have had a second file of its choosing fully
+        # unpickled.
+        ("torch", "load"),
+        ("torch", "save"),
+        ("torch.serialization", "load"),
+        ("os", "system"),
+        ("builtins", "eval"),
+        ("builtins", "exec"),
+        ("subprocess", "Popen"),
+    ],
+)
+def test_the_reader_refuses_a_hand_written_global_opcode(module: str, name: str) -> None:
+    """No ``GLOBAL`` opcode may reach a callable, whatever module it claims.
+
+    The refusal has to happen in ``find_class``, before ``REDUCE`` runs — so the
+    assertion is on the exception *type*, not merely that something went wrong.
+    Resolving ``torch.load`` and then failing inside it on a missing file, which
+    is what the module-allowlisting version did, would satisfy a weaker test and
+    is exactly the defect.
+    """
+    with pytest.raises(pickle.UnpicklingError, match="may not reference"):
+        RestrictedUnpickler(io.BytesIO(global_opcode_pickle(module, name))).load()
+
+
+def test_the_allowlist_is_an_enumeration_not_a_namespace() -> None:
+    """The property that makes the test above hold, stated directly.
+
+    ``torch._weights_only_unpickler`` enumerates individual names — every
+    ``_rebuild_*`` helper, every storage and tensor type, the dtype singletons —
+    and no entry point among them. Trusting the ``torch`` *module* instead, which
+    is what the first version did, admits every one of them.
+    """
+    allowed = CHECKPOINT_PICKLE_GLOBALS | torch_pickle_globals()
+    assert len(allowed) > 100, "torch's allowlist was not reached; the fallback is much smaller"
+    assert "torch._utils._rebuild_tensor_v2" in allowed
+    assert "collections.OrderedDict" in allowed
+    assert "_codecs.encode" in allowed
+    for entry_point in ("torch.load", "torch.save", "torch.compile", "torch.hub"):
+        assert entry_point not in allowed
+
+
 def test_a_checkpoint_may_not_name_an_arbitrary_callable(tmp_path: Path) -> None:
     """Feature 025 verifies a digest; a verified pickle is still a pickle.
 
@@ -613,16 +751,17 @@ def test_a_checkpoint_may_not_name_an_arbitrary_callable(tmp_path: Path) -> None
     refusal surfaces as ``model_weights_invalid`` rather than as anything
     happening.
     """
-    dangerous = tmp_path / "dangerous.bin"
-    payload = tiny_package()
-    payload["klass"] = pickle.loads  # a perfectly ordinary, perfectly awful choice
-    torch.save(payload, dangerous)
+    for index, callable_ in enumerate((pickle.loads, torch.load)):
+        dangerous = tmp_path / f"dangerous-{index}.bin"
+        payload = tiny_package()
+        payload["klass"] = callable_  # perfectly ordinary, perfectly awful choices
+        torch.save(payload, dangerous)
 
-    with pytest.raises(ApplicationError) as excinfo:
-        load_checkpoint_package(dangerous, model_id="tiny-standard-001")
-    assert excinfo.value.code == "model_weights_invalid"
-    assert excinfo.value.detail is not None
-    assert excinfo.value.detail["reason"] == "UnpicklingError"
+        with pytest.raises(ApplicationError) as excinfo:
+            load_checkpoint_package(dangerous, model_id="tiny-standard-001")
+        assert excinfo.value.code == "model_weights_invalid"
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["reason"] == "UnpicklingError"
 
 
 def test_half_precision_weights_are_loaded_into_a_float32_network(weights: Path) -> None:
@@ -710,6 +849,87 @@ def test_a_source_the_catalog_does_not_advertise_is_refused(weights: Path) -> No
     error = excinfo.value
     assert error.code == "model_parameters_invalid"
     assert "not advertised: ['other']" in error.message
+
+
+def test_the_set_check_alone_would_let_a_transposition_through(weights: Path) -> None:
+    """Why :func:`_check_sources` is mandatory, stated as a property of the other guard.
+
+    ``stem_source_indices`` compares the advertised stems and the catalog's
+    ``sources`` as *sets*, so a catalog that transposes two of the network's
+    sources satisfies it — and would then map each stem name onto the wrong
+    output index. Nothing downstream notices: the shapes, the counts and the
+    strict ``load_state_dict`` are all still right.
+    """
+    transposed = tiny_parameters(model={"sources": ["bass", "drums", "other", "vocals"]})
+    indices = stem_source_indices(tiny_info(), transposed)
+
+    # It succeeds, and it is wrong: `vocals` is still index 3, but `drums` now
+    # reads output 1, which the network fills with bass.
+    assert indices == (3, 1, 0, 2)
+    assert indices != (3, 0, 1, 2), "this is the mis-assignment the checkpoint check catches"
+
+    # The separator refuses it, because the checkpoint disagrees.
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(tiny_info(), weights_file=weights, parameters=transposed)
+    assert excinfo.value.code == "model_parameters_invalid"
+
+
+def test_a_checkpoint_that_records_no_sources_is_refused(tmp_path: Path) -> None:
+    """An order that cannot be verified is not an order to trust.
+
+    The original version of ``_check_sources`` returned quietly here, which
+    defeated the whole guard: a checkpoint saved without ``kwargs`` plus a
+    transposed catalog entry would have written the drums into ``bass.wav``,
+    passing every shape assertion and every other test in this file.
+    """
+    unusable: tuple[dict[str, Any] | None, ...] = (
+        None,
+        {},
+        {"sources": "vocals"},
+        {"sources": []},
+    )
+    for index, kwargs in enumerate(unusable):
+        path = tmp_path / f"no-sources-{index}.bin"
+        package = tiny_package()
+        if kwargs is None:
+            del package["kwargs"]
+        else:
+            package["kwargs"] = kwargs
+        torch.save(package, path)
+
+        with pytest.raises(ApplicationError) as excinfo:
+            DemucsSeparator(tiny_info(), weights_file=path, parameters=tiny_parameters())
+        assert excinfo.value.code == "model_weights_invalid", kwargs
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["reason"] == "no_recorded_sources"
+
+
+def test_sources_recorded_as_a_numpy_array_are_still_checked(tmp_path: Path) -> None:
+    """A ``numpy.ndarray`` is not a ``Sequence``, and must not read as "absent".
+
+    Testing the recorded value with ``isinstance(..., Sequence)`` — the original
+    version — silently skipped the check for one of the container types a torch
+    checkpoint plausibly carries.
+    """
+    matching = tmp_path / "numpy-sources.bin"
+    package = tiny_package()
+    package["kwargs"] = dict(package["kwargs"], sources=numpy.array(TINY_SOURCES))
+    torch.save(package, matching)
+    # It matches, so it loads — the array was read, not ignored.
+    assert DemucsSeparator(
+        tiny_info(), weights_file=matching, parameters=tiny_parameters()
+    ).stem_sources == (3, 0, 1, 2)
+
+    swapped = tmp_path / "numpy-sources-swapped.bin"
+    package = tiny_package()
+    package["kwargs"] = dict(
+        package["kwargs"], sources=numpy.array(["bass", "drums", "other", "vocals"])
+    )
+    torch.save(package, swapped)
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(tiny_info(), weights_file=swapped, parameters=tiny_parameters())
+    assert excinfo.value.code == "model_parameters_invalid"
+    assert "installed checkpoint was trained to emit" in excinfo.value.message
 
 
 def test_a_catalog_that_transposes_the_networks_sources_is_refused(tmp_path: Path) -> None:

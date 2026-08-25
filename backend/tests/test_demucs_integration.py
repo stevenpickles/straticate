@@ -47,10 +47,10 @@ from straticate.config import Settings
 from straticate.inference.base import SeparationProgress
 from straticate.inference.demucs import DemucsParameters, DemucsSeparator
 from straticate.inference.demucs.separator import (
-    SAFE_PICKLE_GLOBALS,
-    SAFE_PICKLE_MODULES,
+    CHECKPOINT_PICKLE_GLOBALS,
     CheckpointArchitecture,
     load_checkpoint_package,
+    torch_pickle_globals,
 )
 from straticate.inference.demucs.vendor import HTDemucs
 from straticate.inference.registry import separator_info_from_model
@@ -124,11 +124,12 @@ def test_the_vendored_architecture_loads_the_real_checkpoint(
 def test_the_real_checkpoint_names_only_allowlisted_globals(installed_weights: Path) -> None:
     """The restricted reader's allowlist is exactly wide enough, and no wider.
 
-    The unit tier proves the *refusal* against a hand-built package; this proves
-    the other half — that a real, published checkpoint needs nothing beyond what
-    is allowed. It records the set as evidence rather than only asserting a
-    subset, because widening the list should always be a decision somebody made
-    on purpose. Measured against ``htdemucs`` v4:
+    The unit tier proves the *refusal*, including the hand-written
+    ``GLOBAL``-opcode path; this proves the other half — that a real, published
+    checkpoint needs nothing beyond what is allowed. It records the set as
+    evidence rather than only asserting a subset, because widening the list
+    should always be a decision somebody made on purpose. Measured against
+    ``htdemucs`` v4, the whole set is seven names:
 
     ``_codecs.encode``, ``collections.OrderedDict``, ``demucs.htdemucs.HTDemucs``,
     ``fractions.Fraction``, ``numpy.core.multiarray.scalar``, ``numpy.dtype``,
@@ -148,15 +149,17 @@ def test_the_real_checkpoint_names_only_allowlisted_globals(installed_weights: P
     shim.Unpickler = Recording  # pyright: ignore[reportAttributeAccessIssue]
     torch.load(installed_weights, map_location="cpu", weights_only=False, pickle_module=shim)
 
+    allowed = CHECKPOINT_PICKLE_GLOBALS | torch_pickle_globals()
     outside = {
         reference
         for reference in referenced
-        if not reference.startswith("demucs.")
-        and reference not in SAFE_PICKLE_GLOBALS
-        and reference.rsplit(".", 1)[0] not in SAFE_PICKLE_MODULES
+        if not reference.startswith("demucs.") and reference not in allowed
     }
     assert outside == set(), f"the checkpoint names globals the reader would refuse: {outside}"
     assert "demucs.htdemucs.HTDemucs" in referenced
+    # …and the allowlist that covers it does not cover an entry point.
+    assert "torch.load" not in allowed
+    assert "torch.save" not in allowed
 
 
 def test_the_installed_weights_match_the_pinned_digest(

@@ -542,6 +542,45 @@ async def test_one_separation_at_a_time(weights: Path, source: Path, tmp_path: P
     await first
 
 
+async def test_a_failed_device_move_does_not_wedge_the_cached_separator(
+    weights: Path, source: Path, tmp_path: Path
+) -> None:
+    """The same defect feature 028's review found in its copy of this method.
+
+    ``nn.Module.to`` moves parameters one at a time, so a CUDA OOM part-way
+    leaves the network split across devices. Recording the intended device only
+    *after* the move succeeds means the next job — back on the device the network
+    used to be on — takes the "already there" early-out, skips the move, and
+    dies with "Expected all tensors to be on the same device". A separator is
+    cached per model, so that is for the life of the process.
+
+    The one-line fix (forget the device *before* moving) applies identically to
+    both backends and was made in both; see
+    ``docs/features/028-demucs-four-stem.md``.
+    """
+    separator = make_separator(weights)
+    model: Any = separator._model  # pyright: ignore[reportPrivateUsage]
+    moves: list[str] = []
+    original = model.to
+
+    def flaky_to(target: object) -> object:
+        moves.append(str(target))
+        if len(moves) == 1:
+            raise RuntimeError("CUDA out of memory")
+        return original(target)
+
+    model.to = flaky_to
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        separator._place_on_device(torch.device("cuda:0"))  # pyright: ignore[reportPrivateUsage]
+
+    assert separator._loaded_device is None  # pyright: ignore[reportPrivateUsage]
+
+    result = await run(separator, source, tmp_path / "after")
+    assert moves == ["cuda:0", "cpu"], "the repairing move was skipped"
+    assert [stem.name for stem in result.stems] == ["vocals", "instrumental"]
+
+
 def test_it_refuses_a_nonsense_ffmpeg_timeout(weights: Path) -> None:
     with pytest.raises(ValueError, match="ffmpeg_timeout_seconds"):
         make_separator(weights, ffmpeg_timeout_seconds=0.0)

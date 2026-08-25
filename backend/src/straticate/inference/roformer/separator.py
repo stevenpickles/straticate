@@ -317,7 +317,7 @@ class RoFormerSeparator:
         self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         self._residual_stem = _residual_stem_index(info, parameters)
         self._model = _load_model(info, weights_file, parameters)
-        self._loaded_device = torch.device("cpu")
+        self._loaded_device: torch.device | None = torch.device("cpu")
         self._active = False
         self._run: _RunState | None = None
 
@@ -524,9 +524,22 @@ class RoFormerSeparator:
             ) from exc
 
     def _place_on_device(self, device: torch.device) -> None:
-        """Move the network onto ``device`` (a no-op when it is already there)."""
+        """Move the network onto ``device`` (a no-op when it is already there).
+
+        The network's location is forgotten *before* the move, not after it.
+        ``nn.Module.to`` walks the parameters and moves them one at a time, so a
+        failure part-way — a CUDA OOM is the realistic one — leaves the network
+        split across two devices. A separator is cached per model for the life of
+        the process, so recording the *intended* device only on success is not
+        the safe order it looks like: it is the order in which the next job, on
+        any device, takes the early-out above, skips the move, and dies with
+        "Expected all tensors to be on the same device" forever. ``None`` matches
+        no device, so the next run always re-places the network, which is the one
+        thing that can put it back together.
+        """
         if self._loaded_device == device:
             return
+        self._loaded_device = None
         self._model.to(device)
         self._loaded_device = device
 
