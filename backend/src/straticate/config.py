@@ -36,11 +36,11 @@ class Settings(BaseSettings):
     Every field here is **consumed**: ``host`` and ``port`` by
     :func:`straticate.main.serve`, ``cors_origins`` and ``log_level`` by the
     application factory, ``data_dir`` by the audio store, the job output layout
-    and the export cache, ``models_dir`` by the model catalog,
-    ``max_upload_bytes`` by the upload route, and ``ffmpeg_timeout_seconds`` by
-    :func:`straticate.audio.ffmpeg.run_ffmpeg`. A setting nothing reads is a
-    documented promise the application does not keep, so it does not belong
-    here.
+    and the export cache, ``models_dir`` and ``include_development_models`` by
+    the model catalog, ``max_upload_bytes`` by the upload route, and
+    ``ffmpeg_timeout_seconds`` by :func:`straticate.audio.ffmpeg.run_ffmpeg`. A
+    setting nothing reads is a documented promise the application does not
+    keep, so it does not belong here.
     """
 
     model_config = SettingsConfigDict(env_prefix="STRATICATE_")
@@ -74,6 +74,37 @@ class Settings(BaseSettings):
     Defaults to the repository's ``models/`` directory, resolved from this
     module's location so the server can be started from any working directory.
     Override with ``STRATICATE_MODELS_DIR``.
+    """
+
+    include_development_models: bool = False
+    """Whether development fixtures appear in the user-facing model catalog.
+
+    **Environment variable:** ``STRATICATE_INCLUDE_DEVELOPMENT_MODELS``
+    (``1``/``true``/``yes`` to enable). Default ``False``.
+
+    A catalog entry whose manifest declares ``development_only: true`` exists to
+    exercise the application, not to separate audio — today that is the fake
+    separator of ARCHITECTURE.md §8, a comb filter whose output is audibly wrong
+    by design. Left visible it is offered as an ordinary quality tier and, since
+    feature 011's UI preselects a mode's first option, is what an untouched
+    "Start separation" runs. So it is hidden by default: the catalog is filtered
+    once, at load, and every surface downstream of it (``GET /models``,
+    ``GET /models/{model_id}``, ``GET /separation-modes``, ``POST /jobs``,
+    install and removal) sees the same catalog and behaves as though the entry
+    were not there.
+
+    Turn it **on** wherever the fixtures are the point:
+
+    - the backend test suite (``backend/tests/conftest.py`` sets the variable
+      for the whole session);
+    - CI jobs that run the application without downloading real weights;
+    - the Playwright end-to-end tier (feature 030), which drives the real UI
+      against the fake separator and therefore needs
+      ``STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1`` in the environment of the
+      backend process it launches.
+
+    With it on, the catalog is served exactly as written — the behaviour every
+    release up to feature 031 had.
     """
 
     max_upload_bytes: int = 1024**3

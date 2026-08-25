@@ -253,6 +253,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     is closed in the lifespan so an install running at shutdown is cancelled
     rather than orphaned.
 
+    The catalog is built with ``settings.include_development_models``, which is
+    off by default: an application built from stock settings offers no
+    development fixture on any surface, and
+    ``STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1`` is what CI, the test suite and
+    the end-to-end tier set to get them back (feature 032).
+
     Raises:
         ModelCatalogError: If ``settings.models_dir`` holds no valid model
             catalog. The application deliberately refuses to start rather than
@@ -263,7 +269,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Straticate", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
-    catalog = ModelCatalog.from_directory(settings.models_dir)
+    catalog = ModelCatalog.from_directory(
+        settings.models_dir, include_development=settings.include_development_models
+    )
     app.state.model_catalog = catalog
     app.state.model_installer = ModelInstaller(catalog, settings.models_dir)
 

@@ -39,6 +39,15 @@ def resolve_model(catalog: ModelCatalog, mode_id: str, quality_id: str) -> Model
     Modes and their quality options are derived from the catalog (feature 010),
     so this is a pure lookup: no mode, tier or model ID is hardcoded anywhere.
 
+    **That is also what stops a job selecting a development fixture.** The
+    catalog was filtered when it was built (feature 032), so a fixture's tier is
+    not among the mode's options and a mode backed only by fixtures is not a
+    mode at all. A request naming one is refused with the codes that already
+    describe the situation truthfully — ``quality_option_not_found`` or
+    ``separation_mode_not_found``, both 404 — rather than a new code announcing
+    that something is being withheld. No caller can reach a hidden model here,
+    so nothing downstream (the registry, the executor) needs to re-check.
+
     Raises:
         ApplicationError: ``separation_mode_not_found`` (404) when no derived
             mode has that ID; ``quality_option_not_found`` (404) when the mode
