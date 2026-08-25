@@ -180,7 +180,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 034 | Lazy separator builders (torch optional again)| MERGED  | 026        | `034-lazy-separator-builders` | #40 |
 | 035 | First-run model install affordance (UI)      | MERGED  | 025, 032   | `035-install-affordance` | #41 |
 | 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
-| 037 | Model management UI (install/remove/browse)  | PR OPEN | 025, 035   | `037-model-management-ui` | |
+| 037 | Model management UI (install/remove/browse)  | PR OPEN | 025, 035   | `037-model-management-ui` | #44 |
 | 038 | Streaming overlap-add (bounded VRAM)         | PLANNED | 026        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
