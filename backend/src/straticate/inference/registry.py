@@ -54,6 +54,7 @@ cannot run.
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import logging
 import threading
 from collections.abc import Callable, Mapping
@@ -111,6 +112,66 @@ def _separator_unavailable(model: Model) -> ApplicationError:
         status_code=501,
         detail={"model_id": model.id, "architecture": model.architecture},
     )
+
+
+def _torch_is_installed() -> bool:
+    """Whether ``torch`` can be *located*, without importing it.
+
+    :func:`importlib.util.find_spec` walks the same finders an import would but
+    stops before executing the module. That is what makes this safe to ask on a
+    failure path: it costs microseconds (importing torch itself is seconds),
+    and it cannot fail the way *executing* a broken installation does — which
+    is the very situation it is asked about.
+    """
+    try:
+        return importlib.util.find_spec("torch") is not None
+    except (ImportError, ValueError):  # pragma: no cover - defensive
+        # A parent package that cannot be imported, or an entry in
+        # ``sys.modules`` with no ``__spec__``. Either way torch is not usable.
+        return False
+
+
+def _log_backend_import_failure(model: Model, exc: ImportError) -> None:
+    """Report *why* an architecture's implementation could not be imported.
+
+    Two genuinely different deployment faults reach this point, and telling an
+    operator the wrong one wastes their time:
+
+    - **the optional extra was never installed** — the ordinary case, and the
+      fix is one documented command;
+    - **the extra is installed and the import still failed** — a broken or
+      incompatible installation (a mismatched ``einops`` or
+      ``rotary-embedding-torch`` inside the vendored architecture, a corrupted
+      wheel), or a rename inside ``roformer/separator.py``. Advising a
+      reinstall here would send someone to redo something they have already
+      done; what they need is the underlying ``ImportError`` and to know that
+      PyTorch itself is present.
+
+    ``except ImportError`` stays deliberately wide — every one of these means
+    "this build cannot run that model", which is the one thing the client is
+    told (:func:`_separator_unavailable`). The distinction is drawn *here*,
+    in the log, where an operator can act on it.
+    """
+    if _torch_is_installed():
+        logger.warning(
+            "Model %r needs the %r architecture, whose implementation is installed but "
+            "failed to import: %s. PyTorch itself is present, so this is a broken or "
+            "incompatible installation rather than a missing one -- check the versions of "
+            "torch and of the vendored architecture's dependencies (numpy, einops, "
+            "rotary-embedding-torch, beartype).",
+            model.id,
+            model.architecture,
+            exc,
+        )
+    else:
+        logger.warning(
+            "Model %r needs the %r architecture, whose implementation requires PyTorch, "
+            "which is not installed (%s). Install the optional dependencies "
+            "('uv sync --extra torch') to enable it.",
+            model.id,
+            model.architecture,
+            exc,
+        )
 
 
 def separator_info_from_model(model: Model) -> SeparatorInfo:
@@ -215,11 +276,12 @@ def roformer_separator_builder(
     A build without that extra raises ``ImportError`` here, which becomes
     :func:`_separator_unavailable` — the **same** 501 envelope a catalogued but
     unimplemented architecture has always produced, because it is the same fact
-    about this build. The missing package is named in a ``WARNING`` log record
-    instead: an operator who installed Straticate without the extra and then
-    catalogued a real model needs to be told which one to install, and the
-    server's log is where a deployment fault belongs. The browser is told only
-    that the server cannot run this model, which is all it can act on.
+    about this build. The diagnosis goes to a ``WARNING`` log record instead,
+    where :func:`_log_backend_import_failure` separates "the optional extra is
+    not installed" from "the extra is installed and the import still failed" —
+    an operator debugging a broken installation must not be sent to reinstall
+    something they already have. The browser is told only that the server
+    cannot run this model, which is all it can act on.
 
     Args:
         models_dir: ``Settings.models_dir``. ``None`` means this process was not
@@ -244,14 +306,7 @@ def roformer_separator_builder(
         try:
             from straticate.inference.roformer import RoFormerParameters, RoFormerSeparator
         except ImportError as exc:
-            logger.warning(
-                "Model %r needs the %r architecture, whose implementation could not be "
-                "imported (%s). Install the optional PyTorch dependencies "
-                "('uv sync --extra torch') to enable it.",
-                model.id,
-                model.architecture,
-                exc,
-            )
+            _log_backend_import_failure(model, exc)
             raise _separator_unavailable(model) from exc
         return RoFormerSeparator(
             separator_info_from_model(model),
