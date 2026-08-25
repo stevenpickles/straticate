@@ -401,7 +401,7 @@ Auto-format: `npm run format`
 CI additionally runs the end-to-end suite (`npm run e2e`) on every PR; see
 *End-to-end tests* below for running it locally.
 
-## Running both
+## Running both (development)
 
 Two terminals: backend on `:8000`, frontend on `:5173`. The Vite dev server
 proxies `/api` (REST and WebSocket) to the backend, so the browser only talks
@@ -410,6 +410,49 @@ to `:5173`.
 The proxy target is `STRATICATE_BACKEND_URL` when that variable is set
 (defaulting to `http://localhost:8000`), which is how the E2E tier points the
 dev server at the backend it started for itself.
+
+This is the arrangement to develop in — hot module reload, source maps, an
+un-minified bundle — and it is unchanged by the production path below.
+
+## Running it as one process (production build)
+
+Since feature 042 the backend serves the built frontend itself, so *using*
+Straticate is one command on one port. Build the bundle, then start the backend
+as usual:
+
+```bash
+cd frontend && npm run build     # writes frontend/dist/
+cd ../backend && uv run python -m straticate
+```
+
+`http://127.0.0.1:8000` is then the whole application: `/api/v1/**` is the API
+exactly as before, the WebSocket is exactly where it was, and every other path
+is the app (a deep link or a refresh returns `index.html`, which is what makes
+client-side routes survive a reload). `uv run uvicorn straticate.main:app
+--port 8000` serves it identically — the two entry points differ only in who
+owns the bind address, as above.
+
+Both commands go through `uv run`, which **re-syncs the environment to the
+extras that invocation names** — so on a machine carrying a CUDA build of
+PyTorch, run them as `uv run --no-sync …` like every other command here (see
+*What `uv run` does to a PyTorch environment*). Nothing about serving the
+frontend depends on torch either way.
+
+Three things worth knowing:
+
+- **The bundle is located once, when the application is built**, so building the
+  frontend while the server is running means restarting the server.
+- **The bundle path is a setting**, `STRATICATE_FRONTEND_DIST_DIR`, defaulting to
+  this repository's `frontend/dist` resolved from the *package's* location — not
+  from the working directory. `python -m straticate` serves the same app from
+  `backend/`, from the repository root, or from `C:\`.
+- **A checkout with no `frontend/dist` is a normal state.** The API starts and
+  behaves exactly as it always has (which is how the backend suite and the
+  Playwright tier run); only the root URL differs — it explains how to build the
+  bundle instead of returning a 404.
+
+The end-to-end tier below still drives the *development* arrangement, on its own
+ports, and is unaffected by whether `frontend/dist` exists.
 
 ## End-to-end tests (Playwright)
 
@@ -535,7 +578,28 @@ E2E job (Ubuntu), added by feature 030:
 ```text
 apt ffmpeg → uv sync (backend) → npm ci (frontend)
 → cached Chromium → playwright test
+→ vite build → production-mount smoke check
 ```
+
+Those last two steps are feature 042's, and their placement was a decision
+rather than a convenience. The mount and its fallback are covered hermetically
+by `backend/tests/test_frontend_mount.py`, against a synthetic `index.html` in a
+temporary directory — fast, and the right place for routing. What that cannot
+see is the one thing only a **real** Vite build decides: whether the asset URLs
+in the built `index.html` are root-relative and therefore resolve against the
+mount. Setting `base` in `vite.config.ts` would leave every hermetic test green
+and serve an app that loads nothing. So CI builds the frontend once and asserts,
+against a running `python -m straticate`, that the root URL and a deep link are
+the built app, that the asset the built page asks for is served, and that an
+unknown `/api/v1/**` path is still the JSON envelope.
+
+It costs about 15 s — a `vite build` and a server start — because it runs in the
+job that **already has both toolchains installed**. A job of its own would have
+spent a minute installing Python and Node to do the same thing, and adding Node
+to the `backend` job would have slowed the pipeline's critical path. It is
+deliberately *not* a Playwright spec: `webServer` is global to the config, so a
+production spec would make every local `npm run e2e` build the frontend and
+start a third server before running anything.
 
 **FFmpeg is installed by the backend job and by the e2e job; the frontend job
 does not install it** — and that matches who actually uses it. The backend

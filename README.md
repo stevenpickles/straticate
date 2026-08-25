@@ -25,6 +25,47 @@ Select → Configure → Separate → Inspect → Export
 Straticate is deliberately focused on this workflow. It is an inspection and
 extraction tool, not a DAW, and it will not evolve into one.
 
+## Run it
+
+**One process, one URL.** Build the frontend once; after that, starting
+Straticate is a single command.
+
+You need [uv](https://docs.astral.sh/uv/), Node.js ≥ 20 and FFmpeg (with
+`ffprobe`) on `PATH`. A GPU is optional.
+
+```bash
+# once, to build the app
+cd frontend && npm ci && npm run build
+
+# every time, to run it
+cd backend && uv sync --extra torch && uv run python -m straticate
+```
+
+Then open **<http://127.0.0.1:8000>**. The same process serves the interface and
+the API; nothing else needs to be running.
+
+`--extra torch` installs PyTorch, which the real separation models need. It is
+the CPU build; installing a CUDA build is one documented command and changes
+nothing else (see [DEVELOPMENT.md](DEVELOPMENT.md), *PyTorch and CUDA*). Model
+weights are not bundled either: the app shows you each model's licence terms and
+downloads only the one you choose, the first time you ask for a separation.
+
+`STRATICATE_HOST`, `STRATICATE_PORT` and the rest of the settings are documented
+in `backend/src/straticate/config.py`. Straticate binds to loopback and has no
+authentication: it is a local-first tool, not a service to expose.
+
+Haven't built the frontend? The server still starts and the whole API still
+works — the root URL just tells you what to build.
+
+## Develop it
+
+Development is a different arrangement, and deliberately so: the Vite dev server
+on `:5173` with hot reload, proxying `/api` to the backend on `:8000`. That is
+two terminals, and it is what you want while editing the frontend — but it is
+not how the application is meant to be *used*. See
+[DEVELOPMENT.md](DEVELOPMENT.md) for setup, both run modes, the test tiers and
+the quality gates.
+
 ## Architecture at a glance
 
 ```text
