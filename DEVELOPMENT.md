@@ -141,7 +141,7 @@ Redirecting the *named* index (`uv sync --index pytorch-cpu=…/cu130`) loses it
 and the lock fails; and `uv sync` re-pins `torch` from the lock file, so **a
 later `uv sync` puts the CPU build back** and this command has to be repeated.
 That is a fair trade for a default that keeps CI lean, and it is one line in a
-setup script. Read the next two subsections before running anything else: that
+setup script. Read the rest of this section before running anything else: that
 "later `uv sync`" is closer than it looks, and the obvious way to check the
 result is the thing that undoes it.
 
@@ -273,8 +273,9 @@ a guarantee about your environment, and it does not hold for `uv sync`. Verify
 with the interpreter, which cannot be wrong about itself.
 
 The end-to-end check is the application's own device list — and the server has
-to be started the same careful way, or it reverts the wheel on the way up and
-then correctly reports a host with no CUDA device:
+to be started the same careful way. Started as `uv run --extra torch uvicorn …`
+it reverts the wheel on the way up and then correctly reports a host with no
+CUDA device:
 
 ```bash
 cd backend
