@@ -28,6 +28,8 @@ models/**/*.pt
 models/**/*.pth
 models/**/*.onnx
 models/**/*.safetensors
+# Demucs checkpoints (feature 028) use `.th`.
+models/**/*.th
 
 # Agent worktrees (orchestration scratch; never part of the project)
 .claude/

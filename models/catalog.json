@@ -95,6 +95,106 @@
           "residual_stem": "instrumental"
         }
       }
+    },
+    {
+      "schema_version": 1,
+      "id": "standard-stems-001",
+      "display_name": "Standard Stems — Balanced",
+      "architecture": "htdemucs",
+      "version": "htdemucs-v4",
+      "separation_mode": "standard_stems",
+      "quality_tier": "balanced",
+      "stems": ["vocals", "drums", "bass", "other"],
+      "sample_rate": 44100,
+      "requirements": {
+        "recommended_vram_mb": 4096,
+        "minimum_vram_mb": 3072,
+        "minimum_ram_mb": 8192
+      },
+      "capabilities": { "cuda": true, "cpu": true },
+      "artifact": {
+        "download_url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th",
+        "size_bytes": 84141911,
+        "sha256": "8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b4"
+      },
+      "licensing": {
+        "code_license": "MIT",
+        "weights_license": "No formal licence designated. The MIT licence covers the Demucs source code only; the pretrained weights are not in the repository and are not covered by it. The author, Alexandre Défossez, states in facebookresearch/demucs issue #327 (2022-05-23): \"The model weights are not covered by the MIT license, and are provided only for scientific purposes.\" A contributor adds that models trained on MUSDB are restricted to research use. Research and personal use only; not for commercial use, and not redistributable.",
+        "redistribution_permitted": false,
+        "commercial_use_permitted": false,
+        "attribution": "Weights: Hybrid Transformer Demucs (htdemucs, v4) by Alexandre Défossez, Simon Rouard and the Demucs authors, Meta AI Research — https://github.com/adefossez/demucs (maintained fork of https://github.com/facebookresearch/demucs). Architecture: vendored from adefossez/demucs (MIT), which vendors Open-Unmix's Wiener filter (MIT, © 2019 Inria)."
+      },
+      "default_inference_parameters": {
+        "model": {
+          "sources": ["drums", "bass", "other", "vocals"],
+          "audio_channels": 2,
+          "samplerate": 44100,
+          "segment": [39, 5],
+          "channels": 48,
+          "channels_time": null,
+          "growth": 2,
+          "nfft": 4096,
+          "wiener_iters": 0,
+          "end_iters": 0,
+          "wiener_residual": false,
+          "cac": true,
+          "depth": 4,
+          "rewrite": true,
+          "multi_freqs": [],
+          "multi_freqs_depth": 3,
+          "freq_emb": 0.2,
+          "emb_scale": 10,
+          "emb_smooth": true,
+          "kernel_size": 8,
+          "stride": 4,
+          "time_stride": 2,
+          "context": 1,
+          "context_enc": 0,
+          "norm_starts": 4,
+          "norm_groups": 4,
+          "dconv_mode": 3,
+          "dconv_depth": 2,
+          "dconv_comp": 8,
+          "dconv_init": 0.001,
+          "bottom_channels": 512,
+          "t_layers": 5,
+          "t_hidden_scale": 4.0,
+          "t_heads": 8,
+          "t_dropout": 0.02,
+          "t_layer_scale": true,
+          "t_gelu": true,
+          "t_emb": "sin",
+          "t_max_positions": 10000,
+          "t_max_period": 10000.0,
+          "t_weight_pos_embed": 1.0,
+          "t_cape_mean_normalize": true,
+          "t_cape_augment": true,
+          "t_cape_glob_loc_scale": [5000.0, 1.0, 1.4],
+          "t_sin_random_shift": 0,
+          "t_norm_in": true,
+          "t_norm_in_group": false,
+          "t_group_norm": false,
+          "t_norm_first": true,
+          "t_norm_out": true,
+          "t_weight_decay": 0.0,
+          "t_lr": null,
+          "t_sparse_self_attn": false,
+          "t_sparse_cross_attn": false,
+          "t_mask_type": "diag",
+          "t_mask_random_seed": 42,
+          "t_sparse_attn_window": 400,
+          "t_global_window": 100,
+          "t_sparsity": 0.95,
+          "t_auto_sparsity": false,
+          "t_cross_first": false,
+          "rescale": 0.1
+        },
+        "inference": {
+          "chunk_size": 343980,
+          "overlap": 0.25,
+          "transition_power": 1.0
+        }
+      }
     }
   ]
 }
