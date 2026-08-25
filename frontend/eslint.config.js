@@ -8,7 +8,16 @@ import prettier from 'eslint-config-prettier'
 export default tseslint.config(
   // src/api/generated is machine-generated (openapi-typescript); it is
   // excluded from linting and formatting alike (see .prettierignore).
-  { ignores: ['dist', 'coverage', 'src/api/generated'] },
+  {
+    ignores: [
+      'dist',
+      'coverage',
+      'src/api/generated',
+      // Playwright's own output (traces, screenshots, HTML report).
+      'test-results',
+      'playwright-report',
+    ],
+  },
   {
     files: ['**/*.{ts,tsx}'],
     extends: [
@@ -28,6 +37,16 @@ export default tseslint.config(
     files: ['src/state/**/*.{ts,tsx}'],
     rules: {
       'react-refresh/only-export-components': 'off',
+    },
+  },
+  {
+    // The Playwright tier (feature 030) is Node code: it starts servers,
+    // reads generated fixtures off disk and drives a browser. Its
+    // `page.evaluate` callbacks are browser code, so both sets of globals
+    // are legitimately in scope (see tsconfig.e2e.json).
+    files: ['e2e/**/*.ts', 'playwright.config.ts'],
+    languageOptions: {
+      globals: { ...globals.node, ...globals.browser },
     },
   },
   prettier,
