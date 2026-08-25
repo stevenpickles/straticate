@@ -187,11 +187,21 @@ It also stops *importing* it: `import straticate.main` went from ~2.8 s to
 `uv run python -m straticate` on a machine without the extra — saves about two
 seconds. The `backend` job's cost is unchanged in every respect.
 
-Wall-clock: `e2e`'s "Sync backend dependencies" step was 6 s with a warm uv
-cache (030's measurement); the tier runs in parallel with `backend` and
-`frontend` and added nothing to the pipeline's wall-clock before, so it still
-adds nothing. The saving is bandwidth, cache size and cold-start time, not
-critical path.
+Wall-clock, measured on this PR's CI run
+([32854103887](https://github.com/stevenpickles/straticate/actions/runs/32854103887),
+all three jobs green):
+
+| step | before | after |
+| --- | --- | --- |
+| `e2e` · Sync backend dependencies | 6 s (030's measurement, warm uv cache) | **2 s** |
+| `backend` · Sync dependencies | — | 5 s (unchanged: it still installs the extra) |
+| `e2e` job total | 1 min 36 s (030, cold Playwright cache) | 1 min 8 s (warm cache — not directly comparable) |
+| `backend` job total | 2 min 18 s (030) | 2 min 16 s |
+
+The tier already ran in parallel with `backend` and `frontend` and added
+nothing to the pipeline's wall-clock, so it still adds nothing. The saving is
+bandwidth, the size of the `uv` cache the `e2e` job keys on `backend/uv.lock`,
+and backend cold-start time — not critical path.
 
 ## Notes / decisions
 
