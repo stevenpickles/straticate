@@ -708,6 +708,71 @@ model ID (`standard-4stem-001`) that exists nowhere in the repository.
 
 ## Known limitations
 
+### Bass is lost on wide-separation stereo mixes (measured 2026-08-25)
+
+**On a 1968 stereo mix, the `bass` stem came out effectively silent** while the
+other three were healthy. Measured on a real 2:43 track (AAC, 44.1 kHz stereo)
+on an RTX 4060:
+
+| stem | level | peak (of 32767) |
+| --- | --- | --- |
+| vocals | −23.8 dBFS | 17,065 |
+| drums | −31.5 dBFS | 20,729 |
+| **bass** | **−66.2 dBFS** | **176** |
+| other | −22.5 dBFS | 20,972 |
+
+**This is not a stem-mapping fault and not a defect in this feature.** It was
+chased to the source:
+
+- the advertised↔network mapping was verified correct (`(3, 0, 1, 2)`);
+- dumping the **raw network outputs in network order, unmapped**, showed index 1
+  (`bass`) near-silent at source: rms −65.7 dBFS, peak 0.0054;
+- the source's low band is present and substantial — 25.1% of its energy is
+  below 250 Hz — and it lands in `other` (−26.8 dB against the source's −25.2);
+- the four stems still reconstruct the mixture at **+0.9997**, so nothing is
+  being dropped; the bass is being *assigned elsewhere*;
+- the integration tier's synthetic quality test still passes with
+  bass↔true-bass **+0.985**, so the pipeline extracts bass correctly on
+  in-distribution material.
+
+**The cause is the stereo image.** That mix has near-independent channels and a
+hard-panned low end:
+
+| measurement | value |
+| --- | --- |
+| full-band L/R correlation | **+0.23** (modern productions: 0.7–0.95) |
+| <250 Hz L/R correlation | +0.32 |
+| <250 Hz level, L | −21.2 dBFS |
+| <250 Hz level, R | −27.0 dBFS (a 5.8 dB imbalance) |
+
+Demucs is trained on MUSDB18, where bass is essentially always centred. A
+hard-panned, largely uncorrelated bass is outside that distribution.
+
+**Workaround, verified.** Folding the input to mono before separating recovers
+the bass entirely — the same track, same model, same settings:
+
+| | stereo (as released) | mono fold-down |
+| --- | --- | --- |
+| bass rms | −65.7 dBFS | **−32.6 dBFS** |
+| bass peak | 0.0054 | **0.2377** |
+
+a 33 dB improvement, with the other three stems unaffected. Feature **041**
+tracks offering this in the product.
+
+**`htdemucs_ft` does not help — tested, not assumed.** The fine-tuned variant is
+a bag of four models with an identity weight matrix, so each source is produced
+by its own specialist. The bass specialist (`d12395a8-e57c48e6.th`, SHA-256
+verified against the checksum upstream embeds in the filename) was downloaded and
+run on the same track through the same code: **rms −66.2 dBFS, peak 0.0052** —
+indistinguishable from the base model's −65.7 / 0.0054. It would cost four times
+the download and four times the inference time for no benefit on this failure
+mode, so it was not added.
+
+**Feature 026's RoFormer is unaffected** on the same track: vocals −23.3 dBFS,
+instrumental −21.7 dBFS, and its two stems reconstruct the mixture at +1.0000.
+This is specific to Demucs' bass source on wide-stereo material.
+
+
 - **Whole-track memory**, as above: peak grows at 1.85 MiB per second of audio
   because the mixture, the accumulator and the weight tensor are device-resident
   for the whole run. Feature 038 is the fix; this feature reduced the slope by
