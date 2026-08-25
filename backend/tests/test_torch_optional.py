@@ -25,10 +25,11 @@ because inside this session other test modules have legitimately imported it.
 import asyncio
 import importlib
 import json
+import shutil
 import subprocess
 import sys
 from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from importlib.machinery import ModuleSpec
 from pathlib import Path
@@ -81,7 +82,10 @@ proving anything — which
 walks these lists and requires every one of them to raise.
 """
 
-EVICTED_PREFIXES = ("torch", "straticate.inference.roformer.separator")
+BACKEND_MODULE = "straticate.inference.roformer.separator"
+"""The one Straticate module that imports torch at module scope."""
+
+EVICTED_PREFIXES = ("torch", BACKEND_MODULE)
 """Modules that must be re-imported (and so re-blocked) inside the window.
 
 ``torch`` itself, and the one Straticate module that imports it at module
@@ -121,18 +125,18 @@ class MissingModuleFinder:
 
 
 @contextmanager
-def torch_absent() -> Generator[None]:
-    """Make the interpreter behave as if PyTorch were not installed.
+def unimportable(blocked: str, evicted_prefixes: tuple[str, ...]) -> Generator[None]:
+    """Make ``blocked`` unimportable, and force ``evicted_prefixes`` to re-import.
 
-    Nothing is uninstalled and nothing is left changed: the evicted modules and
-    the memoised lazy exports are restored on the way out, so a test that needs
-    torch *before* entering the window (to build a synthetic checkpoint, say)
-    and again after it is unaffected.
+    Nothing is uninstalled and nothing is left changed: the evicted modules,
+    the meta-path finder and the memoised lazy exports are all restored on the
+    way out, so a test that needs the real module *before* entering the window
+    (to build a synthetic checkpoint, say) and again after it is unaffected.
     """
     evicted = {
         name: module
         for name, module in sys.modules.items()
-        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in EVICTED_PREFIXES)
+        if any(name == prefix or name.startswith(f"{prefix}.") for prefix in evicted_prefixes)
     }
     memoised: dict[tuple[str, str], object] = {}
     for module_name, names in LAZY_EXPORTS.items():
@@ -141,7 +145,7 @@ def torch_absent() -> Generator[None]:
             if name in vars(module):
                 memoised[(module_name, name)] = vars(module).pop(name)
 
-    finder = MissingModuleFinder("torch")
+    finder = MissingModuleFinder(blocked)
     for name in evicted:
         del sys.modules[name]
     sys.meta_path.insert(0, finder)
@@ -151,12 +155,29 @@ def torch_absent() -> Generator[None]:
     finally:
         sys.meta_path.remove(finder)
         for name in list(sys.modules):
-            if any(name == prefix or name.startswith(f"{prefix}.") for prefix in EVICTED_PREFIXES):
+            if any(name == prefix or name.startswith(f"{prefix}.") for prefix in evicted_prefixes):
                 del sys.modules[name]
         sys.modules.update(evicted)
         for (module_name, name), value in memoised.items():
             setattr(sys.modules[module_name], name, value)
         importlib.invalidate_caches()
+
+
+def torch_absent() -> AbstractContextManager[None]:
+    """PyTorch is not installed at all — the ordinary deployment without the extra."""
+    return unimportable("torch", EVICTED_PREFIXES)
+
+
+def backend_import_broken() -> AbstractContextManager[None]:
+    """PyTorch **is** installed; the backend module fails to import anyway.
+
+    The other deployment fault: an incompatible ``einops`` or
+    ``rotary-embedding-torch`` inside the vendored architecture, a corrupted
+    wheel, a rename in ``separator.py``. Only the implementation module is
+    blocked here — ``torch`` itself stays importable, which is exactly what
+    :func:`straticate.inference.registry._torch_is_installed` looks for.
+    """
+    return unimportable(BACKEND_MODULE, (BACKEND_MODULE,))
 
 
 def test_the_simulation_really_hides_torch() -> None:
@@ -189,6 +210,91 @@ def test_an_unknown_export_is_still_an_attribute_error() -> None:
     for module_name in LAZY_EXPORTS:
         with pytest.raises(AttributeError):
             getattr(importlib.import_module(module_name), "NoSuchName")  # noqa: B009
+
+
+# --------------------------------------------------------------------------
+# The lazy layer must stay invisible to the type checker
+# --------------------------------------------------------------------------
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+"""``backend/`` — pyright is run from here so it finds ``[tool.pyright]``."""
+
+PYRIGHT_PROBE = """from straticate.inference import SeparatorInfo
+from straticate.inference import SeparaterInfo
+from straticate.inference.roformer import RoFormerSeparator
+from straticate.inference.roformer import RoFormerSeperator
+
+_ = (SeparatorInfo, SeparaterInfo, RoFormerSeparator, RoFormerSeperator)
+"""
+"""Two real exports and two misspellings of them, one per lazy package.
+
+A module-level ``__getattr__`` that pyright can see makes *every* attribute of
+its package resolve, so all four of these type-check and the misspellings ship.
+"""
+
+REAL_NAMES = ("SeparatorInfo", "RoFormerSeparator")
+TYPO_NAMES = ("SeparaterInfo", "RoFormerSeperator")
+
+
+def pyright_executable() -> str | None:
+    """Locate pyright: on ``PATH`` under ``uv run``, else beside the interpreter."""
+    found = shutil.which("pyright")
+    if found is not None:
+        return found
+    for candidate in (
+        Path(sys.executable).parent / "pyright",
+        Path(sys.executable).parent / "pyright.exe",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def test_the_lazy_layer_is_invisible_to_the_type_checker(tmp_path: Path) -> None:
+    """The ``if not TYPE_CHECKING`` guard, pinned by running pyright.
+
+    This is the one property no runtime assertion can reach: guarded and
+    unguarded behave identically at run time, and differ only in what the type
+    checker sees. Without the guard pyright resolves **any** attribute of
+    ``straticate.inference`` and ``straticate.inference.roformer`` through
+    ``__getattr__``'s return type, so a typo — or an export someone deletes —
+    stops being an error in the two packages the whole application imports
+    from. Measured on this checkout: 0 errors without the guard, 4 with it.
+
+    Deleting the guard makes this test fail, which is the entire point of it.
+    """
+    pyright = pyright_executable()
+    if pyright is None:  # pragma: no cover - pyright is a declared dev dependency
+        pytest.skip("pyright is not installed")
+
+    probe = tmp_path / "lazy_export_probe.py"
+    probe.write_text(PYRIGHT_PROBE, encoding="utf-8")
+
+    completed = subprocess.run(
+        [pyright, "--outputjson", str(probe)],
+        cwd=BACKEND_DIR,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    report = cast(dict[str, Any], json.loads(completed.stdout))
+    unresolved = [
+        cast(str, diagnostic["message"])
+        for diagnostic in cast(list[dict[str, Any]], report["generalDiagnostics"])
+        if diagnostic.get("rule") == "reportAttributeAccessIssue"
+    ]
+
+    for typo in TYPO_NAMES:
+        assert any(typo in message for message in unresolved), (
+            f"pyright accepted {typo!r}: the module-level __getattr__ is visible to the "
+            f"type checker, so every attribute of these packages now resolves. "
+            f"Restore the `if not TYPE_CHECKING:` guard. Diagnostics: {unresolved}"
+        )
+    for real in REAL_NAMES:
+        assert not any(real in message for message in unresolved), (
+            f"pyright rejected the genuine export {real!r}: {unresolved}"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -340,6 +446,54 @@ def test_the_missing_package_is_named_in_the_log_not_in_the_envelope(
         "torch" in record.getMessage() and TORCH_BACKED_MODEL_ID in record.getMessage()
         for record in caplog.records
     ), caplog.text
+
+
+def test_a_broken_installation_is_not_reported_as_a_missing_one(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The second deployment fault, told apart from the first — in the log.
+
+    An operator whose ``--extra torch`` install is present but broken (an
+    incompatible ``einops``, a corrupted wheel, a rename in ``separator.py``)
+    must not be advised to run the command they have already run. The envelope
+    is deliberately the same 501 either way.
+    """
+    registry = wired_registry(tmp_path / "models")
+    model = catalog_model(TORCH_BACKED_MODEL_ID)
+
+    with (
+        caplog.at_level("WARNING", logger="straticate.inference.registry"),
+        backend_import_broken(),
+        pytest.raises(ApplicationError) as excinfo,
+    ):
+        registry.get(model)
+
+    assert excinfo.value.code == "separator_unavailable"
+    assert excinfo.value.status_code == 501
+
+    logged = caplog.text
+    assert "uv sync --extra torch" not in logged, logged
+    assert "installed but" in logged and "failed to import" in logged, logged
+    assert TORCH_BACKED_MODEL_ID in logged
+
+
+def test_a_missing_installation_is_the_one_that_gets_the_install_command(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The inverse of the test above: the advice appears exactly when it helps."""
+    registry = wired_registry(tmp_path / "models")
+    model = catalog_model(TORCH_BACKED_MODEL_ID)
+
+    with (
+        caplog.at_level("WARNING", logger="straticate.inference.registry"),
+        torch_absent(),
+        pytest.raises(ApplicationError),
+    ):
+        registry.get(model)
+
+    logged = caplog.text
+    assert "uv sync --extra torch" in logged, logged
+    assert "installed but" not in logged, logged
 
 
 def test_the_failure_is_not_cached_so_installing_torch_fixes_it(tmp_path: Path) -> None:

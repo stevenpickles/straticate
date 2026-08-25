@@ -54,6 +54,19 @@ the `__all__` lists and the types a caller (or pyright) sees are exactly what
 they were — the `if TYPE_CHECKING` imports keep the static surface intact. What
 changed is *when* the cost is paid.
 
+**Both `__getattr__` definitions sit behind `if not TYPE_CHECKING:`, and that
+guard is load-bearing.** A module-level `__getattr__` the type checker can see
+makes *every* attribute of its package resolve, so
+`from straticate.inference import SeparaterInfo` — a typo — and any export
+someone later deletes stop being type errors, in the two packages the whole
+application imports from. Pyright evaluates `TYPE_CHECKING` as true, so the
+branch is statically unreachable and the `if TYPE_CHECKING` imports are the
+entire surface it sees; at runtime the branch is the live one. Measured on this
+checkout: pyright reports **0 errors** on a probe file containing two
+deliberate misspellings without the guard, and **4** with it. That is pinned by
+a test that runs pyright over exactly that probe (see below), so the guard
+cannot be "simplified" away unnoticed.
+
 ### 3. The RoFormer builder resolves its implementation on first use
 
 `roformer_separator_builder()` keeps its signature and its place in
@@ -90,6 +103,19 @@ the extras it is given, so `--extra torch` is repeated on every `uv run` step of
 the `backend` job — omitting it on one step would silently uninstall torch for
 the next.
 
+### 6. `AGENTS.md`'s Definition-of-Done commands
+
+The same trap bites *people*, and no CI job would have caught it: the documented
+backend quality bar was `uv run ruff format --check .` · `uv run ruff check .` ·
+`uv run pyright` · `uv run pytest`, and the first of those to run now uninstalls
+torch, after which collection fails in `roformer_fixtures.py`,
+`test_api_jobs.py`, `test_inference_registry.py`, `test_roformer_separator.py`,
+`test_roformer_mel_filters.py`, `test_roformer_integration.py` and
+`test_torch_optional.py` (there is no `pytest.importorskip` anywhere, by
+design — the suite covers the real separator). All four commands now carry
+`--extra torch`, with the reason spelled out next to them. The application
+itself still runs fine without the extra; it is the *test suite* that needs it.
+
 ## Error contract: unchanged, deliberately
 
 A job for a model whose backend cannot be imported raises the **existing**
@@ -103,11 +129,27 @@ No new error code was invented: from the client's side "this build has no
 implementation able to run that model" is a single fact, however the server
 reached it. The message was **not** changed to mention the missing package
 either — that would be a change to a documented response body for the benefit
-of a reader who cannot act on it. Instead the registry logs a `WARNING` naming
-the model, the architecture, the underlying `ImportError` and the fix
-(`uv sync --extra torch`). A deployment fault belongs in the server's log.
+of a reader who cannot act on it. `docs/contracts/rest-api.md` therefore needed
+no edit.
 
-`docs/contracts/rest-api.md` therefore needed no edit.
+The diagnosis goes to a `WARNING` log record instead, and
+`_log_backend_import_failure()` tells apart the **two** deployment faults that
+reach it, because `except ImportError` is necessarily wider than either one:
+
+- **the extra was never installed** — `importlib.util.find_spec("torch")` finds
+  nothing. The log names the model, the architecture, the underlying error, and
+  the one command that fixes it (`uv sync --extra torch`).
+- **the extra is installed and the import failed anyway** — a mismatched
+  `einops` or `rotary-embedding-torch` inside the vendored architecture, a
+  corrupted wheel, a rename in `separator.py`. Advising a reinstall here would
+  send an operator to redo something they have already done, so the log says
+  PyTorch *is* present, that this is a broken or incompatible installation, and
+  which versions to check.
+
+`find_spec` is what makes this cheap and safe to ask on a failure path: it walks
+the same finders an import would but stops before *executing* the module — which
+is the very thing that just failed. The envelope is identical in both cases, and
+a test pins that.
 
 ## Expected modules/files
 
@@ -119,6 +161,7 @@ the model, the architecture, the underlying `ImportError` and the fix
 - `backend/pyproject.toml`, `backend/uv.lock`
 - `backend/tests/test_torch_optional.py` (new)
 - `.github/workflows/ci.yml`
+- `AGENTS.md` — the backend Definition-of-Done commands
 
 ## Acceptance criteria
 
@@ -136,7 +179,7 @@ the model, the architecture, the underlying `ImportError` and the fix
 
 ## Required tests
 
-`backend/tests/test_torch_optional.py`, 16 tests:
+`backend/tests/test_torch_optional.py`, 19 tests:
 
 **How absence is simulated** — the same way feature 018 does it: nothing is
 uninstalled. A `torch_absent()` context manager evicts `torch` and
@@ -154,17 +197,29 @@ vacuously.
   `torch` out of `sys.modules`; so does importing the roformer package for its
   architecture name; so does building the default registry (3). A subprocess is
   the only honest place for this: torch *is* installed for the `backend` job.
+- **the `if not TYPE_CHECKING:` guard**, pinned by running pyright over a probe
+  file that imports two genuine exports and two misspellings of them, one per
+  lazy package, and requiring the misspellings to be rejected and the genuine
+  ones accepted (1). This is the one property no runtime assertion can reach:
+  guarded and unguarded behave identically at run time and differ only in what
+  the type checker sees. Verified to fail when the guard is deleted (`pyright
+  accepted 'SeparaterInfo' … Diagnostics: []`) and to pass with it, in 2.4 s.
 - the registry's 501: right code/status/message/detail; provably
   indistinguishable from an unimplemented architecture; the package named in the
   log and not in the envelope; not cached, so the same registry builds the
   separator once torch is back; the fake engine unaffected (5)
+- **the two deployment faults told apart in the log** — a *broken* install
+  (torch importable, the backend module not) is still a 501 but is never advised
+  to run `uv sync --extra torch`, and a *missing* install is (2). The second
+  window is the same harness pointed at
+  `straticate.inference.roformer.separator` alone, leaving torch importable.
 - the application: `create_app()` succeeds; `/health`, `/models` and
   `/separation-modes` serve; a fake job runs upload → job → completion →
   result → real `RIFF` stem bytes; a job for a torch-backed model whose weights
   **are** installed is the documented 501 envelope; and the inverse — with torch
   present that same request is a `201` (4)
 
-Full backend suite: **741 passed, 4 deselected** under `-W error`
+Full backend suite: **744 passed, 4 deselected** under `-W error`
 (725 before this feature). E2E tier against a torch-free backend: **13 passed**.
 
 ## What each CI job costs
