@@ -2,10 +2,15 @@ import { useCallback, useEffect, useRef } from 'react'
 import { ApiError } from '../api/client'
 import { createJob } from '../api/jobs'
 import { listSeparationModes } from '../api/modes'
+import { formatFileSize } from '../format'
 import { useAppDispatch, useAppState } from '../state/appState'
 import { useJobDispatch } from '../state/jobState'
+import type { Model } from '../api/types'
 import { ModelInstallPanel } from './ModelInstallPanel'
+import { ModelLicence } from './ModelLicence'
+import { useModelCatalog } from './useModelCatalog'
 import {
+  installationOf,
   startBlockedReason,
   useModelInstallation,
 } from './useModelInstallation'
@@ -37,6 +42,45 @@ function optionId(kind: string, id: string): string {
 }
 
 /**
+ * What a quality tier's weights cost, in a phrase, or `null` when there is
+ * nothing worth saying — a model that needs no download, or one the catalog
+ * read has not answered for yet.
+ *
+ * This is feature 037's answer to the question open since feature 010 — *no*,
+ * a mode must not hide tiers whose weights are missing — made visible instead
+ * of merely decided. A hidden tier is a product that silently differs from one
+ * machine to the next, and on a default server it would leave the configure
+ * step with nothing in it at all. A tier that says what it would cost is
+ * something a user can act on; and since feature 035 an uninstalled tier can
+ * no longer produce a surprise, because Start is disabled with a stated reason
+ * until its weights are there.
+ *
+ * The phrase is derived from the catalog, so **every** tier is priced, not
+ * only the selected one — which is what makes "see it, price it, install it"
+ * true of a list rather than of one radio button at a time.
+ */
+function tierWeightsNote(model: Model | undefined): string | null {
+  const block = installationOf(model ?? null)
+  if (block === null || !block.requires_download) {
+    return null
+  }
+  switch (block.state) {
+    case 'installed':
+      return 'Installed'
+    case 'downloading':
+      return 'Downloading its weights…'
+    case 'failed':
+      return 'Its last install failed'
+    default: {
+      const total = block.total_bytes ?? null
+      return total === null
+        ? 'Needs a weights download'
+        : `Needs a ${formatFileSize(total)} download`
+    }
+  }
+}
+
+/**
  * The `configure` step of the workflow: choose **what** to separate (a
  * separation mode) and **how well** (a quality tier), then start the job.
  *
@@ -52,6 +96,15 @@ function optionId(kind: string, id: string): string {
  * offers to install it, and "Start separation" is disabled with a visible,
  * announced reason until the weights are there. Everything else on this screen
  * stays usable while a download runs — the transfer belongs to the backend.
+ *
+ * Feature 037 added the two things that were missing from that. **Every** tier
+ * is priced from the model catalog, not only the selected one, which is what
+ * makes "no, do not hide tiers whose weights are missing" an answer a user can
+ * act on rather than a decision recorded in a document. And the selected
+ * model's **licence** is rendered here — code terms, weights terms, what is
+ * and is not permitted, and the attribution the licence requires — because
+ * this is where the model is chosen, and the moment before an install is the
+ * only one at which those terms can still change the decision.
  *
  * Starting a separation posts the selection to `POST /api/v1/jobs` **without**
  * a `device_id`, letting the backend pick the best compute device (its
@@ -99,6 +152,23 @@ export function SeparationOptions() {
   // Each tier names the model backing it, and a catalogued model is not
   // necessarily a ready one: weights are a download (ARCHITECTURE.md §9).
   const installation = useModelInstallation(selectedOption?.model_id ?? null)
+
+  // …and every *other* tier's model is one too. The catalog is read once so
+  // each tier can be priced where it is chosen rather than only after it is
+  // selected — feature 035's panel describes the selection, and a mode with
+  // two uninstalled tiers would otherwise have to be clicked through to find
+  // out what each costs. A failed catalog read simply leaves the tiers
+  // unannotated: it is an enrichment, never a gate.
+  const catalog = useModelCatalog()
+  const modelFor = (modelId: string | undefined): Model | undefined =>
+    modelId === undefined
+      ? undefined
+      : catalog.models.find((model) => model.id === modelId)
+
+  // Licensing is read from whichever record is fresher, but it is manifest
+  // data and identical in both: the point is that it is on screen *before* an
+  // install, which is the only moment its terms can still change the decision.
+  const selectedModel = installation.model ?? modelFor(selectedOption?.model_id)
 
   // The single question "may a separation start?", asked of the whole handle:
   // an unread model is not a ready one, so this also covers the round trip
@@ -221,30 +291,53 @@ export function SeparationOptions() {
           {selectedMode !== undefined && (
             <fieldset className="separation-options-group">
               <legend className="separation-options-legend">Quality</legend>
-              {selectedMode.quality_options.map((option) => (
-                <div className="separation-option" key={option.id}>
-                  <input
-                    type="radio"
-                    id={optionId('quality', option.id)}
-                    name="separation-quality"
-                    value={option.id}
-                    checked={option.id === qualityId}
-                    onChange={() => {
-                      dispatch({
-                        type: 'configure/qualitySelected',
-                        qualityId: option.id,
-                      })
-                    }}
-                  />
-                  <label
-                    className="separation-option-label"
-                    htmlFor={optionId('quality', option.id)}
-                  >
-                    {option.display_name}
-                  </label>
-                </div>
-              ))}
+              {selectedMode.quality_options.map((option) => {
+                const note = tierWeightsNote(modelFor(option.model_id))
+                const noteId = `${optionId('quality', option.id)}-weights`
+                return (
+                  <div className="separation-option" key={option.id}>
+                    <input
+                      type="radio"
+                      id={optionId('quality', option.id)}
+                      name="separation-quality"
+                      value={option.id}
+                      checked={option.id === qualityId}
+                      // The note lives outside the label so the tier's own
+                      // name stays its accessible name, and is announced as a
+                      // description instead.
+                      aria-describedby={note === null ? undefined : noteId}
+                      onChange={() => {
+                        dispatch({
+                          type: 'configure/qualitySelected',
+                          qualityId: option.id,
+                        })
+                      }}
+                    />
+                    <label
+                      className="separation-option-label"
+                      htmlFor={optionId('quality', option.id)}
+                    >
+                      {option.display_name}
+                    </label>
+                    {note !== null && (
+                      <p className="separation-option-weights" id={noteId}>
+                        {note}
+                      </p>
+                    )}
+                  </div>
+                )
+              })}
             </fieldset>
+          )}
+
+          {/*
+            The terms of the model this tier runs, where the tier is chosen —
+            before an install, which is the only moment they can still change
+            the decision, and including the attribution the licence requires.
+            A credit nobody sees is not a credit given.
+          */}
+          {selectedModel !== undefined && (
+            <ModelLicence model={selectedModel} compact />
           )}
 
           <ModelInstallPanel installation={installation} />

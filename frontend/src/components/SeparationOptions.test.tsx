@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SeparationOptions } from './SeparationOptions'
 import {
@@ -11,6 +11,10 @@ import {
 import { JobStateProvider, useJobState } from '../state/jobState'
 import {
   modelInstalling,
+  modelLicensed,
+  samplePermissiveLicensing,
+  sampleRestrictiveLicensing,
+  sampleSilentWeightsLicensing,
   sampleAudioFile,
   sampleBuiltInModel,
   sampleInstallableModel,
@@ -67,8 +71,16 @@ function stubFetch(options: {
   job?: Response | Promise<Response>
   model?: (modelId: string) => Response | Promise<Response>
   install?: (modelId: string) => Response | Promise<Response>
+  /**
+   * `GET /models`, which feature 037 reads once so every quality tier can be
+   * priced where it is chosen. It defaults to an empty catalog: a tier the
+   * catalog says nothing about is simply not annotated, which is what keeps
+   * every test that is *not* about pricing reading as it did before.
+   */
+  catalog?: Model[] | Response | Promise<Response>
 }): FetchMock {
   const modes = options.modes ?? sampleSeparationModes
+  const catalog = options.catalog ?? []
   const model =
     options.model ??
     ((modelId: string) =>
@@ -90,6 +102,11 @@ function stubFetch(options: {
     }
     if (url.includes('/models/')) {
       return Promise.resolve(model(requestedModelId(url)))
+    }
+    if (url.endsWith('/models')) {
+      return Promise.resolve(
+        Array.isArray(catalog) ? jsonResponse(catalog) : catalog,
+      )
     }
     throw new Error(`unexpected fetch: ${url}`)
   })
@@ -361,6 +378,9 @@ describe('SeparationOptions starting a separation', () => {
       }
       if (url.includes('/models/')) {
         return Promise.resolve(jsonResponse(sampleBuiltInModel))
+      }
+      if (url.endsWith('/models')) {
+        return Promise.resolve(jsonResponse([]))
       }
       jobAttempts += 1
       return Promise.resolve(
@@ -743,5 +763,224 @@ describe('SeparationOptions before the model has been read', () => {
     await waitFor(() => {
       expect(start).toBeEnabled()
     })
+  })
+})
+
+describe('SeparationOptions pricing every tier', () => {
+  const [fastTier, hqTier] = twoStemMode?.quality_options ?? []
+
+  /** The catalog record backing a tier, with an `installation` block. */
+  function catalogEntry(
+    modelId: string,
+    installation: Partial<Model['installation']>,
+  ): Model {
+    return modelInstalling(installation as never, {
+      ...sampleInstallableModel,
+      id: modelId,
+      display_name: modelId,
+    })
+  }
+
+  /** The sentence a tier's radio points at with `aria-describedby`. */
+  function tierNote(name: string): string | null {
+    const radio = screen.getByRole('radio', { name })
+    const id = radio.getAttribute('aria-describedby')
+    return id === null
+      ? null
+      : (document.getElementById(id)?.textContent ?? null)
+  }
+
+  it('prices every tier, not only the one that happens to be selected', async () => {
+    // Feature 035's panel describes the *selection*. A mode with two
+    // uninstalled tiers would otherwise have to be clicked through to find out
+    // what each of them costs.
+    stubFetch({
+      catalog: [
+        catalogEntry(fastTier?.model_id ?? '', {
+          state: 'available',
+          total_bytes: sampleWeightsBytes,
+        }),
+        catalogEntry(hqTier?.model_id ?? '', { state: 'installed' }),
+      ],
+    })
+    renderOptions()
+    await screen.findByRole('radio', { name: fastTier?.display_name })
+
+    await waitFor(() => {
+      expect(tierNote(fastTier?.display_name ?? '')).toBe(
+        `Needs a ${formatFileSize(sampleWeightsBytes)} download`,
+      )
+    })
+    expect(tierNote(hqTier?.display_name ?? '')).toBe('Installed')
+  })
+
+  it('shows a tier whose weights are missing rather than hiding it', async () => {
+    // The question open since feature 010, answered here: **no**. A hidden
+    // tier makes the product silently differ from machine to machine, and on a
+    // default server it would empty the configure step altogether. A tier a
+    // user can see, price and install is strictly better — and since feature
+    // 035 it cannot surprise anyone, because Start is disabled with a reason
+    // until the weights are there.
+    stubFetch({
+      catalog: [
+        catalogEntry(fastTier?.model_id ?? '', {
+          state: 'available',
+          total_bytes: sampleWeightsBytes,
+        }),
+        catalogEntry(hqTier?.model_id ?? '', {
+          state: 'available',
+          total_bytes: sampleWeightsBytes,
+        }),
+      ],
+      model: (modelId) =>
+        jsonResponse(
+          modelInstalling(
+            { state: 'available' },
+            { ...sampleInstallableModel, id: modelId, display_name: modelId },
+          ),
+        ),
+    })
+    renderOptions()
+
+    for (const option of twoStemMode?.quality_options ?? []) {
+      expect(
+        await screen.findByRole('radio', { name: option.display_name }),
+      ).toBeInTheDocument()
+    }
+    await waitFor(() => {
+      expect(tierNote(hqTier?.display_name ?? '')).toMatch(
+        /needs a .* download/i,
+      )
+    })
+    expect(
+      await screen.findByRole('button', { name: 'Start separation' }),
+    ).toBeDisabled()
+  })
+
+  it('names a downloading tier and a failed one for what they are', async () => {
+    stubFetch({
+      catalog: [
+        catalogEntry(fastTier?.model_id ?? '', {
+          state: 'downloading',
+          progress: 0.5,
+        }),
+        catalogEntry(hqTier?.model_id ?? '', { state: 'failed' }),
+      ],
+    })
+    renderOptions()
+    await screen.findByRole('radio', { name: fastTier?.display_name })
+
+    await waitFor(() => {
+      expect(tierNote(fastTier?.display_name ?? '')).toBe(
+        'Downloading its weights…',
+      )
+    })
+    expect(tierNote(hqTier?.display_name ?? '')).toBe('Its last install failed')
+  })
+
+  it('says nothing about a tier the catalog read could not describe', async () => {
+    // The annotation is an enrichment, never a gate: a failed catalog read
+    // leaves the tiers exactly as feature 011 rendered them.
+    stubFetch({ catalog: errorResponse('internal_error', 'No catalog.', 500) })
+    renderOptions()
+
+    const radio = await screen.findByRole('radio', {
+      name: fastTier?.display_name,
+    })
+    expect(radio).not.toHaveAttribute('aria-describedby')
+    expect(radio).toBeEnabled()
+  })
+
+  it('says nothing about a tier whose model needs no download', async () => {
+    stubFetch({
+      catalog: [
+        { ...sampleBuiltInModel, id: fastTier?.model_id ?? '' },
+        catalogEntry(hqTier?.model_id ?? '', { state: 'installed' }),
+      ],
+    })
+    renderOptions()
+    await screen.findByRole('radio', { name: fastTier?.display_name })
+
+    await waitFor(() => {
+      expect(tierNote(hqTier?.display_name ?? '')).toBe('Installed')
+    })
+    expect(tierNote(fastTier?.display_name ?? '')).toBeNull()
+  })
+})
+
+describe('SeparationOptions licensing at the point of choice', () => {
+  const [fastTier] = twoStemMode?.quality_options ?? []
+
+  it('renders the selected model’s terms and its required attribution', async () => {
+    // A credit nobody sees is not a credit given, and the moment before an
+    // install is the only one at which terms can still change the decision.
+    const licensed = modelLicensed(sampleRestrictiveLicensing, {
+      ...sampleInstallableModel,
+      id: fastTier?.model_id ?? '',
+      display_name: 'Vocals — Fast',
+    })
+    stubFetch({ catalog: [licensed], model: () => jsonResponse(licensed) })
+    renderOptions()
+
+    const licence = await screen.findByRole('region', {
+      name: 'Licensing for Vocals — Fast',
+    })
+    expect(within(licence).getByText('Restricted use')).toBeInTheDocument()
+    expect(licence).toHaveTextContent(/research and personal use only/i)
+    expect(licence).toHaveTextContent(
+      String(sampleRestrictiveLicensing.attribution),
+    )
+    expect(licence).toHaveTextContent('Not permitted')
+  })
+
+  it('shows the terms while the weights are still uninstalled', async () => {
+    const licensed = modelLicensed(sampleSilentWeightsLicensing, {
+      ...sampleInstallableModel,
+      id: fastTier?.model_id ?? '',
+      display_name: 'Vocals — Fast',
+    })
+    stubFetch({ catalog: [licensed], model: () => jsonResponse(licensed) })
+    renderOptions()
+
+    const licence = await screen.findByRole('region', {
+      name: 'Licensing for Vocals — Fast',
+    })
+    expect(within(licence).getByText('Terms not stated')).toBeInTheDocument()
+    expect(licence).toHaveTextContent(/does not cover the weights/i)
+    // …and the install it is about has not happened.
+    expect(
+      await screen.findByRole('button', { name: 'Install model' }),
+    ).toBeEnabled()
+  })
+
+  it('follows the selection when the user switches tier', async () => {
+    const forId = (modelId: string): Model =>
+      modelLicensed(
+        modelId === fastTier?.model_id
+          ? sampleRestrictiveLicensing
+          : samplePermissiveLicensing,
+        { ...sampleBuiltInModel, id: modelId, display_name: modelId },
+      )
+    stubFetch({
+      catalog: (twoStemMode?.quality_options ?? []).map((option) =>
+        forId(option.model_id),
+      ),
+      model: (modelId) => jsonResponse(forId(modelId)),
+    })
+    renderOptions()
+
+    await screen.findByRole('region', {
+      name: `Licensing for ${fastTier?.model_id ?? ''}`,
+    })
+
+    const other = twoStemMode?.quality_options[1]
+    await userEvent.click(
+      screen.getByRole('radio', { name: other?.display_name }),
+    )
+    expect(
+      await screen.findByRole('region', {
+        name: `Licensing for ${other?.model_id ?? ''}`,
+      }),
+    ).toBeInTheDocument()
   })
 })
