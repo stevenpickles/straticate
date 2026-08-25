@@ -33,9 +33,11 @@ admission for the case it was written for: no figure.
   `free_bytes` and `total_bytes`, both `int | None`.
 - **`backend/src/straticate/system/storage.py`** — `read_disk_usage` (the
   platform seam over `shutil.disk_usage`), `nearest_existing_dir`, and
-  `storage_report`, which never raises.
+  `storage_report`, which never raises: the directory walk is **inside** the
+  guard, because `Path.is_dir` re-raises `EACCES`.
 - **`backend/src/straticate/api/system.py`** — `GET /system/storage`, beside
-  018's `GET /system/devices` in the same router.
+  018's `GET /system/devices` in the same router, with the (blocking)
+  filesystem read offloaded via `asyncio.to_thread`.
 - `scripts/export_openapi.py` lists the new schema among its root models;
   `frontend/src/api/generated/api.d.ts` is regenerated and committed.
 
@@ -150,6 +152,37 @@ raises) is the answer unknown. A path component that exists but is a **file**
 is skipped rather than measured: `{file}/weights` cannot be created, so the
 file is not the filesystem the install would use.
 
+## Decision: the read is offloaded, and the whole of it is guarded
+
+Both of these came out of review, and both undercut reasoning this feature
+relies on.
+
+**The route offloads to a worker thread** (`asyncio.to_thread`). `stat` and
+`shutil.disk_usage` are filesystem calls; on an unresponsive network mount —
+*the very case the refuse-or-warn argument above cites as a reason a reading
+can be wrong* — they block for as long as the mount does. On the event loop
+that stalls every REST request, the feature 013 WebSocket hub and job progress
+delivery behind one `stat`, which is what AGENTS.md principle 4 and
+ARCHITECTURE.md §14 forbid; features 022 and 025 offload their blocking work
+for exactly this reason. `/system/devices` avoids the question by caching at
+startup, and caching is the wrong answer here — so the read is offloaded rather
+than cached, and the no-cache decision stands. `asyncio.to_thread` is not
+cancellable, which costs nothing in this case: the work is a pure read that
+publishes no state, so a client that disconnects leaves a thread to finish a
+`stat` and discard the answer. (025's export path has to *shield* its offloaded
+work precisely because that work publishes an artifact.)
+
+**The directory walk is inside the try, not outside it.** `Path.is_dir`
+swallows only the errnos `pathlib` treats as "does not exist" — `ENOENT`,
+`ENOTDIR`, `EBADF`, `ELOOP`, and three Windows equivalents — and re-raises
+everything else, `EACCES` included. With the walk outside the guard, a
+`models_dir` whose ancestor the process could not read produced a `500` instead
+of the `200 {"free_bytes": null, "total_bytes": null}` this feature's own
+acceptance criterion promises for a permissions failure — and no test caught it,
+because every injected failure went in at the `read_usage` seam, which was
+already inside the guard. Both regression tests (unit and over HTTP) were
+verified to fail against the pre-fix code.
+
 ## Decision: how a poll was avoided
 
 AGENTS.md principle 3 forbids polling loops, and 025 and 035 both reasoned
@@ -226,10 +259,13 @@ with each other on screen at the same time.
 - [x] All backend and frontend gates green; the new backend tests are clean
       under `-W error`; the E2E suite passes (24 tests), with two new specs for
       the behaviour that visibly changed.
+- [x] The endpoint never blocks the event loop: the filesystem read runs in a
+      worker thread, proven by a test that keeps other requests answering while
+      one is parked.
 
 ## Required tests
 
-**Backend** (`tests/test_storage.py`, 14 tests; `tests/test_system.py`, +3) —
+**Backend** (`tests/test_storage.py`, 15 tests; `tests/test_system.py`, +5) —
 the platform primitive is stubbed at its seam, so **no test fills a disk**:
 
 - the happy path, and that the reader is asked about the models directory;
@@ -241,10 +277,17 @@ the platform primitive is stubbed at its seam, so **no test fills a disk**:
 - each failure of the primitive — permissions, a vanished path, an unsupported
   platform, an exotic `OSError`, and a reading that makes no sense — degrading
   to `null`/`null` with one warning and no exception;
+- an ancestor that cannot be stat'ed (`Path.is_dir` raising `PermissionError`)
+  degrading the same way rather than propagating — the walk is inside the
+  guard;
 - two tests against the *real* `shutil.disk_usage` for a directory that exists;
 - over HTTP: the real application's report, the shape of the payload, the
-  degraded `200` with nulls, and that the figures describe
-  `Settings.models_dir` rather than the working directory.
+  degraded `200` with nulls, that the figures describe `Settings.models_dir`
+  rather than the working directory, that a permissions failure in the
+  *directory walk* is also a `200` with nulls rather than a `500`, and that
+  `/health` and `/system/devices` are still served while a storage read is
+  parked in its worker thread (the read is bounded, so a regression fails the
+  test in seconds instead of deadlocking the suite).
 
 **Frontend** (34 new tests: 4 + 13 + 17 in the three new suites, plus 4, 3 and 7
 added to the three existing ones — 116 across the six files):
@@ -312,6 +355,16 @@ hold between requests. `storage_report` is therefore a plain function reading
   nothing warns about running out of room mid-job. That is a real gap and a
   different feature (it wants a pre-flight estimate from the audio's duration,
   not a bare figure).
+- **A wedged mount now holds a worker thread rather than the event loop.**
+  That is the right trade — one thread out of the shared pool instead of every
+  request, the hub and job progress — but it is not free, and there is no
+  timeout to give it: `shutil.disk_usage` takes none, and `docs/contracts/`
+  already notes that the pool is shared with FFmpeg (features 022/025). A
+  client that keeps asking a hung mount would occupy threads. Bounding it would
+  mean a watchdog around an uncancellable call, which is a bigger design
+  question than this feature; the honest position is that a host in that state
+  has larger problems, and the endpoint degrades to "unknown" for every failure
+  it *can* observe.
 - **A download's `.part` is not counted against the figure.** While an install
   runs, free space is falling; the UI does not show that, because it does not
   offer an install for a model that is already downloading. Cheap to add if a

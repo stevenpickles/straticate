@@ -41,6 +41,19 @@ Two deliberate differences from 018
   call is a single ``statvfs``/``GetDiskFreeSpaceEx`` and costs less than the
   HTTP round trip carrying it.
 
+Everything here is synchronous and blocking
+-------------------------------------------
+
+``stat`` and ``shutil.disk_usage`` are filesystem calls. On a healthy local
+disk they are microseconds; on an unresponsive network mount — a case this
+feature's own warn-rather-than-refuse reasoning explicitly anticipates — they
+block for as long as the mount does. So :func:`storage_report` is a plain
+synchronous function and the *route* offloads it with :func:`asyncio.to_thread`
+(:func:`straticate.api.system.read_storage`), the discipline features 022 and
+025 already follow for FFmpeg and for downloads. ``/system/devices`` sidesteps
+the question by probing once at startup; this endpoint deliberately does not
+cache, so it has to answer it properly.
+
 Which directory is measured
 ---------------------------
 
@@ -108,8 +121,18 @@ def nearest_existing_dir(path: Path) -> Path | None:
     filesystem an install writes to — so this substitution reports on the right
     disk rather than approximating one.
 
-    ``Path.is_dir`` answers ``False`` rather than raising for a path it cannot
-    stat, so an unreadable ancestor is simply skipped.
+    **This can raise, and callers must guard it.** ``Path.is_dir`` swallows only
+    the errors :mod:`pathlib` calls "does not exist" — ``ENOENT``, ``ENOTDIR``,
+    ``EBADF``, ``ELOOP`` and three Windows equivalents — and re-raises anything
+    else. ``EACCES`` is **not** on that list, so an ancestor the process may not
+    stat propagates a :class:`PermissionError` from here. :func:`storage_report`
+    is the guarded entry point that turns it into the documented unknown; an
+    earlier version of this docstring claimed the opposite and put the walk
+    outside that guard, which is exactly how a permissions failure became a
+    ``500`` instead of the ``200`` the contract promises.
+
+    Raises:
+        OSError: An ancestor could not be examined (e.g. ``PermissionError``).
     """
     for candidate in (path, *path.parents):
         if candidate.is_dir():
@@ -129,30 +152,44 @@ def storage_report(models_dir: Path, read_usage: DiskUsageReader | None = None) 
     Returns:
         The figures, or :data:`UNKNOWN_STORAGE` when the host cannot produce them.
 
-    **Never raises.** Any failure — a path with no examinable ancestor, a
-    permissions error, an unsupported platform — is logged once at warning
-    level and degrades to the documented unknown report, exactly as feature
-    018's probes degrade to "no devices". Negative or nonsensical readings are
-    clamped to ``0``, which the contract distinguishes from unknown.
+    **Never raises.** Any failure — a path with no examinable ancestor, an
+    ancestor that cannot be stat'ed, a permissions error, an unsupported
+    platform — is logged once at warning level and degrades to the documented
+    unknown report, exactly as feature 018's probes degrade to "no devices".
+    Negative or nonsensical readings are clamped to ``0``, which the contract
+    distinguishes from unknown.
+
+    **The whole read is inside the guard, the directory walk included.**
+    :func:`nearest_existing_dir` is not exception-free — ``Path.is_dir`` lets
+    ``EACCES`` through — so leaving the walk outside meant a ``models_dir``
+    whose ancestor the process cannot read answered ``500`` rather than the
+    contract's ``200`` with ``null`` figures. Interpreting the reading is
+    inside it too: a reading this code cannot make sense of is the same kind
+    of event as a call that failed, and "never raises" has to cover both.
+
+    **Blocking.** ``stat`` and ``shutil.disk_usage`` are filesystem calls, and
+    on an unresponsive network mount they can hang for as long as the mount
+    does. Callers on the event loop must offload this to a worker thread; the
+    route does (see :func:`straticate.api.system.read_storage`).
     """
     reader = read_usage or read_disk_usage
-    target = nearest_existing_dir(models_dir)
-    if target is None:
-        logger.warning(
-            "No existing directory at or above %s; free disk space is unknown.", models_dir
-        )
-        return UNKNOWN_STORAGE
+    target: Path | None = None
     try:
+        target = nearest_existing_dir(models_dir)
+        if target is None:
+            logger.warning(
+                "No existing directory at or above %s; free disk space is unknown.", models_dir
+            )
+            return UNKNOWN_STORAGE
         usage = reader(target)
-        # Inside the ``try`` with the call itself: a reading this code cannot
-        # make sense of is the same kind of event as a call that failed, and
-        # "never raises" has to cover both.
         return StorageReport(
             free_bytes=max(int(usage.free), 0),
             total_bytes=max(int(usage.total), 0),
         )
     except Exception:
         logger.warning(
-            "Could not read free disk space for %s; reporting unknown.", target, exc_info=True
+            "Could not read free disk space for %s; reporting unknown.",
+            target or models_dir,
+            exc_info=True,
         )
         return UNKNOWN_STORAGE

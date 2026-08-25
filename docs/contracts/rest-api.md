@@ -67,7 +67,10 @@ filesystem holding `Settings.models_dir` — the directory an install writes int
 
 - Read **fresh on every request**, never cached: free space changes constantly
   and the underlying call is one syscall. (`/system/devices`, by contrast, is
-  probed once at startup because devices cannot change during a run.)
+  probed once at startup because devices cannot change during a run.) The read
+  is a *blocking* filesystem call — it can hang for as long as an unresponsive
+  network mount does — so the route runs it in a worker thread and the event
+  loop keeps serving everything else meanwhile.
 - **`null` means unknown, and it is a documented state rather than an error.**
   A host that cannot answer — a models directory whose entire path is missing,
   a permissions failure, a filesystem the platform has no answer for — still

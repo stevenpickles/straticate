@@ -142,6 +142,32 @@ def test_a_file_in_the_path_is_not_treated_as_a_directory(tmp_path: Path) -> Non
     assert nearest_existing_dir(blocker / "weights") == tmp_path
 
 
+def test_an_ancestor_that_cannot_be_stated_degrades_to_unknown(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A models directory whose ancestor the process may not read.
+
+    ``Path.is_dir`` swallows only the errnos :mod:`pathlib` treats as "does not
+    exist" — ``ENOENT``, ``ENOTDIR``, ``EBADF``, ``ELOOP`` — and ``EACCES`` is
+    not among them, so the walk itself raises. It must still be a report of
+    ``null`` figures: the endpoint promises ``200`` for a permissions failure,
+    and a review found the walk sitting *outside* the guard, where this
+    produced a ``500``.
+    """
+    caplog.set_level(logging.WARNING, logger=_LOGGER)
+
+    def refuse(self: Path) -> bool:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "is_dir", refuse)
+
+    report = storage_report(tmp_path / "models")
+
+    assert report == UNKNOWN_STORAGE
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+
+
 def test_a_path_with_no_examinable_ancestor_is_unknown(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:

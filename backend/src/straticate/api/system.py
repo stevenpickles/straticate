@@ -1,5 +1,7 @@
 """System endpoints: health, version, compute devices, and storage."""
 
+import asyncio
+
 from fastapi import APIRouter
 
 from straticate import __version__
@@ -50,6 +52,22 @@ async def read_storage(settings: SettingsDep) -> StorageReport:
     ``/system/devices`` there is nothing here that could be probed once at
     startup and still be true.
 
+    **It runs in a worker thread.** ``stat`` and ``shutil.disk_usage`` are
+    filesystem calls, and on an unresponsive network mount — exactly the case
+    this feature's warn-rather-than-refuse reasoning anticipates — they block
+    for as long as the mount does. On the event loop that would stall *every*
+    REST request, the feature 013 WebSocket hub and job progress delivery
+    behind one `stat`, which is what AGENTS.md principle 4 and ARCHITECTURE.md
+    §14 forbid; features 022 and 025 offload their blocking work for the same
+    reason. Caching would also have hidden it, and caching is the wrong answer
+    here (see above), so the read is offloaded instead.
+
+    :func:`asyncio.to_thread` is not cancellable, which costs nothing here:
+    this is a pure read that writes no state, so a client that disconnects
+    mid-request simply leaves a worker thread to finish a ``stat`` and discard
+    the answer. (025's export path has to *shield* its offloaded work because
+    that work publishes an artifact; nothing here does.)
+
     **Both fields are ``null`` when the host cannot answer** — a models
     directory whose whole path is missing, a permissions failure, a filesystem
     the platform has no answer for. That is a documented state, not an error:
@@ -58,4 +76,4 @@ async def read_storage(settings: SettingsDep) -> StorageReport:
     something quite different — a full disk — which is why unknown is not
     spelled ``0`` here the way an unknown device memory total is.
     """
-    return storage_report(settings.models_dir)
+    return await asyncio.to_thread(storage_report, settings.models_dir)
