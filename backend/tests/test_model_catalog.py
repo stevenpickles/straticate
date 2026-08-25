@@ -8,6 +8,7 @@ import pytest
 
 from straticate.config import Settings
 from straticate.errors import ApplicationError
+from straticate.inference import FAKE_ARCHITECTURE
 from straticate.main import create_app
 from straticate.models import CATALOG_FILENAME, ModelCatalog, ModelCatalogError
 
@@ -46,8 +47,17 @@ def write_catalog(directory: Path, models: list[dict[str, Any]], **extra: Any) -
 
 @pytest.fixture
 def real_catalog() -> ModelCatalog:
-    """The repository's own ``models/catalog.json``, via the default settings."""
-    return ModelCatalog.from_directory(Settings().models_dir)
+    """The repository's own ``models/catalog.json``, via the session's settings.
+
+    The session enables ``include_development_models`` (see
+    ``conftest.DEVELOPMENT_MODELS_ENV``), so this is the catalog as the file
+    declares it — fixtures included. What a *user* gets is asserted separately,
+    by the tests that build the catalog with the setting off.
+    """
+    settings = Settings()
+    return ModelCatalog.from_directory(
+        settings.models_dir, include_development=settings.include_development_models
+    )
 
 
 # --- Loading and validation -------------------------------------------------
@@ -324,3 +334,199 @@ def test_same_tier_in_different_modes_is_fine(tmp_path: Path) -> None:
     )
     modes = ModelCatalog.from_directory(tmp_path).list_separation_modes()
     assert [option.id for mode in modes for option in mode.quality_options] == ["fast", "fast"]
+
+
+# --- Development fixtures (feature 032) -------------------------------------
+
+
+def user_catalog(directory: Path) -> ModelCatalog:
+    """The catalog a **user** gets: development fixtures excluded."""
+    return ModelCatalog.from_directory(directory, include_development=False)
+
+
+def repository_manifest() -> dict[str, dict[str, Any]]:
+    """The shipped ``models/catalog.json``, as written, keyed by model ID."""
+    payload: dict[str, Any] = json.loads(
+        (Settings().models_dir / CATALOG_FILENAME).read_text(encoding="utf-8")
+    )
+    return {entry["id"]: entry for entry in payload["models"]}
+
+
+def test_the_shipped_fixtures_are_marked_development_only() -> None:
+    """The two fake entries must carry the marker, in the file itself.
+
+    This is the test that makes the exclusion real. The filter reads
+    ``development_only``; if a fixture were added to ``models/catalog.json``
+    without it — as both of these were, before feature 032 — it would be offered
+    to users as an ordinary quality tier and nothing else would notice.
+    """
+    entries = repository_manifest()
+    assert entries["fake-vocals-001"]["development_only"] is True
+    assert entries["fake-standard-001"]["development_only"] is True
+    # Nothing real may be marked, or a user's catalog would silently lose it.
+    assert entries["vocals-hq-001"].get("development_only", False) is False
+
+
+def test_every_entry_the_fake_engine_serves_is_marked() -> None:
+    """A future fixture cannot be added without the marking.
+
+    The named-ID test above pins today's two entries; this one keeps working
+    when a third arrives. Branching on the architecture name is fine *here* — a
+    test may know what the inference package knows — and is precisely what
+    application code must never do (ARCHITECTURE.md §1), which is why the marker
+    exists as its own manifest field rather than being inferred.
+    """
+    unmarked = [
+        model_id
+        for model_id, entry in repository_manifest().items()
+        if entry["architecture"] == FAKE_ARCHITECTURE and not entry.get("development_only", False)
+    ]
+    assert unmarked == []
+
+
+def test_the_repository_catalog_offers_a_user_no_fixture() -> None:
+    catalog = user_catalog(Settings().models_dir)
+    assert [model.id for model in catalog.list_models()] == ["vocals-hq-001"]
+    assert [entry.model.id for entry in catalog.list_entries()] == ["vocals-hq-001"]
+
+
+def test_the_repository_catalog_loses_the_mode_only_a_fixture_backed() -> None:
+    """``standard_stems`` disappears rather than being served empty.
+
+    There is no real four-stem model until feature 028. An empty mode would be a
+    choice the UI could render and nobody could use, so the mode is simply not
+    derived (see ``ModelCatalog._derive_modes``).
+    """
+    modes = user_catalog(Settings().models_dir).list_separation_modes()
+    assert [mode.id for mode in modes] == ["vocals"]
+    assert [option.model_id for option in modes[0].quality_options] == ["vocals-hq-001"]
+
+
+@pytest.mark.parametrize("include_development", [False, True])
+def test_no_mode_is_ever_served_with_an_empty_option_list(include_development: bool) -> None:
+    modes = ModelCatalog.from_directory(
+        Settings().models_dir, include_development=include_development
+    ).list_separation_modes()
+    assert modes
+    assert all(mode.quality_options for mode in modes)
+
+
+def test_including_development_serves_the_catalog_as_written(real_catalog: ModelCatalog) -> None:
+    """The opt-in restores exactly the pre-032 catalog."""
+    assert [model.id for model in real_catalog.list_models()] == [
+        "fake-vocals-001",
+        "fake-standard-001",
+        "vocals-hq-001",
+    ]
+    modes = {mode.id: mode for mode in real_catalog.list_separation_modes()}
+    assert set(modes) == {"vocals", "standard_stems"}
+    assert [option.model_id for option in modes["vocals"].quality_options] == [
+        "fake-vocals-001",
+        "vocals-hq-001",
+    ]
+
+
+def test_a_hidden_model_is_not_a_catalog_key(tmp_path: Path) -> None:
+    write_catalog(
+        tmp_path,
+        [make_model("m-dev", development_only=True), make_model("m-real", quality_tier="fast")],
+    )
+    catalog = user_catalog(tmp_path)
+    with pytest.raises(ApplicationError) as excinfo:
+        catalog.get_model("m-dev")
+    assert excinfo.value.code == "model_not_found"
+    assert excinfo.value.status_code == 404
+    assert catalog.get_model("m-real").id == "m-real"
+
+
+def test_hiding_a_fixture_frees_the_tier_it_occupied(tmp_path: Path) -> None:
+    """The defect in miniature: an untiered fixture takes ``balanced``.
+
+    ``balanced`` sorts before ``high_quality``, and feature 011's UI preselects
+    a mode's first option — which is how "upload, press Start" produced comb
+    filtering rather than separation.
+    """
+    write_catalog(
+        tmp_path,
+        [make_model("m-dev", development_only=True), make_model("m-real", quality_tier="fast")],
+    )
+    (mode,) = user_catalog(tmp_path).list_separation_modes()
+    assert [(option.id, option.model_id) for option in mode.quality_options] == [("fast", "m-real")]
+
+
+def test_a_mode_all_of_whose_models_are_hidden_is_not_derived(tmp_path: Path) -> None:
+    write_catalog(
+        tmp_path,
+        [
+            make_model(
+                "m-dev",
+                separation_mode="standard_stems",
+                stems=["vocals", "drums", "bass", "other"],
+                development_only=True,
+            ),
+            make_model("m-real"),
+        ],
+    )
+    assert [mode.id for mode in user_catalog(tmp_path).list_separation_modes()] == ["vocals"]
+
+
+def test_every_model_hidden_leaves_a_catalog_with_no_modes(tmp_path: Path) -> None:
+    """Degenerate but legal: nothing to offer, and nothing broken by offering it.
+
+    A catalog of fixtures alone is what a checkout looked like before feature
+    026. It loads — refusing to start would be worse — and serves an empty list
+    rather than an unusable mode.
+    """
+    write_catalog(tmp_path, [make_model("m-dev", development_only=True)])
+    catalog = user_catalog(tmp_path)
+    assert catalog.list_models() == []
+    assert catalog.list_separation_modes() == []
+
+
+def test_a_hidden_entry_is_still_validated(tmp_path: Path) -> None:
+    """Whether a fixture is *served* may not decide whether the file is valid.
+
+    CI runs with the fixtures on and a user runs with them off; if the
+    consistency checks only saw the visible entries the two would disagree about
+    which catalogs load, and a fixture that broke its mode would sail through
+    every user's startup and fail only in CI.
+    """
+    write_catalog(
+        tmp_path,
+        [
+            make_model("m-real", quality_tier="fast"),
+            make_model(
+                "m-dev",
+                quality_tier="high_quality",
+                development_only=True,
+                stems=["vocals", "drums", "other"],
+            ),
+        ],
+    )
+    with pytest.raises(ModelCatalogError, match="disagree on stems"):
+        user_catalog(tmp_path)
+
+
+def test_a_hidden_entry_still_collides_on_a_duplicate_tier(tmp_path: Path) -> None:
+    write_catalog(
+        tmp_path,
+        [
+            make_model("m-real", quality_tier="fast"),
+            make_model("m-dev", quality_tier="fast", development_only=True),
+        ],
+    )
+    with pytest.raises(ModelCatalogError, match="both claim quality tier 'fast'"):
+        user_catalog(tmp_path)
+
+
+def test_a_hidden_entry_still_collides_on_a_duplicate_id(tmp_path: Path) -> None:
+    write_catalog(tmp_path, [make_model("m-a"), make_model("m-a", development_only=True)])
+    with pytest.raises(ModelCatalogError, match="duplicate model ID"):
+        user_catalog(tmp_path)
+
+
+def test_an_unmarked_entry_is_visible_without_declaring_anything(tmp_path: Path) -> None:
+    """A normal manifest needs no new field: the marker defaults to false."""
+    write_catalog(tmp_path, [make_model("m-001")])
+    (model,) = user_catalog(tmp_path).list_models()
+    assert model.development_only is False
