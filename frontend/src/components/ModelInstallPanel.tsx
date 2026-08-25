@@ -1,4 +1,7 @@
 import { formatFileSize } from '../format'
+import { DiskCostNotice } from './DiskCostNotice'
+import { InstallProgressBar } from './InstallProgressBar'
+import { installPercent } from './installProgress'
 import {
   installationOf,
   type ModelInstallationHandle,
@@ -9,14 +12,6 @@ import './ModelInstallPanel.css'
 export interface ModelInstallPanelProps {
   /** The watched model, from `useModelInstallation`. */
   readonly installation: ModelInstallationHandle
-}
-
-/** Clamp a `0..1` fraction to a whole percentage. */
-function toPercent(fraction: number): number {
-  if (!Number.isFinite(fraction)) {
-    return 0
-  }
-  return Math.min(100, Math.max(0, Math.round(fraction * 100)))
 }
 
 /**
@@ -82,15 +77,10 @@ export function ModelInstallPanel({ installation }: ModelInstallPanelProps) {
 
   const receivedBytes = block?.downloaded_bytes ?? null
   const totalBytes = block?.total_bytes ?? null
-  // `progress` is the backend's own figure; the byte counts are the fallback
-  // for a transfer whose total is known but whose fraction has not been
-  // computed yet. Neither is a timer.
-  const fraction =
-    block?.progress ??
-    (receivedBytes !== null && totalBytes !== null && totalBytes > 0
-      ? receivedBytes / totalBytes
-      : null)
-  const percent = fraction === null ? null : toPercent(fraction)
+  // The backend's own figure, or the byte counts it was computed from — never
+  // a timer. Shared with the model library's cards (`InstallProgress`) so the
+  // two places a download is shown cannot disagree about how far it has got.
+  const percent = installPercent(block)
   const received = receivedBytes === null ? null : formatFileSize(receivedBytes)
   const size = totalBytes === null ? null : formatFileSize(totalBytes)
 
@@ -130,21 +120,7 @@ export function ModelInstallPanel({ installation }: ModelInstallPanelProps) {
 
       {downloading && (
         <>
-          <div
-            className={`progress-track${percent === null ? ' progress-indeterminate' : ''}`}
-            role="progressbar"
-            aria-label="Model download progress"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent ?? undefined}
-          >
-            <div
-              className="progress-fill"
-              style={
-                percent === null ? undefined : { width: `${String(percent)}%` }
-              }
-            />
-          </div>
+          <InstallProgressBar percent={percent} />
           <p className="model-install-note">
             {percent === null
               ? `Downloading the model weights for ${name}…`
@@ -187,6 +163,14 @@ export function ModelInstallPanel({ installation }: ModelInstallPanelProps) {
           </button>
         </div>
       )}
+
+      {/*
+        What it costs, and the admission that the cost cannot be checked from
+        here: the weights are written by the backend, on a machine whose disk
+        the browser cannot see. Shown wherever an install is actually offered,
+        so no multi-hundred-megabyte fetch starts without its price on screen.
+      */}
+      {canInstall && <DiskCostNotice totalBytes={totalBytes} />}
 
       {canInstall && (
         <button
