@@ -187,7 +187,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
 | 037 | Model management UI (install/remove/browse)  | MERGED  | 025, 035   | `037-model-management-ui` | #44 |
 | 038 | Streaming overlap-add (bounded VRAM)         | PLANNED | 026        | | |
-| 039 | Shared separator skeleton (de-duplicate)     | PLANNED | 026, 028   | | |
+| 039 | Shared separator skeleton (de-duplicate)     | PR OPEN | 026, 028   | `039-shared-separator-skeleton` | |
 | 040 | Free-disk-space endpoint for installs        | PLANNED | 025, 037   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
