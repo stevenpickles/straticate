@@ -36,11 +36,25 @@ offloads the build to a worker thread and serializes concurrent misses for the
 same model behind one lock, so two simultaneous job submissions load the weights
 once. :meth:`SeparatorRegistry.get` remains for synchronous callers (tests, and
 anything already off the loop) and is documented as blocking.
+
+**A builder's implementation module is imported on first use, not on ours.**
+This module is reached from :mod:`straticate.main`, so importing a backend here
+would make that backend's dependencies dependencies of *starting the
+application*: feature 026's RoFormer separator imports torch at module scope,
+which is how PyTorch — an *optional* runtime probe by feature 018's design —
+became mandatory for a process that only ever wanted the fake engine. Feature
+034 puts that back: the builder each architecture registers imports its
+implementation inside :func:`build`, which runs in the worker thread
+:meth:`SeparatorRegistry.aget` dispatches to, and an implementation that cannot
+be imported is reported as :func:`_separator_unavailable` — the same
+``separator_unavailable`` (501) this registry has always raised for a model it
+cannot run.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -60,13 +74,11 @@ from straticate.inference.fake import (
     FakeDeviceProfile,
     FakeSeparator,
 )
-from straticate.inference.roformer import (
-    ROFORMER_ARCHITECTURE,
-    RoFormerParameters,
-    RoFormerSeparator,
-)
+from straticate.inference.roformer.architecture import ROFORMER_ARCHITECTURE
 from straticate.models.layout import weights_path
 from straticate.schemas.models import Model
+
+logger = logging.getLogger(__name__)
 
 SeparatorBuilder = Callable[[Model], Separator]
 """Constructs the separator that runs one catalog model.
@@ -75,6 +87,30 @@ Called at most once per model ID (:meth:`SeparatorRegistry.get` caches the
 result). Implementations must not assume anything about the model beyond what
 :class:`~straticate.schemas.Model` carries.
 """
+
+
+def _separator_unavailable(model: Model) -> ApplicationError:
+    """The ``separator_unavailable`` (501) raised when this build cannot run ``model``.
+
+    One function so that every way of reaching that conclusion produces the
+    *identical* envelope — code, message and ``detail`` — because from a
+    client's point of view they are one fact: the model is catalogued, and this
+    build has no implementation able to run it. That is true whether no builder
+    was ever registered for the architecture (a catalog naming ``"demucs"``) or
+    the registered builder's implementation module cannot be imported (a build
+    installed without the ``torch`` extra). Feature 034 deliberately did **not**
+    add a second error code for the latter: the wire contract in
+    ``docs/contracts/rest-api.md`` is unchanged, and *why* the implementation is
+    unavailable is a deployment fact for the server's log, not for the browser
+    (see :func:`roformer_separator_builder`).
+    """
+    return ApplicationError(
+        "separator_unavailable",
+        f"No separator implementation is available for model {model.id!r} "
+        f"(architecture {model.architecture!r}).",
+        status_code=501,
+        detail={"model_id": model.id, "architecture": model.architecture},
+    )
 
 
 def separator_info_from_model(model: Model) -> SeparatorInfo:
@@ -167,6 +203,24 @@ def roformer_separator_builder(
     :meth:`SeparatorRegistry.aget` is awaited inside ``POST /jobs``, is the
     status that request answers with.
 
+    **The implementation is imported inside** :func:`build`, not at this
+    module's scope, and that is the whole of feature 034.
+    :class:`~straticate.inference.roformer.RoFormerSeparator` imports torch;
+    importing it here made PyTorch a dependency of importing
+    :mod:`straticate.main`, so a fake-separator-only deployment (CI's ``e2e``
+    tier, a frontend developer, a contributor without the disk) had to install
+    ~183 MiB it would never execute. Now ``uv sync`` gives a working
+    application and ``uv sync --extra torch`` is what enables this backend.
+
+    A build without that extra raises ``ImportError`` here, which becomes
+    :func:`_separator_unavailable` — the **same** 501 envelope a catalogued but
+    unimplemented architecture has always produced, because it is the same fact
+    about this build. The missing package is named in a ``WARNING`` log record
+    instead: an operator who installed Straticate without the extra and then
+    catalogued a real model needs to be told which one to install, and the
+    server's log is where a deployment fault belongs. The browser is told only
+    that the server cannot run this model, which is all it can act on.
+
     Args:
         models_dir: ``Settings.models_dir``. ``None`` means this process was not
             told where weights live, which is a wiring error and is reported as
@@ -187,6 +241,18 @@ def roformer_separator_builder(
                 status_code=501,
                 detail={"model_id": model.id, "architecture": model.architecture},
             )
+        try:
+            from straticate.inference.roformer import RoFormerParameters, RoFormerSeparator
+        except ImportError as exc:
+            logger.warning(
+                "Model %r needs the %r architecture, whose implementation could not be "
+                "imported (%s). Install the optional PyTorch dependencies "
+                "('uv sync --extra torch') to enable it.",
+                model.id,
+                model.architecture,
+                exc,
+            )
+            raise _separator_unavailable(model) from exc
         return RoFormerSeparator(
             separator_info_from_model(model),
             weights_file=weights_path(models_dir, model.id),
@@ -208,10 +274,17 @@ def default_separator_builders(
     """The builders a :class:`SeparatorRegistry` starts with.
 
     Two architectures: the fake engine (feature 014) and Mel-Band RoFormer
-    (feature 026). Both are always registered, so
-    :attr:`SeparatorRegistry.architectures` is an honest statement of what this
-    build can run, and a catalog naming anything else still gets
-    ``separator_unavailable`` (501).
+    (feature 026). Both are always registered — **registering a builder imports
+    nothing** (feature 034), so this map is the same map whether or not the
+    ``torch`` extra is installed, and a catalog naming anything else still gets
+    ``separator_unavailable`` (501). :attr:`SeparatorRegistry.architectures` is
+    therefore a statement of the architectures this build *implements*; whether
+    an implementation's dependencies are actually installed is settled when the
+    first model of that architecture is built, and reported as the same 501.
+    The alternative — probing every backend's imports at startup so the set
+    could be filtered — would pay torch's multi-second import on every start
+    for a fact only ``POST /jobs`` ever needs, which is the cost this feature
+    exists to stop paying.
 
     ``ffmpeg_timeout_seconds``, ``models_dir`` and ``inference_parameters`` are
     the application facts a separator needs. :func:`straticate.main.create_app`
@@ -284,10 +357,15 @@ class SeparatorRegistry:
 
         Raises:
             ApplicationError: ``separator_unavailable`` (501) when no builder
-                is registered for the model's architecture — the model is
-                catalogued but this build has no implementation able to run it.
-                A builder may raise its own ``ApplicationError`` (for instance
-                ``model_weights_missing``), which propagates unchanged.
+                is registered for the model's architecture, **or** when the
+                registered builder's implementation cannot be imported because
+                this build was installed without its optional dependencies
+                (feature 034). Both mean the same thing — the model is
+                catalogued but this build has no implementation able to run it
+                — and both produce the identical envelope
+                (:func:`_separator_unavailable`). A builder may raise its own
+                ``ApplicationError`` (for instance ``model_weights_missing``),
+                which propagates unchanged.
         """
         cached = self._instances.get(model.id)
         if cached is not None:
@@ -351,13 +429,7 @@ class SeparatorRegistry:
         """Run the builder registered for ``model``'s architecture."""
         builder = self._builders.get(model.architecture)
         if builder is None:
-            raise ApplicationError(
-                "separator_unavailable",
-                f"No separator implementation is available for model {model.id!r} "
-                f"(architecture {model.architecture!r}).",
-                status_code=501,
-                detail={"model_id": model.id, "architecture": model.architecture},
-            )
+            raise _separator_unavailable(model)
         return builder(model)
 
 
