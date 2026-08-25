@@ -584,3 +584,239 @@ describe('useModelInstallation and a model_weights_missing job', () => {
     expect(startBlockedReason(result.current)).toBeNull()
   })
 })
+
+describe('useModelInstallation removing (and cancelling)', () => {
+  /**
+   * Stub `fetch` with a read answer, an install answer and a
+   * `DELETE .../weights` answer, recording every removal the model saw.
+   */
+  function stubWeightsRequests(options: {
+    read?: () => Response
+    remove?: Response | Promise<Response>
+    install?: Response | Promise<Response>
+  }): { fetchMock: FetchMock; deletes: string[] } {
+    const deletes: string[] = []
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        deletes.push(url)
+        return Promise.resolve(
+          options.remove ??
+            jsonResponse(modelInstalling({ state: 'available' })),
+        )
+      }
+      if (url.endsWith('/install')) {
+        return Promise.resolve(
+          options.install ??
+            jsonResponse(modelInstalling({ state: 'downloading' }), 202),
+        )
+      }
+      return Promise.resolve(
+        (options.read ?? (() => jsonResponse(sampleInstallableModel)))(),
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return { fetchMock, deletes }
+  }
+
+  it('DELETEs the weights and adopts the model the answer describes', async () => {
+    const { deletes } = stubWeightsRequests({
+      read: () => jsonResponse(modelInstalling({ state: 'installed' })),
+    })
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+    expect(result.current.model?.installation?.state).toBe('installed')
+
+    act(() => {
+      result.current.remove()
+    })
+    await settle()
+
+    expect(deletes).toEqual([`/api/v1/models/${MODEL_ID}/weights`])
+    expect(result.current.model?.installation?.state).toBe('available')
+    expect(result.current.removing).toBe(false)
+  })
+
+  it('cancels a running download with that same request, and stops polling it', async () => {
+    // One route, two intents (feature 025): cancelling an install and removing
+    // installed weights are the same call, because the outcome of both is
+    // "this model has no weights".
+    const { fetchMock, deletes } = stubWeightsRequests({
+      read: () =>
+        jsonResponse(modelInstalling({ state: 'downloading', progress: 0.4 })),
+    })
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+    expect(result.current.model?.installation?.state).toBe('downloading')
+
+    await tick()
+    const pollsBefore = reads(fetchMock)
+    expect(pollsBefore).toBeGreaterThan(1)
+
+    act(() => {
+      result.current.remove()
+    })
+    await settle()
+
+    expect(deletes).toHaveLength(1)
+    expect(result.current.model?.installation?.state).toBe('available')
+
+    // The download is over, so nothing is left watching it.
+    await tick(2)
+    expect(reads(fetchMock)).toBe(pollsBefore)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('does not let a poll flick the bar back on while the cancel is in flight', async () => {
+    // A read issued before the server finished unwinding the cancel would
+    // report `downloading` a moment after the user pressed the button that
+    // stopped it. The poll is suspended for the duration instead.
+    const pending = deferred<Response>()
+    const { fetchMock } = stubWeightsRequests({
+      read: () =>
+        jsonResponse(modelInstalling({ state: 'downloading', progress: 0.4 })),
+      remove: pending.promise,
+    })
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    act(() => {
+      result.current.remove()
+    })
+    await settle()
+    expect(result.current.removing).toBe(true)
+
+    const during = reads(fetchMock)
+    await tick(3)
+    expect(reads(fetchMock)).toBe(during)
+
+    await act(async () => {
+      pending.resolve(jsonResponse(modelInstalling({ state: 'available' })))
+      await pending.promise
+    })
+    await settle()
+    expect(result.current.removing).toBe(false)
+    expect(result.current.model?.installation?.state).toBe('available')
+  })
+
+  it('sends one DELETE for a double click', async () => {
+    const pending = deferred<Response>()
+    const { deletes } = stubWeightsRequests({
+      read: () => jsonResponse(modelInstalling({ state: 'installed' })),
+      remove: pending.promise,
+    })
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    act(() => {
+      result.current.remove()
+      result.current.remove()
+    })
+    await settle()
+    expect(deletes).toHaveLength(1)
+  })
+
+  it('refuses to start an install while the weights are being thrown away', async () => {
+    // The pair would race over the same file on the server, so the guard is
+    // shared: neither can start while the other is in flight.
+    const pending = deferred<Response>()
+    const { fetchMock, deletes } = stubWeightsRequests({
+      read: () => jsonResponse(modelInstalling({ state: 'installed' })),
+      remove: pending.promise,
+    })
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    act(() => {
+      result.current.remove()
+    })
+    await settle()
+
+    act(() => {
+      result.current.install()
+    })
+    await settle()
+
+    expect(deletes).toHaveLength(1)
+    expect(
+      fetchMock.mock.calls.filter(([url]) =>
+        (url as string).endsWith('/install'),
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('surfaces a refused remove and leaves the model readable', async () => {
+    stubWeightsRequests({
+      read: () => jsonResponse(modelInstalling({ state: 'installed' })),
+      remove: errorResponse(
+        'model_not_downloadable',
+        'This model has no weights to remove.',
+        409,
+      ),
+    })
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    act(() => {
+      result.current.remove()
+    })
+    await settle()
+
+    expect(result.current.error).toEqual({
+      code: 'model_not_downloadable',
+      message: 'This model has no weights to remove.',
+    })
+    expect(result.current.removing).toBe(false)
+    expect(result.current.model?.installation?.state).toBe('installed')
+  })
+
+  it('releases the guard when a request settles for a tier the user has left', async () => {
+    // Regression: the settle handlers are gated on the model still being
+    // selected — right for a *record*, wrong for a guard, which went on saying
+    // "a request is in flight" for ever once the user had switched away and
+    // come back.
+    const otherId = 'vocals-fast-001'
+    const pending = deferred<Response>()
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        return pending.promise
+      }
+      return Promise.resolve(
+        jsonResponse(
+          modelInstalling(
+            { state: 'installed' },
+            url.includes(otherId)
+              ? { ...sampleInstallableModel, id: otherId }
+              : sampleInstallableModel,
+          ),
+        ),
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useModelInstallation(id),
+      { initialProps: { id: MODEL_ID } },
+    )
+    await settle()
+    act(() => {
+      result.current.remove()
+    })
+    await settle()
+    expect(result.current.removing).toBe(true)
+
+    rerender({ id: otherId })
+    await settle()
+    await act(async () => {
+      pending.resolve(jsonResponse(modelInstalling({ state: 'available' })))
+      await pending.promise
+    })
+    await settle()
+
+    rerender({ id: MODEL_ID })
+    await settle()
+    expect(
+      result.current.removing,
+      'the request that was in flight has settled, so nothing is',
+    ).toBe(false)
+  })
+})
