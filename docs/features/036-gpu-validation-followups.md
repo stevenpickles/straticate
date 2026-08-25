@@ -2,6 +2,7 @@
 
 Branch: `036-gpu-validation-followups`
 Status: PR OPEN
+PR: #42
 Dependencies: 026, 029
 
 ## Objective
