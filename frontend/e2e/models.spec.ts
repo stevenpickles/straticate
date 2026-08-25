@@ -232,6 +232,137 @@ test('a model’s terms are readable before a byte is downloaded', async ({
   await expect(unknown).toContainText('Not stated')
 })
 
+/**
+ * Script `GET /system/storage` (feature 040).
+ *
+ * The real backend would answer with this machine's actual free space, which
+ * is a different number on every CI runner and on every developer's laptop —
+ * so a spec that asserts what the card *says* about it has to put the figure
+ * there itself. `null` is the backend's documented "this host cannot tell
+ * you", and reaches the UI as feature 037's honest sentence.
+ */
+async function scriptStorage(
+  page: Page,
+  free: number | null,
+  total: number | null = 512 * 1024 ** 3,
+): Promise<{ set: (free: number | null, total?: number | null) => void }> {
+  const held: { free: number | null; total: number | null } = { free, total }
+  await page.route(
+    (url) => url.pathname === '/api/v1/system/storage',
+    async (route) => {
+      await route.fulfill({
+        json: { free_bytes: held.free, total_bytes: held.total },
+      })
+    },
+  )
+  return {
+    set: (next: number | null, nextTotal: number | null = total) => {
+      held.free = next
+      held.total = nextTotal
+    },
+  }
+}
+
+test('the disk cost is a comparison, and an unknown one is still honest', async ({
+  page,
+}) => {
+  const library = new Library(page)
+  const record = model('managed-001', 'Managed Model', {
+    code_license: 'MIT',
+    weights_license: 'MIT',
+    redistribution_permitted: true,
+    commercial_use_permitted: true,
+    attribution: 'Weights: Example Model.',
+  })
+  const scripted: ScriptedModel = {
+    ...record,
+    installation: installation('available'),
+  }
+
+  // Nothing is downloaded and nothing is installed: the model is scripted in
+  // the one state where an install is offered.
+  await page.route(
+    (url) => url.pathname === '/api/v1/models',
+    async (route) => {
+      await route.fulfill({ json: [scripted] })
+    },
+  )
+  await page.route(
+    (url) => modelIdOf(url) === record.id,
+    async (route) => {
+      await route.fulfill({ json: scripted })
+    },
+  )
+
+  // A disk with room: the notice states the comparison rather than a
+  // limitation, and the figure comes from the backend, not the browser.
+  const disk = await scriptStorage(page, 4 * 1024 ** 3)
+  await library.open()
+  const card = library.card('Managed Model')
+  await expect(card).toContainText(`${TOTAL_LABEL} will be written`)
+  await expect(card).toContainText('4 GB is free there')
+  await expect(card).not.toContainText('cannot check')
+
+  // A host that cannot answer: 037's wording is back, the download is still
+  // priced, and the button still works — unknown is cautious, never a block.
+  disk.set(null, null)
+  await page.reload()
+  await library.open()
+  const again = library.card('Managed Model')
+  await expect(again).toContainText('cannot check')
+  await expect(again.getByRole('button', { name: 'Install' })).toBeEnabled()
+})
+
+test('a download that cannot fit is warned about, not refused', async ({
+  page,
+}) => {
+  const library = new Library(page)
+  const record = model('managed-001', 'Managed Model', {
+    code_license: 'MIT',
+    weights_license: 'MIT',
+    redistribution_permitted: true,
+    commercial_use_permitted: true,
+    attribution: 'Weights: Example Model.',
+  })
+  const scripted: ScriptedModel = {
+    ...record,
+    installation: installation('available'),
+  }
+  let installs = 0
+
+  await page.route(
+    (url) => url.pathname === '/api/v1/models',
+    async (route) => {
+      await route.fulfill({ json: [scripted] })
+    },
+  )
+  await page.route(
+    (url) => modelIdOf(url) === record.id,
+    async (route) => {
+      if (new URL(route.request().url()).pathname.endsWith('/install')) {
+        installs += 1
+        await route.fulfill({
+          status: 202,
+          json: { ...record, installation: installation('downloading', 0) },
+        })
+        return
+      }
+      await route.fulfill({ json: scripted })
+    },
+  )
+  await scriptStorage(page, 128 * 1024 * 1024)
+
+  await library.open()
+  const card = library.card('Managed Model')
+  await expect(card).toContainText('will not fit')
+
+  // The decision stays the user's: a reading is one moment old, free space
+  // moves, and a false refusal here is the worse failure. So the button works.
+  await card.getByRole('button', { name: 'Install' }).click()
+  await expect(card).toContainText('Downloading')
+  expect(installs, 'the install was never refused by the UI').toBe(1)
+})
+
 test('install, cancel, install again and remove — downloading nothing', async ({
   page,
 }) => {
@@ -296,13 +427,14 @@ test('install, cancel, install again and remove — downloading nothing', async 
     },
   )
 
+  await scriptStorage(page, 4 * 1024 ** 3)
   await library.open()
   const card = library.card('Managed Model')
 
-  // 1. Not installed: priced, and honest about what cannot be checked.
+  // 1. Not installed: priced against the room the backend reports.
   await expect(card).toContainText('Not installed')
   await expect(card).toContainText(`${TOTAL_LABEL} will be written`)
-  await expect(card).toContainText('cannot check')
+  await expect(card).toContainText('4 GB is free there')
 
   // 2. Install: real progress, from the state the script put the model in.
   await card.getByRole('button', { name: 'Install' }).click()

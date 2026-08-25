@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { AppStateProvider } from './state/appState'
+import { DiskSpaceProvider } from './state/diskSpace'
 import { JobStateProvider } from './state/jobState'
 import { ModelRevisionProvider } from './state/modelRevision'
 import { SessionGate } from './state/SessionGate'
@@ -33,6 +34,13 @@ import { JobEventBridge } from './ws/JobEventBridge'
  * {@link AppStateProvider}: it is not a phase, it is not persisted across a
  * reload, and nothing in the workflow may branch on it.
  *
+ * {@link DiskSpaceProvider} holds one reading of the free space on the machine
+ * running Straticate (feature 040), because both places an install is offered —
+ * the configure step's panel and the library's cards — must not disagree about
+ * a fact concerning one disk. It **fetches nothing on mount**: the read happens
+ * where an install is actually offered, and again when a download changes what
+ * is on the disk. There is no timer anywhere in it.
+ *
  * That "hidden, not unmounted" choice has one consequence this component owns:
  * the workflow does not re-read anything on the way back, so a model installed
  * or removed from a library card would leave the configure step describing the
@@ -54,40 +62,42 @@ export default function App() {
   return (
     <AppStateProvider>
       <JobStateProvider>
-        <ModelRevisionProvider revision={modelRevision}>
-          <JobEventBridge />
-          <div className="app">
-            <Header
-              ref={libraryToggleRef}
-              libraryOpen={libraryOpen}
-              onToggleLibrary={() => {
-                if (libraryOpen) {
-                  closeLibrary()
-                } else {
-                  setLibraryOpen(true)
-                }
-              }}
-            />
-            <div className="app-workflow" hidden={libraryOpen}>
-              <SessionGate>
-                <Workspace />
-              </SessionGate>
-            </div>
-            {libraryOpen && (
-              <ModelLibrary
-                onClose={() => {
-                  // Focus first, while the button that asked to close is still
-                  // mounted: a keyboard user who pressed "Back to workflow"
-                  // has conceptually returned to the control they came in
-                  // through, and dropping focus on `<body>` would restart
-                  // their next Tab at the top of the document.
-                  libraryToggleRef.current?.focus()
-                  closeLibrary()
+        <DiskSpaceProvider>
+          <ModelRevisionProvider revision={modelRevision}>
+            <JobEventBridge />
+            <div className="app">
+              <Header
+                ref={libraryToggleRef}
+                libraryOpen={libraryOpen}
+                onToggleLibrary={() => {
+                  if (libraryOpen) {
+                    closeLibrary()
+                  } else {
+                    setLibraryOpen(true)
+                  }
                 }}
               />
-            )}
-          </div>
-        </ModelRevisionProvider>
+              <div className="app-workflow" hidden={libraryOpen}>
+                <SessionGate>
+                  <Workspace />
+                </SessionGate>
+              </div>
+              {libraryOpen && (
+                <ModelLibrary
+                  onClose={() => {
+                    // Focus first, while the button that asked to close is still
+                    // mounted: a keyboard user who pressed "Back to workflow"
+                    // has conceptually returned to the control they came in
+                    // through, and dropping focus on `<body>` would restart
+                    // their next Tab at the top of the document.
+                    libraryToggleRef.current?.focus()
+                    closeLibrary()
+                  }}
+                />
+              )}
+            </div>
+          </ModelRevisionProvider>
+        </DiskSpaceProvider>
       </JobStateProvider>
     </AppStateProvider>
   )

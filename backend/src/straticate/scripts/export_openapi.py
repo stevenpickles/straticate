@@ -38,6 +38,7 @@ _ROOT_MODELS: tuple[type[BaseModel], ...] = (
     schemas.Model,
     schemas.SeparationMode,
     schemas.ComputeDevice,
+    schemas.StorageReport,
     schemas.Job,
 )
 

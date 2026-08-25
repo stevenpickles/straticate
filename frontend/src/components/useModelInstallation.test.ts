@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
+import { createElement, type ReactNode } from 'react'
 import {
   POLL_INTERVAL_MS,
+  installationChangedDisk,
   needsInstall,
   startBlockedReason,
   useModelInstallation,
 } from './useModelInstallation'
+import { DiskSpaceProvider } from '../state/diskSpace'
+import { getSystemStorage } from '../api/system'
 import type { Model } from '../api/types'
 import {
   modelInstalling,
@@ -832,5 +836,114 @@ describe('useModelInstallation removing (and cancelling)', () => {
       result.current.removing,
       'the request that was in flight has settled, so nothing is',
     ).toBe(false)
+  })
+})
+
+// --------------------------------------------------------------------------
+// The free-space figure the install affordance compares against (feature 040)
+// --------------------------------------------------------------------------
+
+vi.mock('../api/system')
+
+const getSystemStorageMock = vi.mocked(getSystemStorage)
+
+/** A tree that holds a free-space reading, as the application does. */
+function withDiskSpace({ children }: { children: ReactNode }) {
+  return createElement(DiskSpaceProvider, null, children)
+}
+
+/** Mount the hook inside a `DiskSpaceProvider` and settle its first read. */
+async function renderWatched(reads: ModelRead[]) {
+  getSystemStorageMock.mockReset()
+  getSystemStorageMock.mockResolvedValue({
+    free_bytes: 4 * 1024 ** 3,
+    total_bytes: 512 * 1024 ** 3,
+  })
+  const fetchMock = stubModelReads(reads)
+  const view = renderHook(() => useModelInstallation(MODEL_ID), {
+    wrapper: withDiskSpace,
+  })
+  await settle()
+  return { fetchMock, view }
+}
+
+describe('installationChangedDisk', () => {
+  it('is true exactly when bytes on disk moved', () => {
+    // A download that landed, weights thrown away, and a download that ended
+    // without installing (whose `.part` feature 025 unlinks on every exit).
+    expect(installationChangedDisk('downloading', 'installed')).toBe(true)
+    expect(installationChangedDisk('downloading', 'failed')).toBe(true)
+    expect(installationChangedDisk('downloading', 'available')).toBe(true)
+    expect(installationChangedDisk('installed', 'available')).toBe(true)
+    expect(installationChangedDisk('available', 'installed')).toBe(true)
+  })
+
+  it('is false for anything that only changed what the client knows', () => {
+    expect(installationChangedDisk('available', 'downloading')).toBe(false)
+    expect(installationChangedDisk('available', 'failed')).toBe(false)
+    expect(installationChangedDisk('failed', 'available')).toBe(false)
+    expect(installationChangedDisk('downloading', 'downloading')).toBe(false)
+  })
+
+  it('is false for a first reading — it reports the world as it already was', () => {
+    expect(installationChangedDisk(null, 'installed')).toBe(false)
+    expect(installationChangedDisk('installed', null)).toBe(false)
+  })
+})
+
+describe('useModelInstallation and the free-space figure', () => {
+  it('asks for nothing on its own: the affordance is what reads', async () => {
+    await renderWatched([sampleInstallableModel])
+
+    // Watching a model is not offering an install. `DiskCostNotice` reads when
+    // it mounts; this hook only speaks up when the disk actually changed.
+    expect(getSystemStorageMock).not.toHaveBeenCalled()
+  })
+
+  it('takes a fresh reading when a download settles', async () => {
+    const { fetchMock } = await renderWatched([
+      modelInstalling({ state: 'downloading', progress: 0.5 }),
+      modelInstalling({ state: 'installed' }),
+    ])
+    expect(getSystemStorageMock).not.toHaveBeenCalled()
+
+    await tick()
+    await settle()
+
+    expect(getSystemStorageMock).toHaveBeenCalledTimes(1)
+    expect(reads(fetchMock)).toBeGreaterThan(1)
+  })
+
+  it('says nothing while a download is merely progressing', async () => {
+    await renderWatched([
+      modelInstalling({ state: 'downloading', progress: 0.25 }),
+      modelInstalling({ state: 'downloading', progress: 0.5 }),
+      modelInstalling({ state: 'downloading', progress: 0.75 }),
+    ])
+
+    await tick(3)
+    await settle()
+
+    // Three polls, no free-space request: a bar moving is not a fact about
+    // free space that anybody is looking at.
+    expect(getSystemStorageMock).not.toHaveBeenCalled()
+  })
+
+  it('takes a fresh reading when the weights stop being installed', async () => {
+    // Removed here, or from the model library, or by something outside the
+    // app: whichever it was, a read that reports the weights gone reports
+    // hundreds of megabytes handed back.
+    const { view } = await renderWatched([
+      modelInstalling({ state: 'installed' }),
+      modelInstalling({ state: 'available' }),
+    ])
+    expect(getSystemStorageMock).not.toHaveBeenCalled()
+
+    act(() => {
+      view.result.current.refresh()
+    })
+    await settle()
+
+    expect(getSystemStorageMock).toHaveBeenCalledTimes(1)
   })
 })

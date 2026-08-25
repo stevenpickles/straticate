@@ -13,6 +13,7 @@ import type { components } from './generated/api'
 // System
 export type HealthStatus = components['schemas']['HealthStatus']
 export type VersionInfo = components['schemas']['VersionInfo']
+export type StorageReport = components['schemas']['StorageReport']
 
 // Errors
 export type ErrorInfo = components['schemas']['ErrorInfo']
