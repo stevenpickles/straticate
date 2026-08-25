@@ -12,8 +12,9 @@
   `cd frontend && npm run e2e:browsers` (it lives in a user cache, never in
   the repository)
 - Optional: NVIDIA GPU + CUDA drivers (never required for development or
-  normal tests — the fake separator covers everything, and PyTorch installs as
-  its CPU build by default; see *PyTorch and CUDA* below). Since feature 032 the
+  normal tests — the fake separator covers everything, PyTorch is an optional
+  extra since feature 034, and when installed it is the CPU build; see *PyTorch
+  and CUDA* below). Since feature 032 the
   fake separator is hidden from a normally started server; see
   *Separating audio without downloading weights* below for the one-variable way
   back.
@@ -22,8 +23,15 @@
 
 ```bash
 cd backend
-uv sync                # creates .venv with Python 3.12 and all deps
+uv sync                # .venv with Python 3.12 and every default dependency
+uv sync --extra torch  # …plus PyTorch, for work on the real separator
 ```
+
+`torch` is an **optional** extra (feature 034): the application imports, starts
+and serves fake-separator jobs without it, which is what keeps the E2E job and
+every torch-free checkout from pulling ~183 MiB they never execute. Everything
+below assumes the plain `uv sync` unless it says otherwise; *PyTorch and CUDA*
+covers what the extra changes, including two ways `uv run` can undo it.
 
 Run the backend (dev mode, auto-reload):
 
@@ -79,13 +87,24 @@ uv run pytest
 
 Auto-format: `uv run ruff format .`
 
-If you have swapped in the CUDA build of PyTorch, add `--no-sync` to every one
-of those commands — a plain `uv run` re-syncs and reverts the wheel. See
-*PyTorch and CUDA* below.
+Those four commands are right for the default environment. If you are working on
+the **real** separator, `uv run` needs care in two different ways — see
+*What `uv run` does to a PyTorch environment* below; on a machine with the CUDA
+wheel installed the short answer is to add `--no-sync` to every one of them.
 
 ## PyTorch and CUDA
 
-`uv sync` installs **the CPU build of PyTorch**, deliberately.
+**`torch` is an optional extra (feature 034).** A plain `uv sync` does not
+install it, and the application starts and runs fake-separator jobs without it —
+which is what keeps CI and the E2E tier from downloading hundreds of megabytes
+they never use. To work on real separation, ask for it:
+
+```bash
+cd backend
+uv sync --extra torch
+```
+
+When it *is* installed, it is installed as **the CPU build**, deliberately.
 `backend/pyproject.toml` pins `torch` to PyTorch's own CPU wheel index:
 
 ```toml
@@ -112,7 +131,7 @@ automatically:
 
 ```bash
 cd backend
-uv sync
+uv sync --extra torch
 uv pip install --reinstall-package torch --index-url https://download.pytorch.org/whl/cu130 torch
 ```
 
@@ -122,7 +141,7 @@ Redirecting the *named* index (`uv sync --index pytorch-cpu=…/cu130`) loses it
 and the lock fails; and `uv sync` re-pins `torch` from the lock file, so **a
 later `uv sync` puts the CPU build back** and this command has to be repeated.
 That is a fair trade for a default that keeps CI lean, and it is one line in a
-setup script. Read the next two subsections before running anything else: the
+setup script. Read the next two subsections before running anything else: that
 "later `uv sync`" is closer than it looks, and the obvious way to check the
 result is the thing that undoes it.
 
@@ -152,26 +171,63 @@ platform, and `cu128` does not either. Re-check the table above when the pinned
 torch version moves — the answer is version-specific, and only the index knows
 it.
 
-### Anything that re-syncs puts the CPU wheel back
+### What `uv run` does to a PyTorch environment
 
-This is the part that bites, so it is worth being blunt about. `uv sync` re-pins
-`torch` from the lock file, and **`uv run` runs `uv sync` before it runs
-anything** — so the CUDA build is undone by all of these:
+**`uv run` syncs the environment before it runs anything**, to whichever extras
+*that invocation* names — not to the ones you synced with earlier. Nothing
+remembers `--extra torch`, and there is no `UV_EXTRA` variable and no
+`[tool.uv] default-extras` to make it stick. Combined with `torch` being both
+optional (034) and pinned to the CPU index, that gives `uv run` two separate
+ways to quietly undo the environment you just built. Measured with uv 0.8.23,
+starting each row from a `.venv` holding `torch 2.13.0+cu130`:
 
-- `uv sync`, `uv lock`, `uv add`, `uv remove`
-- **every** `uv run`: `uv run python …`, `uv run pytest`, `uv run uvicorn …`,
-  `uv run ruff …` — including every quality check listed in this document
+| command | what happens to `torch` |
+| --- | --- |
+| `uv sync` | **removed entirely** — it is not a default dependency |
+| `uv sync --extra torch` | reinstalled as the **CPU** wheel |
+| `uv run pytest` | left alone — `uv run` corrects *required* packages but does not prune extraneous ones, and without the extra `torch` is not required |
+| `uv run --extra torch pytest` | reinstalled as the **CPU** wheel |
+| `uv run --no-sync pytest` | left alone |
+| `.venv/Scripts/python.exe -m pytest` | left alone |
 
-The same re-sync also removes anything else installed into `.venv` by hand, such
-as the optional NVML binding below. It announces itself only as two lines that
-are very easy to read straight past:
+Two things in that table surprise people, and they pull in opposite directions:
+
+1. **On a CPU host**, `uv run pytest` after `uv sync --extra torch` is fine
+   today only because the sync left `torch` behind — but `uv sync` (say, after a
+   dependency change) takes it away again, and then the real-separator tests
+   have nothing to import. The habit that always works is
+   `uv run --extra torch <ruff|pyright|pytest|…>`.
+2. **On a CUDA host, `--extra torch` is the flag that breaks it.** Adding it to
+   `uv run` is exactly what re-pins `torch` to the locked CPU wheel. The habit
+   that always works there is `--no-sync`.
+
+So: **`--extra torch` when you need torch installed, `--no-sync` when you need
+the CUDA build to survive.** Do not rely on `uv run`'s not-pruning: it is a
+property of `uv run` rather than of your project, and `uv sync` prunes for real
+— it removes the CUDA wheel *and* anything else installed into `.venv` by hand,
+such as the optional NVML binding below:
+
+```text
+$ uv pip list | grep -i "nvidia\|^torch "
+nvidia-ml-py           13.610.43
+torch                  2.13.0+cu130
+$ uv sync
+Uninstalled 2 packages in 2.72s
+Installed 1 package in 21.73s
+ - nvidia-ml-py==13.610.43
+ - torch==2.13.0+cu130
+ + torch==2.13.0+cpu
+```
+
+A reversion announces itself only as two lines that are very easy to read
+straight past:
 
 ```text
 Uninstalled 1 package in 6.35s
 Installed 1 package in 17.48s
 ```
 
-There are two ways to run something without re-syncing. Add `--no-sync`:
+There are two ways to run something without re-syncing at all. Add `--no-sync`:
 
 ```bash
 cd backend
@@ -180,7 +236,7 @@ uv run --no-sync uvicorn straticate.main:app --port 8000
 uv run --no-sync python -m straticate.scripts.export_openapi
 ```
 
-…or call the interpreter inside `.venv` directly, which cannot re-sync at all:
+…or call the interpreter inside `.venv` directly, which cannot re-sync:
 
 ```bash
 cd backend
@@ -199,17 +255,22 @@ cd backend
 # 2.13.0+cu130 True
 ```
 
-**Do not verify with a plain `uv run`.** It reinstalls the CPU wheel first and
-then reports, perfectly truthfully, on the environment it has just changed — the
-check destroys what it is checking and presents its own damage as the original
-state. Observed verbatim in this repository:
+**Do not verify with `uv run --extra torch`.** It reinstalls the CPU wheel
+first and then reports, perfectly truthfully, on the environment it has just
+changed — the check destroys what it is checking and presents its own damage as
+the original state. Observed verbatim in this repository:
 
 ```text
-$ uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-Uninstalled 1 package in 2.60s
-Installed 1 package in 18.42s
+$ uv run --extra torch python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+Uninstalled 2 packages in 2.00s
+Installed 2 packages in 18.13s
 2.13.0+cpu False
 ```
+
+Dropping the `--extra torch` happens to be harmless *today* — `uv run` leaves
+the already-installed CUDA wheel alone — but that is a property of `uv run`, not
+a guarantee about your environment, and it does not hold for `uv sync`. Verify
+with the interpreter, which cannot be wrong about itself.
 
 The end-to-end check is the application's own device list — and the server has
 to be started the same careful way, or it reverts the wheel on the way up and
@@ -226,12 +287,23 @@ curl localhost:8000/api/v1/system/devices
 CUDA first in that list is the whole point: feature 018's detector found the
 device, and feature 026's resolver will send a job that pinned no device to it.
 
-`pytest` matters for the same reason and fails more quietly. `uv run pytest -m
-integration` reverts to the CPU wheel, whereupon
-`test_cuda_runtime_stats_report_real_memory` skips with "no CUDA device is
-available", the rest of the tier runs on the CPU, and every timing figure it
-prints is a CPU figure. The run is green and has tested none of what you meant
-to test. Use `uv run --no-sync pytest -m integration`.
+`pytest` matters for the same reason and fails more quietly. On a CPU host you
+need `--extra torch` or the real-separator tests have nothing to import — but on
+a **GPU** host that same flag is what breaks the run, and it breaks it silently:
+
+```text
+$ uv run --extra torch pytest -m integration -q -rs
+Uninstalled 1 package in 1.96s
+Installed 1 package in 17.62s
+SKIPPED [1] tests\test_roformer_integration.py:193: no CUDA device is available
+3 passed, 1 skipped, 725 deselected in 56.21s
+```
+
+That is a green run, on a machine with a working GPU, in which
+`test_cuda_runtime_stats_report_real_memory` skipped itself, everything else ran
+on the CPU, and every timing figure printed is a CPU figure. Immediately before
+it, the same tier under `uv run --no-sync pytest -m integration` was **4 passed
+on `cuda:0`**. Use `--no-sync` here.
 
 ### Model weights
 
@@ -360,11 +432,12 @@ Principles:
   (`backend/tests/roformer_fixtures.py`).
 - **The real-model tier is opt-in.** `backend/pyproject.toml` sets
   `addopts = "-m 'not integration'"`, so a plain `pytest` deselects it; run it
-  with `uv run --no-sync pytest -m integration` once the weights are installed.
-  Its tests skip with an explanatory message when their prerequisites are
-  missing. The `--no-sync` is not optional on a GPU host: without it the run
-  reinstalls the CPU wheel and the `gpu` test skips itself (see *PyTorch and
-  CUDA*).
+  with `uv run --extra torch pytest -m integration` once the weights are
+  installed — or, **on a GPU host, `uv run --no-sync pytest -m integration`**,
+  because there `--extra torch` re-pins `torch` to the CPU wheel and the `gpu`
+  test then skips itself on a machine that has a GPU. Both traps are in
+  *PyTorch and CUDA*. Its tests skip with an explanatory message when their
+  prerequisites are missing.
 - Audio fixtures are generated (sine sweeps, noise bursts) and seconds long;
   never commit copyrighted or large audio. The E2E tier generates its own with
   FFmpeg at setup time, into a temporary directory it deletes afterwards.
@@ -390,8 +463,14 @@ path filtering — all three always run, keeping required checks simple).
 Backend job (Ubuntu):
 
 ```text
-uv sync → ruff format --check → ruff check → pyright → pytest
+uv sync --extra torch → ruff format --check → ruff check → pyright → pytest
 ```
+
+Every step there carries `--extra torch` (feature 034), because `uv run`
+re-syncs to the extras *it* is given and omitting the flag on one step would
+uninstall torch for the next. This is the job that runs the real separator's
+unit tests and type-checks the module that imports torch, so it is the one place
+the extra is genuinely exercised.
 
 Frontend job (Ubuntu):
 
@@ -431,18 +510,21 @@ installed — the tier tests correctness, not browser compatibility. It needs
 **no GPU, no weights and no download**: every job it runs goes to the fake
 separator. On failure it uploads the HTML report and the traces.
 
-One avoidable cost is left on the table: the e2e job installs the whole backend
-including `torch`, which it never uses, because `straticate.main` imports the
-RoFormer builder at import time (`inference/registry.py`). Making the real
-engines an optional dependency group with a lazily imported builder would drop
-~183 MiB and most of that minute from this job — it is a backend dependency
-change, so it belongs in its own numbered feature rather than in 030.
+The e2e job used to install the whole backend including `torch`, which it never
+uses, because `straticate.main` imported the RoFormer builder at import time
+(`inference/registry.py`). **Feature 034 fixed that**: the builder imports
+lazily and `torch` moved to an optional extra, so the e2e job syncs *without*
+`--extra torch` and drops ~183 MiB. That omission is deliberate and load-bearing
+— the tier drives the fake separator exclusively, so a plain `uv sync` there is
+what proves on every PR that the application still imports, starts and serves
+with PyTorch absent. If that step ever needs the extra, the lazy-import property
+has regressed and that is what to fix.
 
 A later `integration-gpu` workflow (manual `workflow_dispatch`, self-hosted or
 skipped by default) covers real-model validation: it would install the weights
 through the model manager and run `pytest -m integration`. CI must not download
-models, and the CPU-wheel pin above is what keeps the backend job's `uv sync`
-from growing by gigabytes now that `torch` is a runtime dependency.
+models, and the CPU-wheel pin above is what keeps the backend job's
+`uv sync --extra torch` from growing by gigabytes whenever `torch` is installed.
 
 ## Conventions
 

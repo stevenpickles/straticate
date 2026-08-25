@@ -91,6 +91,20 @@ developed on, where it was **not** run."* It has now run, and passed. Update it
 to record when and on what, so the next reader is not misled into thinking the
 path is still unverified.
 
+### 5. Added mid-feature: feature 034 made two documents wrong (medium)
+
+034 (*Lazy separator builders*) moves `torch`, `numpy`, `einops`,
+`rotary-embedding-torch` and `beartype` into `[project.optional-dependencies]
+torch` and imports the RoFormer builder lazily, so a plain `uv sync` no longer
+installs PyTorch at all. Two documents nobody else owns this wave went stale:
+
+- **DEVELOPMENT.md**, where the CUDA instructions now need `uv sync --extra
+  torch` as the step before the wheel swap — and where `uv run`'s re-sync
+  acquired a *second* way to undo the environment, which belongs in one place
+  with the first rather than as two unrelated warnings.
+- **ARCHITECTURE.md §14**, which called PyTorch "a runtime dependency from
+  feature 026 onwards". It is now an optional one.
+
 ## Out of scope
 
 Adding NVML as a dependency (it must stay optional). Changing inference
@@ -236,11 +250,13 @@ down.
 ### The CUDA section was rewritten, then followed from an empty `.venv`
 
 The report was right and the mechanism is worse than it looked: `uv run` re-syncs
-*before* it runs, so the reversion is not limited to the verification command.
-Every `uv run` in DEVELOPMENT.md reverts the wheel — the quality checks, the
-server, `export_openapi` — and the same re-sync also removes anything else
-installed into `.venv` by hand, which on a GPU host means the optional NVML
-binding disappears alongside it. Verified:
+*before* it runs, so the reversion is not limited to the verification command —
+every `uv run` in DEVELOPMENT.md that re-pins `torch` reverts the wheel: the
+quality checks, the server, `export_openapi`. `uv sync` goes further and
+*prunes*, so it removes anything installed into `.venv` by hand as well, which
+on a GPU host takes the optional NVML binding with it. (`uv run` does not prune
+— see *What `uv run` really does* below, where the distinction turns out to
+matter.) Verified:
 
 ```text
 $ uv pip list | grep -i "nvidia\|^torch "
@@ -262,7 +278,9 @@ quality-checks block and from the test-strategy row that describes the
 integration tier.
 
 **Verified by following it end to end**, on 2026-08-25, in this worktree, from
-`rm -rf backend/.venv`:
+`rm -rf backend/.venv`. (This run predates the 034 scope addition below, so
+step 1 is a bare `uv sync`; the whole sequence was then re-run against 034's
+`pyproject.toml` — see *What `uv run` really does* — and passed again.)
 
 | step | command as written in DEVELOPMENT.md | result |
 | --- | --- | --- |
@@ -301,7 +319,95 @@ SKIPPED [1] tests\test_roformer_integration.py:193: no CUDA device is available
 
 A green run, on a machine with a working GPU, in which the GPU test skipped
 itself and the performance figure is 15× off. That is the one worth putting in
-front of the reader.
+front of the reader. (Both blocks are from the pre-034 `pyproject.toml`, where
+`torch` was a plain dependency. Under 034's extra the same two reversions happen
+under `uv run --extra torch`, reproduced verbatim below; DEVELOPMENT.md carries
+the post-034 spellings.)
+
+### What `uv run` really does once `torch` is an optional extra
+
+The brief for the added scope said that `uv run pytest` without `--extra torch`
+"silently *uninstalls* torch and runs the integration tier on nothing".
+**Measured, that is not what happens** — and the truth is more awkward, because
+it points the opposite way on a GPU host. Every row below was run with uv 0.8.23
+against 034's `backend/pyproject.toml`, starting from a `.venv` holding
+`torch 2.13.0+cu130`:
+
+| command | effect on `torch` |
+| --- | --- |
+| `uv sync` | **removed entirely** (with `nvidia-ml-py` alongside it) |
+| `uv sync --extra torch` | reinstalled as the **CPU** wheel |
+| `uv run pytest -m integration` | **untouched** — 4 passed on `cuda:0` |
+| `uv run --extra torch pytest -m integration` | reinstalled as the **CPU** wheel; 3 passed, 1 skipped |
+| `uv run --no-sync pytest -m integration` | untouched — 4 passed on `cuda:0` |
+| `.venv/Scripts/python.exe -c "import torch"` | untouched |
+
+`uv run` syncs *inexactly*: it installs and corrects the packages the requested
+extras require, and leaves extraneous ones alone. Without `--extra torch`,
+`torch` is extraneous, so `uv run` has nothing to correct and the CUDA wheel
+survives. `uv sync` is exact and prunes, which is why it removes both the wheel
+and any hand-installed NVML binding.
+
+Two consequences, and they pull in opposite directions — which is exactly why
+DEVELOPMENT.md now states them together in one table rather than as two
+warnings:
+
+- **On a CPU host**, `--extra torch` is required, and the brief's instinct is
+  right for the reason that matters: the next plain `uv sync` takes torch away,
+  and then the real-separator tests have nothing to import. `uv run --extra
+  torch <ruff|pyright|pytest>` is the habit that always works there.
+- **On a GPU host, `--extra torch` is the flag that breaks it.** It is what
+  re-pins `torch` to the locked CPU wheel, whereupon the `gpu` test skips itself
+  on a machine with a working GPU. `--no-sync` is the habit that always works
+  there.
+
+The post-034 spelling of the original defect, verbatim:
+
+```text
+$ uv run --extra torch python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+Uninstalled 2 packages in 2.00s
+Installed 2 packages in 18.13s
+2.13.0+cpu False
+
+$ uv run --extra torch pytest -m integration -q -rs
+Uninstalled 1 package in 1.96s
+Installed 1 package in 17.62s
+SKIPPED [1] tests\test_roformer_integration.py:193: no CUDA device is available
+3 passed, 1 skipped, 725 deselected in 56.21s
+```
+
+The document does not tell anyone to rely on `uv run`'s not-pruning. That is a
+property of `uv run`, not of this project, and it would be a poor thing to build
+a habit on.
+
+**The CUDA instructions were re-verified on top of `uv sync --extra torch`**,
+start to finish, with 034's `pyproject.toml` and `uv.lock` checked out over this
+branch (they are 034's files; the overlay was reverted immediately afterwards
+and nothing from it is committed here):
+
+| step | result |
+| --- | --- |
+| `uv sync` | `.venv` rebuilt; `import torch` → `ModuleNotFoundError` |
+| `uv sync --extra torch` | `torch 2.13.0+cpu`, `cuda False` |
+| `uv pip install --reinstall-package torch --index-url …/cu130 torch` | `+ torch==2.13.0+cu130` |
+| `.venv/Scripts/python.exe -c "import torch; …"` | **`2.13.0+cu130 True`** |
+| `uv run --no-sync uvicorn straticate.main:app --port 8123` | starts; wheel intact |
+| `curl …/api/v1/system/devices` | `cuda:0` first, then `cpu` |
+| `uv run --no-sync pytest -m integration` | **4 passed** on `cuda:0`; wheel intact |
+
+**Ordering note.** DEVELOPMENT.md now describes `uv sync --extra torch`, which
+does not exist until 034 merges. If 036 lands first, that one command is ahead
+of the code by however long the gap is; everything else in the section is
+correct either way. 034 touches neither DEVELOPMENT.md nor ARCHITECTURE.md, so
+there is no merge conflict in either direction.
+
+### ARCHITECTURE.md §14
+
+One clause: "PyTorch is a runtime dependency from feature 026 onwards" → an
+optional one, installed through the `torch` extra since 034, with the real
+engines imported lazily so the application starts and serves without it. The
+CPU-wheel-pin paragraph around it is unchanged and still correct. Nothing else
+in that file was touched.
 
 ### Which `cuNNN` indexes actually exist
 

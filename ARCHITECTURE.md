@@ -421,7 +421,10 @@ fake separator covers it, and the real separator's plumbing is tested against a
 synthetic few-kilobyte checkpoint built at test time. Real GPU/model validation
 is a separate, manually-triggered integration tier (`pytest -m integration`).
 
-PyTorch is a runtime dependency from feature 026 onwards, and it is pinned to
+PyTorch is an **optional** runtime dependency — introduced by feature 026 and
+made optional again by feature 034, which installs it through the `torch` extra
+(`uv sync --extra torch`) and imports the real engines lazily, so the
+application starts and serves without it. It is pinned to
 PyTorch's **CPU wheel index** so that this constraint survives contact with it:
 the default PyPI wheel bundles a multi-gigabyte CUDA runtime on Linux, which CI
 would download on every run for a machine with no GPU. Installing a CUDA build
