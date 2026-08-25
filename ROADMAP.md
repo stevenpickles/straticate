@@ -138,7 +138,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 029 | Skeleton hardening (deferred review finds)  | MERGED  | 004, 005   | `029-skeleton-hardening` | #29 |
 | 030 | Playwright E2E tier (fake separator)         | PLANNED | 024        | | |
 | 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |
-| 032 | Hide development models from the catalog     | PR OPEN | 010, 026   | `032-hide-development-models` | #… |
+| 032 | Hide development models from the catalog     | PR OPEN | 010, 026   | `032-hide-development-models` | #36 |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
