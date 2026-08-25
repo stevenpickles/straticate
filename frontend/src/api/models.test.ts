@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
-import { getModel, installModel, removeModelWeights } from './models'
+import {
+  getModel,
+  installModel,
+  listModels,
+  removeModelWeights,
+} from './models'
 import {
   modelInstalling,
+  samplePermissiveLicensing,
   sampleBuiltInModel,
   sampleInstallableModel,
   sampleWeightsBytes,
@@ -217,5 +223,53 @@ describe('removeModelWeights', () => {
     const error = await removeModelWeights('nope').catch((e: unknown) => e)
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).code).toBe('model_not_found')
+  })
+})
+
+describe('listModels', () => {
+  it('GETs the collection and parses every model in catalog order', async () => {
+    const catalog = [
+      { ...sampleInstallableModel, licensing: samplePermissiveLicensing },
+      sampleBuiltInModel,
+    ]
+    const fetchMock = stubFetch(jsonResponse(catalog))
+
+    const models = await listModels()
+
+    expect(models).toEqual(catalog)
+    expect(models.map((model) => model.id)).toEqual([
+      sampleInstallableModel.id,
+      sampleBuiltInModel.id,
+    ])
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/models', undefined)
+  })
+
+  it('carries the licensing block a management view has to render', async () => {
+    stubFetch(
+      jsonResponse([
+        { ...sampleInstallableModel, licensing: samplePermissiveLicensing },
+      ]),
+    )
+
+    const [model] = await listModels()
+
+    expect(model?.licensing).toEqual(samplePermissiveLicensing)
+    expect(model?.requirements?.recommended_vram_mb).toBe(8192)
+  })
+
+  it('parses an empty catalog as an empty list, not as a failure', async () => {
+    stubFetch(jsonResponse([]))
+    await expect(listModels()).resolves.toEqual([])
+  })
+
+  it('rejects with a typed ApiError when the backend refuses', async () => {
+    stubFetch(
+      jsonResponse(
+        { error: { code: 'internal_error', message: 'Catalog unreadable.' } },
+        500,
+      ),
+    )
+
+    await expect(listModels()).rejects.toBeInstanceOf(ApiError)
   })
 })
