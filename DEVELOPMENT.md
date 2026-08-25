@@ -79,6 +79,10 @@ uv run pytest
 
 Auto-format: `uv run ruff format .`
 
+If you have swapped in the CUDA build of PyTorch, add `--no-sync` to every one
+of those commands — a plain `uv run` re-syncs and reverts the wheel. See
+*PyTorch and CUDA* below.
+
 ## PyTorch and CUDA
 
 `uv sync` installs **the CPU build of PyTorch**, deliberately.
@@ -109,26 +113,125 @@ automatically:
 ```bash
 cd backend
 uv sync
-uv pip install --reinstall-package torch   --index-url https://download.pytorch.org/whl/cu126 torch
+uv pip install --reinstall-package torch --index-url https://download.pytorch.org/whl/cu130 torch
 ```
 
-Substitute the CUDA version your driver supports (`cu121`, `cu124`, `cu126`, …);
-`nvidia-smi` reports the maximum.
-
 Two notes on why it is a second command rather than a flag on the first.
-Redirecting the *named* index (`uv sync --index pytorch-cpu=…/cu126`) loses its
+Redirecting the *named* index (`uv sync --index pytorch-cpu=…/cu130`) loses its
 `explicit = true`, so unrelated packages start resolving from PyTorch's index
 and the lock fails; and `uv sync` re-pins `torch` from the lock file, so **a
 later `uv sync` puts the CPU build back** and this command has to be repeated.
 That is a fair trade for a default that keeps CI lean, and it is one line in a
-setup script.
+setup script. Read the next two subsections before running anything else: the
+"later `uv sync`" is closer than it looks, and the obvious way to check the
+result is the thing that undoes it.
 
-Confirm which build is installed:
+### Choosing the `cuNNN` index
+
+`nvidia-smi` reports the highest CUDA version the driver supports; take the
+highest PyTorch index at or below it. **But a `cuNNN` index is a directory of
+files, not a translation layer** — it carries a wheel for a given torch version
+and platform, or it does not, and one that does not is reported as `uv` simply
+being unable to find `torch`. The fix for that is a different `cuNNN`, never a
+different flag. For the `torch 2.13.0` this project pins, checked on 2026-08-25
+with `curl -s https://download.pytorch.org/whl/cuNNN/torch/`:
+
+| index | `torch 2.13.0` |
+| --- | --- |
+| `cu130` | Linux **and Windows** (`cp312-cp312-win_amd64` present) |
+| `cu129` | Linux only — no Windows wheel at any Python version |
+| `cu126` | Linux **and Windows** (`cp312-cp312-win_amd64` present) |
+| `cu128` | none — that index stops at `torch 2.11.0` |
+| `cu124` | none — stops at `2.6.0` |
+| `cu121` | none — stops at `2.5.1` |
+
+So on Windows there are exactly two choices for this torch: `cu130` (current)
+and `cu126` (fallback for an older driver). `cu121` and `cu124`, which this
+section used to offer as examples, do not exist for `torch 2.13.0` on any
+platform, and `cu128` does not either. Re-check the table above when the pinned
+torch version moves — the answer is version-specific, and only the index knows
+it.
+
+### Anything that re-syncs puts the CPU wheel back
+
+This is the part that bites, so it is worth being blunt about. `uv sync` re-pins
+`torch` from the lock file, and **`uv run` runs `uv sync` before it runs
+anything** — so the CUDA build is undone by all of these:
+
+- `uv sync`, `uv lock`, `uv add`, `uv remove`
+- **every** `uv run`: `uv run python …`, `uv run pytest`, `uv run uvicorn …`,
+  `uv run ruff …` — including every quality check listed in this document
+
+The same re-sync also removes anything else installed into `.venv` by hand, such
+as the optional NVML binding below. It announces itself only as two lines that
+are very easy to read straight past:
+
+```text
+Uninstalled 1 package in 6.35s
+Installed 1 package in 17.48s
+```
+
+There are two ways to run something without re-syncing. Add `--no-sync`:
 
 ```bash
-uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-curl localhost:8000/api/v1/system/devices
+cd backend
+uv run --no-sync pytest -m integration
+uv run --no-sync uvicorn straticate.main:app --port 8000
+uv run --no-sync python -m straticate.scripts.export_openapi
 ```
+
+…or call the interpreter inside `.venv` directly, which cannot re-sync at all:
+
+```bash
+cd backend
+.venv/Scripts/python.exe -c "…"   # Windows
+.venv/bin/python -c "…"           # Linux and macOS
+```
+
+`uv pip install`, `uv pip uninstall` and `uv pip list` do **not** re-sync, which
+is why the swap command above is safe to run.
+
+### Confirming which build is installed
+
+```bash
+cd backend
+.venv/Scripts/python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+# 2.13.0+cu130 True
+```
+
+**Do not verify with a plain `uv run`.** It reinstalls the CPU wheel first and
+then reports, perfectly truthfully, on the environment it has just changed — the
+check destroys what it is checking and presents its own damage as the original
+state. Observed verbatim in this repository:
+
+```text
+$ uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+Uninstalled 1 package in 2.60s
+Installed 1 package in 18.42s
+2.13.0+cpu False
+```
+
+The end-to-end check is the application's own device list — and the server has
+to be started the same careful way, or it reverts the wheel on the way up and
+then correctly reports a host with no CUDA device:
+
+```bash
+cd backend
+uv run --no-sync uvicorn straticate.main:app --port 8000 &
+curl localhost:8000/api/v1/system/devices
+# [{"id":"cuda:0","backend":"cuda","name":"NVIDIA GeForce RTX 4060 Laptop GPU",…},
+#  {"id":"cpu","backend":"cpu",…}]
+```
+
+CUDA first in that list is the whole point: feature 018's detector found the
+device, and feature 026's resolver will send a job that pinned no device to it.
+
+`pytest` matters for the same reason and fails more quietly. `uv run pytest -m
+integration` reverts to the CPU wheel, whereupon
+`test_cuda_runtime_stats_report_real_memory` skips with "no CUDA device is
+available", the rest of the tier runs on the CPU, and every timing figure it
+prints is a CPU figure. The run is green and has tested none of what you meant
+to test. Use `uv run --no-sync pytest -m integration`.
 
 ### Model weights
 
@@ -257,8 +360,11 @@ Principles:
   (`backend/tests/roformer_fixtures.py`).
 - **The real-model tier is opt-in.** `backend/pyproject.toml` sets
   `addopts = "-m 'not integration'"`, so a plain `pytest` deselects it; run it
-  with `uv run pytest -m integration` once the weights are installed. Its tests
-  skip with an explanatory message when their prerequisites are missing.
+  with `uv run --no-sync pytest -m integration` once the weights are installed.
+  Its tests skip with an explanatory message when their prerequisites are
+  missing. The `--no-sync` is not optional on a GPU host: without it the run
+  reinstalls the CPU wheel and the `gpu` test skips itself (see *PyTorch and
+  CUDA*).
 - Audio fixtures are generated (sine sweeps, noise bursts) and seconds long;
   never commit copyrighted or large audio. The E2E tier generates its own with
   FFmpeg at setup time, into a temporary directory it deletes afterwards.

@@ -100,8 +100,8 @@ parameters or chunk sizing. GPU support for any other separator.
 
 - [x] `recommended_vram_mb` reflects a measured figure, with the measurement and
       its inference parameters recorded
-- [ ] Following DEVELOPMENT.md's CUDA section end to end leaves a working CUDA
-      build and reports it correctly
+- [x] Following DEVELOPMENT.md's CUDA section end to end leaves a working CUDA
+      build and reports it correctly — done from `rm -rf .venv`, all seven steps
 - [ ] NVML guidance names `nvidia-ml-py` and explains the `pynvml` trap
 - [ ] The GPU test's docstring matches reality
 - [ ] Suite still clean under `-W error`
@@ -232,6 +232,99 @@ the change is not the size of the delta: it is that the number is now measured,
 that a floor is stated separately from a recommendation, and that the parameters
 and the track-length dependence the number is meaningless without are written
 down.
+
+### The CUDA section was rewritten, then followed from an empty `.venv`
+
+The report was right and the mechanism is worse than it looked: `uv run` re-syncs
+*before* it runs, so the reversion is not limited to the verification command.
+Every `uv run` in DEVELOPMENT.md reverts the wheel — the quality checks, the
+server, `export_openapi` — and the same re-sync also removes anything else
+installed into `.venv` by hand, which on a GPU host means the optional NVML
+binding disappears alongside it. Verified:
+
+```text
+$ uv pip list | grep -i "nvidia\|^torch "
+nvidia-ml-py           13.610.43
+torch                  2.13.0+cu130
+$ uv sync
+Resolved 51 packages in 2ms
+Uninstalled 2 packages in 2.72s
+Installed 1 package in 21.73s
+ - nvidia-ml-py==13.610.43
+ - torch==2.13.0+cu130
+ + torch==2.13.0+cpu
+```
+
+The section now says that plainly, lists the two escapes (`uv run --no-sync …`
+and `.venv/Scripts/python.exe` / `.venv/bin/python`), notes that `uv pip
+install` is safe because it does not re-sync, and carries a pointer from the
+quality-checks block and from the test-strategy row that describes the
+integration tier.
+
+**Verified by following it end to end**, on 2026-08-25, in this worktree, from
+`rm -rf backend/.venv`:
+
+| step | command as written in DEVELOPMENT.md | result |
+| --- | --- | --- |
+| 1 | `uv sync` | `.venv` rebuilt |
+| 2 | `.venv/Scripts/python.exe -c "import torch; …"` | `2.13.0+cpu False` |
+| 3 | `uv pip install --reinstall-package torch --index-url …/cu130 torch` | `+ torch==2.13.0+cu130` |
+| 4 | `.venv/Scripts/python.exe -c "import torch; …"` | **`2.13.0+cu130 True`** |
+| 5 | `uv run --no-sync uvicorn straticate.main:app --port 8123` | starts, wheel intact |
+| 6 | `curl …/api/v1/system/devices` | `cuda:0` **first**, then `cpu` |
+| 7 | `uv run --no-sync pytest -m integration` | **4 passed**, `cuda:0`, wheel intact |
+
+Step 6's response is a bare array, not an object with a `devices` key — the old
+section did not show a response at all, and the new one shows the real shape.
+
+Both traps were also reproduced deliberately, so the warnings are not
+theoretical. The verification command the old section prescribed:
+
+```text
+$ uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+Uninstalled 1 package in 2.60s
+Installed 1 package in 18.42s
+2.13.0+cpu False
+```
+
+…and the quieter one, on the same host, immediately after step 7 passed 4/4 on
+`cuda:0`:
+
+```text
+$ uv run pytest -m integration -q -rs
+Uninstalled 1 package in 2.27s
+Installed 1 package in 19.95s
+[026] cpu: 10.0 s of audio in 63.9 s (RTF 0.156, 5 chunks)
+SKIPPED [1] tests\test_roformer_integration.py:193: no CUDA device is available
+3 passed, 1 skipped, 725 deselected in 71.34s
+```
+
+A green run, on a machine with a working GPU, in which the GPU test skipped
+itself and the performance figure is 15× off. That is the one worth putting in
+front of the reader.
+
+### Which `cuNNN` indexes actually exist
+
+The old text offered `cu121`, `cu124`, `cu126`, "…", which reads as though any
+`cuNNN` at or below the driver's maximum works. A PyTorch index is a directory
+of files: it has a wheel for a given torch version and platform or it does not,
+and one that does not surfaces as `uv` being unable to find `torch` at all.
+Enumerated on 2026-08-25 from `https://download.pytorch.org/whl/cuNNN/torch/`
+for the pinned `torch 2.13.0`:
+
+| index | `torch 2.13.0` |
+| --- | --- |
+| `cu130` | Linux and Windows (`cp312-cp312-win_amd64`) |
+| `cu129` | Linux only — no Windows wheel at any Python version |
+| `cu126` | Linux and Windows (`cp312-cp312-win_amd64`) |
+| `cu128` | none; that index stops at `torch 2.11.0` |
+| `cu124` | none; stops at `2.6.0` |
+| `cu121` | none; stops at `2.5.1` |
+
+So both of the old text's named examples are dead for this torch, and on Windows
+the real choice is `cu130` or `cu126`. The table is in DEVELOPMENT.md with the
+`curl` that produced it and a note that it is version-specific and must be
+re-checked when the torch pin moves.
 
 ### `minimum_vram_mb` was added — a schema change, and why it earns its keep
 
