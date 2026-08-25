@@ -12,11 +12,26 @@ live installation state on the catalog's static baseline. ``POST
 /models/{model_id}/install`` starts a download and returns at once; ``DELETE
 /models/{model_id}/weights`` puts the model back to ``available``.
 
-**Which models a mode offers is unchanged.** ``GET /separation-modes`` still
-lists every catalogued model's tier, installed or not. Feature 010 left open
-whether uninstalled tiers should be hidden; that question only becomes real in
-feature 026, when an uninstalled model can actually be selected for a job, and
-it is better answered with that in hand than guessed now.
+**Which models a mode offers is unchanged by installation state.**
+``GET /separation-modes`` still lists every catalogued model's tier, installed
+or not. Feature 010 left open whether uninstalled tiers should be hidden; that
+question only becomes real in feature 026, when an uninstalled model can
+actually be selected for a job, and it is better answered with that in hand
+than guessed now.
+
+**Development fixtures are a different question, and it is answered here by not
+answering it.** No route in this module filters anything: the catalog handed to
+these dependencies was already built with or without its ``development_only``
+entries (:attr:`straticate.config.Settings.include_development_models`, feature
+032), so ``/models``, ``/models/{model_id}``, ``/separation-modes``, install and
+removal are consistent for free. Deliberately *both* list routes, not only the
+one the frontend renders: this is a local-first application with no
+authentication, so ``/models`` being "an inventory" makes it no less user-facing
+— an inventory listing a comb filter that ``/separation-modes`` denies is a
+contradiction a client would have to reconcile, and a fixture it can see is one
+it can offer to install. A hidden model is therefore ``404 model_not_found`` on
+``GET /models/{model_id}`` — the same answer as an ID that was never
+catalogued, which is exactly what it is on this server.
 """
 
 from typing import Annotated, cast

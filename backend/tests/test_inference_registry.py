@@ -55,8 +55,17 @@ def make_catalog_model(model_id: str, **overrides: object) -> Model:
 
 @pytest.fixture
 def real_models() -> list[Model]:
-    """The repository's own catalog entries."""
-    return ModelCatalog.from_directory(Settings().models_dir).list_models()
+    """The repository's own catalog entries, development fixtures included.
+
+    The session enables ``include_development_models`` (see
+    ``conftest.DEVELOPMENT_MODELS_ENV``): the fake engine's own entries are the
+    point of these tests, and hiding them from *users* does not stop the fake
+    engine existing.
+    """
+    settings = Settings()
+    return ModelCatalog.from_directory(
+        settings.models_dir, include_development=settings.include_development_models
+    ).list_models()
 
 
 @pytest.fixture
