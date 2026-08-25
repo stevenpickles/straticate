@@ -1,14 +1,25 @@
 """Tests for the system endpoints."""
 
 from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import cast
 
 import httpx2
 import pytest
 from fastapi import FastAPI
 
 import straticate
+from straticate.config import Settings
 from straticate.schemas import ComputeDevice
-from straticate.system import CPU_BACKEND, CPU_DEVICE_ID, CUDA_BACKEND, DeviceDetector
+from straticate.system import (
+    CPU_BACKEND,
+    CPU_DEVICE_ID,
+    CUDA_BACKEND,
+    DeviceDetector,
+    DiskUsageLike,
+    nearest_existing_dir,
+    storage,
+)
 
 _FAKE_GPU = ComputeDevice(
     id="cuda:0",
@@ -82,3 +93,72 @@ async def test_devices_report_cuda_before_cpu(gpu_client: httpx2.AsyncClient) ->
         "memory_total_bytes": 34359738368,
     }
     assert [device["backend"] for device in payload] == [CUDA_BACKEND, CPU_BACKEND]
+
+
+# --------------------------------------------------------------------------
+# GET /system/storage
+# --------------------------------------------------------------------------
+
+
+class _FixedUsage:
+    """A ``shutil.disk_usage`` reading, as far as the storage report cares."""
+
+    def __init__(self, total: int, free: int) -> None:
+        self.total = total
+        self.free = free
+
+
+async def test_storage_reports_the_models_filesystem(client: httpx2.AsyncClient) -> None:
+    """The real application, the real platform primitive, no disk filled."""
+    response = await client.get("/api/v1/system/storage")
+    assert response.status_code == 200
+
+    payload: dict[str, object] = response.json()
+    assert set(payload) == {"free_bytes", "total_bytes"}
+
+    free = payload["free_bytes"]
+    total = payload["total_bytes"]
+    assert isinstance(free, int)
+    assert isinstance(total, int)
+    assert total > 0
+    assert 0 <= free <= total
+
+
+async def test_storage_reports_unknown_rather_than_failing(
+    client: httpx2.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A host that cannot answer gets a documented ``null``, not a 500.
+
+    The platform primitive is stubbed at its seam, so everything between it and
+    the wire — the report, the route, the response model — is the real code.
+    """
+
+    def unavailable(path: Path) -> DiskUsageLike:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(storage, "read_disk_usage", unavailable)
+
+    response = await client.get("/api/v1/system/storage")
+
+    assert response.status_code == 200
+    assert response.json() == {"free_bytes": None, "total_bytes": None}
+
+
+async def test_storage_reads_the_settings_models_directory(
+    client: httpx2.AsyncClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The figures describe ``Settings.models_dir``, not the working directory."""
+    seen: list[Path] = []
+
+    def record(path: Path) -> DiskUsageLike:
+        seen.append(path)
+        return _FixedUsage(total=1_000_000, free=250_000)
+
+    monkeypatch.setattr(storage, "read_disk_usage", record)
+
+    response = await client.get("/api/v1/system/storage")
+
+    assert response.status_code == 200
+    assert response.json() == {"free_bytes": 250_000, "total_bytes": 1_000_000}
+    settings = cast(Settings, app.state.settings)
+    assert seen == [nearest_existing_dir(settings.models_dir)]
