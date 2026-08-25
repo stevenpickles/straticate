@@ -1,17 +1,8 @@
+import { useEffect } from 'react'
 import { formatFileSize } from '../format'
+import { LARGE_DOWNLOAD_BYTES, diskFit, type DiskFit } from './diskFit'
+import { useDiskSpace, type DiskSpaceHandle } from '../state/diskSpace'
 import './DiskCostNotice.css'
-
-/**
- * Bytes from which a download is worth warning about rather than merely
- * pricing.
- *
- * 100 MB. Below it a transfer is an inconvenience; above it, it is a decision
- * — minutes of bandwidth and a chunk of somebody's disk. The real weights this
- * application ships a catalog entry for are 870 MB, so every model a user can
- * actually install today is over the line; the threshold exists so that a
- * future catalog entry of a few megabytes is not dressed up as a commitment.
- */
-export const LARGE_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 /** Props of {@link DiskCostNotice}. */
 export interface DiskCostNoticeProps {
@@ -19,41 +10,94 @@ export interface DiskCostNoticeProps {
   readonly totalBytes: number | null | undefined
 }
 
+/** What the notice says about the space on the machine, per state. */
+function spaceSentence(space: DiskSpaceHandle, fit: DiskFit): string {
+  if (space.status === 'idle' || space.status === 'loading') {
+    return 'Checking how much space is free on that machine…'
+  }
+  if (space.status === 'unavailable' || space.freeBytes === null) {
+    // Feature 037's sentence, kept for the case it was written for: no figure.
+    // The reason has changed — Straticate now asks its backend rather than
+    // being unable to ask at all — but the user's position has not, so the
+    // advice has not either.
+    return (
+      'Straticate cannot check that machine’s free space right now, ' +
+      'so make sure there is room before installing.'
+    )
+  }
+  const free = formatFileSize(space.freeBytes)
+  switch (fit) {
+    case 'insufficient':
+      return `Only ${free} is free there, so this download will not fit. Free some space first — starting it now will fail when the disk fills.`
+    case 'tight':
+      return `${free} is free there, so it will fit with little to spare.`
+    default:
+      return `${free} is free there.`
+  }
+}
+
 /**
- * What an install will cost on disk, and the plain admission that Straticate
- * cannot check whether that cost can be paid.
+ * What an install will cost on disk, and whether the machine writing it has
+ * the room.
  *
- * **It genuinely cannot**, and saying so is the honest option rather than the
- * lazy one. The weights are written by the **backend**, on whatever machine
- * that is; the browser has no view of that machine's filesystem. The one disk
- * figure a browser can obtain — `navigator.storage.estimate()` — describes the
- * quota of the *page's own origin* in the *browser's* profile directory, which
- * is a different number about a different disk, and reporting it here would be
- * worse than silence: it would look like an answer.
+ * **The browser cannot answer this and never could.** The weights are written
+ * by the *backend*, on whatever machine that is; `navigator.storage.estimate()`
+ * describes the quota of the *page's own origin* inside the *browser's* profile
+ * directory, which is a different number about a different disk and would look
+ * like an answer while being none. Feature 037 said so plainly instead of
+ * rendering it; feature 040 added `GET /system/storage`, so this notice now
+ * states the comparison the user actually needs — and falls back to 037's
+ * honest sentence whenever the figure is missing.
  *
- * A backend endpoint reporting free space beside `models_dir` would be the
- * real fix, and it is a backend change — out of scope for feature 037, and
- * recorded as such rather than improvised. Until then the user is told the
- * size, told that the check is not being made, and left to make the call, on
- * the principle that an 870 MB fetch should never start without the user
- * having seen its price.
+ * **Nothing here refuses an install.** The reading is a fact about one moment:
+ * free space moves under it, and a wrong reading (a quota'd volume, a network
+ * filesystem) would refuse a download that would have worked, on the one
+ * screen that exists to get weights onto the machine. A failed install is
+ * cheap and safe by comparison — feature 025 writes to a `.part` sibling,
+ * verifies it, and unlinks it on every exit — so the honest design is a loud
+ * warning at the moment of the decision, and a button that still works. The
+ * feature doc records the reasoning in full.
+ *
+ * The free-space figure is read **once, when an install is offered** (this
+ * component's mount) and again when a download changes what is on the disk.
+ * There is no poll: see `state/diskSpace.tsx`.
  */
 export function DiskCostNotice({ totalBytes }: DiskCostNoticeProps) {
-  const known = typeof totalBytes === 'number' && totalBytes > 0
+  const space = useDiskSpace()
+  const { ensureRead } = space
+
+  // The read happens *here* — where an install is actually on offer — rather
+  // than at application start, so a session that never installs anything never
+  // asks. Repeated mounts collapse into one request.
+  useEffect(() => {
+    ensureRead()
+  }, [ensureRead])
+
+  const size =
+    typeof totalBytes === 'number' && totalBytes > 0 ? totalBytes : null
+  const fit = diskFit(size, space.freeBytes)
+
   // An **unpublished** size counts as large. The alternative would be to treat
   // a transfer nobody has measured as the small case, which is the one reading
   // the evidence cannot support: a size the catalog does not state could be
   // anything, and the whole point of the warning styling is to mark a download
-  // the user should think about before starting.
-  const large = !known || totalBytes >= LARGE_DOWNLOAD_BYTES
+  // the user should think about before starting. Unknown *free space* earns the
+  // same treatment for the same reason.
+  const large = size === null || size >= LARGE_DOWNLOAD_BYTES || fit !== 'fits'
+  const className = [
+    'disk-cost',
+    large ? 'disk-cost-large' : '',
+    fit === 'insufficient' ? 'disk-cost-insufficient' : '',
+  ]
+    .filter((part) => part !== '')
+    .join(' ')
 
   return (
-    <p className={`disk-cost${large ? ' disk-cost-large' : ''}`} role="note">
-      {known
-        ? `${formatFileSize(totalBytes)} will be written to the machine running Straticate.`
-        : 'This model publishes no download size.'}{' '}
-      Straticate cannot check that machine&rsquo;s free space from the browser,
-      so make sure there is room before installing.
+    <p className={className} role="note">
+      {size === null
+        ? 'This model publishes no download size. It will be written to the machine running Straticate.'
+        : `${formatFileSize(size)} will be written to the machine running Straticate.`}{' '}
+      {spaceSentence(space, fit)}
     </p>
   )
 }

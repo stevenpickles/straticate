@@ -34,7 +34,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
 import { getModel, installModel, removeModelWeights } from '../api/models'
-import type { Model, ModelInstallation } from '../api/types'
+import type { Model, ModelInstallState, ModelInstallation } from '../api/types'
+import { useDiskSpace } from '../state/diskSpace'
 
 /**
  * How long to wait between reads of `GET /models/{id}` while a download runs.
@@ -291,6 +292,34 @@ export function startBlockedReason(
 }
 
 /**
+ * Whether moving from one installation state to another changed how many bytes
+ * are on the machine's disk.
+ *
+ * The three events that do: a download landing (`→ installed`), weights being
+ * thrown away (`installed →`), and a download ending without installing
+ * (`downloading →`, whose partial file feature 025 unlinks on every exit).
+ * Everything else — a poll reporting the same state, a read that finds what the
+ * last one found — changed nothing, and asking the backend about it would be a
+ * poll wearing a different hat.
+ *
+ * The first read of a model is never such an event: it reports the world as it
+ * already was.
+ */
+export function installationChangedDisk(
+  previous: ModelInstallState | null,
+  next: ModelInstallState | null,
+): boolean {
+  if (previous === null || next === null || previous === next) {
+    return false
+  }
+  return (
+    next === 'installed' ||
+    previous === 'installed' ||
+    previous === 'downloading'
+  )
+}
+
+/**
  * Watch (and install) the weights of one model, by ID.
  *
  * Reads the model once per selection, polls while a download runs, and exposes
@@ -305,6 +334,7 @@ export function useModelInstallation(
   const [hidden, setHidden] = useState(
     () => document.visibilityState === 'hidden',
   )
+  const { noteDiskChanged } = useDiskSpace()
 
   // Responses are applied only if they belong to the model still selected: a
   // user may switch tiers while a read is in flight.
@@ -411,6 +441,32 @@ export function useModelInstallation(
       clearTimeout(timer)
     }
   }, [model, hidden, removing, refresh])
+
+  // An install that settles, a removal, or a cancelled download all change how
+  // much room is left on the machine writing the weights — so the figure the
+  // install affordance is comparing against is stale, and this is the moment to
+  // say so. It is a **known event, not a schedule**: a poll reporting the same
+  // state changes nothing and asks for nothing (see `installationChangedDisk`),
+  // and a tree with no `DiskSpaceProvider` gets a no-op.
+  const lastSeenRef = useRef<{
+    modelId: string
+    state: ModelInstallState | null
+  }>({
+    modelId: '',
+    state: null,
+  })
+  useEffect(() => {
+    if (modelId === null) {
+      return
+    }
+    const state = model?.installation?.state ?? null
+    const seen = lastSeenRef.current
+    const previous = seen.modelId === modelId ? seen.state : null
+    lastSeenRef.current = { modelId, state }
+    if (installationChangedDisk(previous, state)) {
+      noteDiskChanged()
+    }
+  }, [modelId, model, noteDiskChanged])
 
   // A hidden tab is not watching a progress bar. Stop polling while it is
   // backgrounded and read once immediately when it returns, so the first thing

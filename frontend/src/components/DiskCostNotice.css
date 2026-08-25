@@ -14,3 +14,17 @@
   border-left: 2px solid var(--color-accent);
   color: var(--color-text);
 }
+
+/*
+ * Feature 040: the download does not fit in the space the backend reports.
+ *
+ * Marked as strongly as a failure, and still only a warning — nothing here
+ * disables the install. The reading describes one moment on a disk that keeps
+ * moving, and a false refusal on the one screen that exists to get weights onto
+ * the machine is worse than a download that fails safely (feature 025 writes to
+ * a `.part` and unlinks it on every exit).
+ */
+.disk-cost-insufficient {
+  border-left-color: var(--color-danger);
+  color: var(--color-danger);
+}

@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelInstallPanel } from './ModelInstallPanel'
+import { DiskSpaceProvider } from '../state/diskSpace'
+import { getSystemStorage } from '../api/system'
 import type {
   ModelInstallationHandle,
   ModelInstallationStatus,
@@ -43,6 +45,30 @@ function handle(
 
 function renderPanel(installation: ModelInstallationHandle) {
   return render(<ModelInstallPanel installation={installation} />)
+}
+
+vi.mock('../api/system')
+
+const getSystemStorageMock = vi.mocked(getSystemStorage)
+
+afterEach(() => {
+  vi.clearAllMocks()
+})
+
+/** The panel inside a page that knows the machine's free space. */
+function renderPanelWithSpace(
+  installation: ModelInstallationHandle,
+  freeBytes: number | null,
+) {
+  getSystemStorageMock.mockResolvedValue({
+    free_bytes: freeBytes,
+    total_bytes: 512 * 1024 ** 3,
+  })
+  return render(
+    <DiskSpaceProvider>
+      <ModelInstallPanel installation={installation} />
+    </DiskSpaceProvider>,
+  )
 }
 
 /** The panel's own region, or `null` when it rendered nothing. */
@@ -317,5 +343,60 @@ describe('ModelInstallPanel recovering from a failed read', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ModelInstallPanel and the machine’s free space', () => {
+  it('prices the download against the room the backend reports', async () => {
+    renderPanelWithSpace(
+      handle({ model: sampleInstallableModel }),
+      4 * 1024 ** 3,
+    )
+
+    const region = panel()
+    expect(region).not.toBeNull()
+    await waitFor(() => {
+      expect(region).toHaveTextContent('4 GB is free there.')
+    })
+    expect(region).toHaveTextContent(`${SIZE} will be written`)
+    expect(region).not.toHaveTextContent(/cannot check/i)
+    // Read where the install is offered, once — not on a timer.
+    expect(getSystemStorageMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('warns that a download will not fit, and still offers to install it', async () => {
+    renderPanelWithSpace(
+      handle({ model: sampleInstallableModel }),
+      128 * 1024 * 1024,
+    )
+
+    await waitFor(() => {
+      expect(panel()).toHaveTextContent(/will not fit/i)
+    })
+    // Warn, never refuse: the reading is one moment old on a disk that moves,
+    // and a false refusal here is the worse failure (see the feature doc).
+    expect(screen.getByRole('button', { name: 'Install model' })).toBeEnabled()
+  })
+
+  it('keeps the honest wording when the host cannot answer', async () => {
+    renderPanelWithSpace(handle({ model: sampleInstallableModel }), null)
+
+    await waitFor(() => {
+      expect(panel()).toHaveTextContent(/cannot check/i)
+    })
+    expect(panel()).toHaveTextContent(`${SIZE} will be written`)
+    expect(screen.getByRole('button', { name: 'Install model' })).toBeEnabled()
+  })
+
+  it('asks nothing while a download is running, because none is offered', async () => {
+    renderPanelWithSpace(
+      handle({
+        model: modelInstalling({ state: 'downloading', progress: 0.5 }),
+      }),
+      4 * 1024 ** 3,
+    )
+
+    expect(panel()).toHaveTextContent(/Downloading the model weights/i)
+    expect(getSystemStorageMock).not.toHaveBeenCalled()
   })
 })
