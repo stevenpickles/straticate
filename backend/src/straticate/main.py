@@ -1,5 +1,13 @@
 """Application factory and ASGI entry points.
 
+**One process serves both halves of the product.** The API lives under
+:data:`API_PREFIX`; everything else is the built frontend bundle, mounted by
+:func:`straticate.frontend.mount_frontend` (feature 042), so running Straticate
+is one command on one URL. A checkout with no bundle serves the API exactly as
+before — see that module for both the ordering rule that keeps the fallback off
+``/api/**`` and the no-bundle path. Development is untouched: Vite still serves
+the app on ``:5173`` and proxies ``/api`` here.
+
 Two ways in, and they differ in who owns the *bind address*:
 
 - ``uv run uvicorn straticate.main:app --reload --port 8000`` (development)
@@ -42,6 +50,7 @@ from straticate.api import models as models_api
 from straticate.audio import AudioStore
 from straticate.config import Settings, get_settings
 from straticate.errors import ErrorEnvelopeMiddleware, register_error_handlers
+from straticate.frontend import log_bundle_state, mount_frontend
 from straticate.inference import SeparatorRegistry, default_separator_builders
 from straticate.jobs import EventHub, JobManager
 from straticate.logging import configure_logging, ensure_logging_configured
@@ -123,6 +132,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     :func:`serve` still configures logging authoritatively before the server
     starts, and this call then finds the work already done.
 
+    **Which frontend mode the server started in is logged here too**, for the
+    same reason and immediately after the device probe: it is the one line that
+    tells a user whether this process is serving the app or only the API, and
+    written from :func:`create_app` it would be written at import, before
+    logging exists.
+
     **Compute devices are probed immediately afterwards**, and the order is the
     whole point. :meth:`~straticate.system.DeviceDetector.refresh` is where
     "PyTorch is not installed" (DEBUG) and "Could not determine total system
@@ -186,6 +201,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     detector = cast(DeviceDetector | None, getattr(app.state, "device_detector", None))
     if detector is not None:
         detector.refresh()
+    log_bundle_state(app)
     installer = cast(ModelInstaller | None, getattr(app.state, "model_installer", None))
     manager = JobManager()
     hub = EventHub()
@@ -222,8 +238,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             process-wide settings loaded from the environment.
 
     Returns:
-        A fully configured :class:`FastAPI` instance with CORS, routers, and
-        error handlers installed.
+        A fully configured :class:`FastAPI` instance with CORS, routers, error
+        handlers, and the built frontend (when there is one) installed.
 
     **Building an application configures nothing process-global**, logging
     least of all. :func:`straticate.logging.configure_logging` calls
@@ -324,6 +340,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(results.router, prefix=API_PREFIX)
     app.include_router(export.router, prefix=API_PREFIX)
     app.include_router(ws.router, prefix=API_PREFIX)
+
+    # The frontend is installed as the router's ``default``, not as a route,
+    # which is what keeps it from shadowing anything: it is consulted only
+    # after every route, every 405-producing partial match and every
+    # ``redirect_slashes`` redirect, and it refuses ``/api/**`` (in any
+    # spelling), every non-GET method and every non-HTTP scope on top of that.
+    # See ``straticate.frontend`` and ``tests/test_frontend_mount.py``.
+    app.state.frontend_dist_dir = settings.frontend_dist_dir
+    app.state.frontend_index = mount_frontend(app, settings.frontend_dist_dir)
 
     return app
 

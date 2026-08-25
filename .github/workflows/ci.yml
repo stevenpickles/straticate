@@ -162,6 +162,77 @@ jobs:
         working-directory: frontend
         run: npm run e2e
 
+      # Feature 042: the one-process claim, checked against a **real** Vite
+      # build. `backend/tests/test_frontend_mount.py` covers the routing
+      # hermetically with a synthetic bundle — which is the right place for it,
+      # and fast — but a synthetic bundle cannot notice the one thing only a
+      # real build decides: that its own asset URLs are root-relative and
+      # resolve against the mount. Change `base` in `vite.config.ts` and every
+      # hermetic test still passes while the served app loads nothing.
+      #
+      # It lives here because this job already has both toolchains installed,
+      # so the marginal cost is one `vite build` and one server start —
+      # measured at 5 s (4 s + 1 s) — rather than the ~1 min a job of its own
+      # would spend installing Python and Node to do the same thing.
+      # It is deliberately *not* a Playwright spec: `webServer` is
+      # global to the config, so a production spec would make every local
+      # `npm run e2e` build the frontend and start a third server first.
+      #
+      # After the tier above, so a real end-to-end failure reports first, and
+      # so the tier itself runs against exactly the arrangement it always has.
+      - name: Build the frontend bundle
+        working-directory: frontend
+        run: npm run build
+
+      - name: The built app is served by the backend, and never over the API
+        working-directory: backend
+        env:
+          STRATICATE_PORT: '8124'
+        run: |
+          STRATICATE_DATA_DIR="$RUNNER_TEMP/production" \
+            uv run python -m straticate > "$RUNNER_TEMP/production.log" 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          base="http://127.0.0.1:$STRATICATE_PORT"
+          curl -sf --retry 60 --retry-delay 1 --retry-all-errors \
+            --retry-connrefused "$base/api/v1/health" > /dev/null
+
+          # The root URL is the built app, and so is a deep link into it.
+          curl -sf "$base/" | grep -q '<div id="root">'
+          curl -sf "$base/jobs/deep-link" | grep -q '<div id="root">'
+
+          # The asset the built index.html actually asks for resolves — and is
+          # the *script*, not the entry document. Checking only that the fetch
+          # succeeds would prove nothing about the file existing: a fallback
+          # that answered every miss with index.html returns 200 for a chunk
+          # that is not there, so the content type is what makes this real.
+          asset=$(curl -sf "$base/" | sed -n 's|.*src="\(/assets/[^"]*\)".*|\1|p' | head -1)
+          test -n "$asset"
+          type=$(curl -sf -o /dev/null -w '%{content_type}' "$base$asset")
+          case "$type" in
+            *javascript*) ;;
+            *) echo "::error::$asset was served as '$type', not JavaScript"; exit 1 ;;
+          esac
+
+          # A genuine miss inside the bundle stays a 404: a stale chunk must not
+          # come back as HTML for the browser to choke on.
+          missing=$(curl -s -o /dev/null -w '%{http_code}' "$base/assets/no-such-chunk.js")
+          test "$missing" = 404
+
+          # …and the API is untouched: an unknown path is still the envelope, in
+          # every spelling. `--path-as-is` stops curl collapsing the `//` that a
+          # client concatenating onto a trailing-slash base emits.
+          for path in /api/v1/nope //api/v1/nope; do
+            status=$(curl -s --path-as-is -o "$RUNNER_TEMP/nope.json" \
+              -w '%{http_code}' "$base$path")
+            test "$status" = 404
+            grep -q '"not_found"' "$RUNNER_TEMP/nope.json"
+          done
+
+          # A trailing slash on a real route still redirects rather than
+          # silently becoming the app.
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$base/docs/")" = 307
+
       - name: Upload the Playwright report
         if: failure()
         uses: actions/upload-artifact@v4
