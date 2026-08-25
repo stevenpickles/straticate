@@ -3,7 +3,7 @@
 Branch: `039-shared-separator-skeleton`
 Status: PR OPEN
 Dependencies: 026, 028
-PR: #…
+PR: #48
 
 ## Objective
 
