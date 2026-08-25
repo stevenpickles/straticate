@@ -45,6 +45,32 @@ above live tensors. What a card must have free is roughly twice the reported
 figure — which is why 036 set `recommended_vram_mb: 6144` and
 `minimum_vram_mb: 4096` rather than the ~1.6 GiB a naive reading suggests.
 
+## What feature 039 left for you, deliberately
+
+039 halved the duplication between the two separators and left `_run_chunks` as
+the documented extension point — **this feature's hole**. It also found two
+memory leads and recorded rather than took them, because its own acceptance
+criterion was bit-identical output:
+
+- **RoFormer allocates its `weights` accumulator at the full
+  `(stems, channels, samples)` shape** when a `(samples,)` vector would do — the
+  same value is broadcast into every stem and channel. Demucs already does it the
+  small way, so the fix is to make RoFormer match its sibling.
+- **Both backends hold the whole mixture *and* the whole accumulator on the
+  device** for the length of the run. That is the structural cause of the linear
+  growth, and the thing this feature exists to remove.
+
+Feature 028 added a third, from measurement: **`chunk_size` is not a memory dial
+for Demucs**, because `use_train_segment` pads every window back up to the
+training segment. So shrinking the window buys wall-clock cost and no memory —
+do not reach for it as the fix.
+
+028 also already took the easy win in its own chunk loop: writing whole-track
+steps **in place** rather than with ordinary operators cut the slope from
+**5.85 to 1.85 MiB per second of audio** and a ten-minute track's peak from
+4,023 to 1,662 MiB. That is the baseline to beat, not a technique still
+available.
+
 ## Scope
 
 - Stream the overlap-add: keep only the chunks in flight on the device, and
