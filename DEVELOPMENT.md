@@ -8,6 +8,9 @@
 - **Node.js ≥ 20** and npm
 - **FFmpeg** (with `ffprobe`) on `PATH`
 - Git
+- For the E2E tier: Playwright's Chromium, installed with
+  `cd frontend && npm run e2e:browsers` (it lives in a user cache, never in
+  the repository)
 - Optional: NVIDIA GPU + CUDA drivers (never required for development or
   normal tests — the fake separator covers everything, and PyTorch installs as
   its CPU build by default; see *PyTorch and CUDA* below). Since feature 032 the
@@ -168,11 +171,55 @@ npm run build          # production build must succeed
 
 Auto-format: `npm run format`
 
+CI additionally runs the end-to-end suite (`npm run e2e`) on every PR; see
+*End-to-end tests* below for running it locally.
+
 ## Running both
 
 Two terminals: backend on `:8000`, frontend on `:5173`. The Vite dev server
 proxies `/api` (REST and WebSocket) to the backend, so the browser only talks
 to `:5173`.
+
+The proxy target is `STRATICATE_BACKEND_URL` when that variable is set
+(defaulting to `http://localhost:8000`), which is how the E2E tier points the
+dev server at the backend it started for itself.
+
+## End-to-end tests (Playwright)
+
+The E2E tier drives the whole workflow — upload, configure, separate, progress,
+telemetry, cancel, inspect, playback, export, reconnect — in a real browser
+against the **fake separator**. It needs no GPU, no weights and no download.
+
+```bash
+cd frontend
+npm ci
+npm run e2e:browsers   # once: downloads Chromium (~110 MB, outside the repo)
+npm run e2e            # the suite
+npm run e2e:ui         # the same suite in Playwright's UI mode
+```
+
+`npm run e2e` starts **both servers itself** — you do not need either running,
+and a backend you already have on `:8000` is left alone:
+
+- the backend on `127.0.0.1:8123` with `STRATICATE_DATA_DIR` pointing into a
+  temporary directory, so uploads, job outputs and the export cache never land
+  in `backend/data/`;
+- the Vite dev server on `127.0.0.1:5123`, told where that backend is.
+
+Both ports, and the temporary directory, are overridable —
+`STRATICATE_E2E_BACKEND_PORT`, `STRATICATE_E2E_FRONTEND_PORT`,
+`STRATICATE_E2E_DIR` — and everything the run creates is deleted when it ends.
+The audio fixtures are generated with FFmpeg at setup time; **audio is never
+committed**.
+
+Useful invocations: `npx playwright test e2e/cancel.spec.ts` for one file,
+`--headed` to watch it, `--debug` to step through it, and
+`npx playwright show-trace test-results/…/trace.zip` for the trace a failure
+leaves behind. The whole suite is about **35 seconds** on a developer machine
+(~7 s of that is starting the two servers).
+
+`npm test` (Vitest) and `npm run e2e` (Playwright) do not overlap: Vitest is
+scoped to `src/`, Playwright to `e2e/`, each with its own config.
 
 ## API types
 
@@ -199,7 +246,7 @@ file directly.
 | Backend API | pytest + httpx2 `ASGITransport` against the app | always | nothing external |
 | Audio tests | pytest, tiny generated fixtures in `testdata/` | always | FFmpeg |
 | Frontend unit/component | `frontend/` (Vitest + Testing Library) | always | nothing external |
-| E2E (fake separator) | Playwright — feature 030, not yet written | *(will be)* always | FFmpeg |
+| E2E (fake separator) | `frontend/e2e/` (Playwright, Chromium) | always | FFmpeg, Chromium, both servers |
 | GPU/model integration | `backend/tests/test_roformer_integration.py` (`-m integration`) | never (opt-in) | installed weights, and a GPU for the `gpu` tests |
 
 Principles:
@@ -213,7 +260,12 @@ Principles:
   with `uv run pytest -m integration` once the weights are installed. Its tests
   skip with an explanatory message when their prerequisites are missing.
 - Audio fixtures are generated (sine sweeps, noise bursts) and seconds long;
-  never commit copyrighted or large audio.
+  never commit copyrighted or large audio. The E2E tier generates its own with
+  FFmpeg at setup time, into a temporary directory it deletes afterwards.
+- **The E2E tier waits on conditions, never on the clock.** It contains no
+  fixed sleeps: it waits for elements, for polling `expect`s, for responses
+  that have actually arrived and for rendered frames. A sleep added there is a
+  bug report waiting to happen.
 - WebSocket flows are tested with an in-process client against the real event
   hub; frontend tests consume recorded/mocked typed events.
 - Every job-state transition and cancellation path has a test.
@@ -226,8 +278,8 @@ Principles:
 ## CI plan
 
 GitHub Actions, workflow `ci.yml`, triggered on PRs and pushes to `dev`/`main`.
-Backend and frontend jobs run in parallel; each is skipped-proof (no path
-filtering initially — both always run, keeping required checks simple).
+The backend, frontend and e2e jobs run in parallel; each is skipped-proof (no
+path filtering — all three always run, keeping required checks simple).
 
 Backend job (Ubuntu):
 
@@ -241,14 +293,41 @@ Frontend job (Ubuntu):
 npm ci → format:check → lint → typecheck → vitest run → vite build
 ```
 
-**The backend job installs FFmpeg via apt; the frontend job does not** — and
-that matches who actually uses it. The backend suite runs FFmpeg and ffprobe
-for real (generated audio fixtures, upload probing, export transcoding, and
-ffprobe verification of what a transcode produced), while the frontend suite is
-Vitest against mocked API responses and touches no media tooling. The frontend
-job needs FFmpeg only once the Playwright E2E tier exists (feature 030), which
-is when the install should be added — not before, where it would be a minute of
-CI spent on nothing.
+E2E job (Ubuntu), added by feature 030:
+
+```text
+apt ffmpeg → uv sync (backend) → npm ci (frontend)
+→ cached Chromium → playwright test
+```
+
+**FFmpeg is installed by the backend job and by the e2e job; the frontend job
+does not install it** — and that matches who actually uses it. The backend
+suite runs FFmpeg and ffprobe for real (generated audio fixtures, upload
+probing, export transcoding, and ffprobe verification of what a transcode
+produced); the e2e job generates its audio fixtures with FFmpeg and drives a
+backend that transcodes real exports; the frontend job is Vitest against mocked
+API responses and touches no media tooling, so an install there would be a
+minute of CI spent on nothing.
+
+The E2E tier is its **own job** rather than extra steps on `frontend`, because
+it needs the backend installed as well as the frontend: bolting it onto the
+lint/unit job would slow the pipeline's fastest feedback for every PR, while a
+separate job runs alongside the other two and costs wall-clock only if it is
+the slowest. It costs roughly **3–4 minutes**: about a minute of apt and
+`uv sync` (PyTorch's CPU wheel is ~183 MiB, cached by `setup-uv` between runs),
+`npm ci`, a Chromium restored from `actions/cache` (~110 MB, keyed on
+`package-lock.json`, so it downloads only when `@playwright/test` moves), and
+under a minute of actual tests. Only Chromium is installed — the tier tests
+correctness, not browser compatibility. It needs **no GPU, no weights and no
+download**: every job it runs goes to the fake separator. On failure it uploads
+the HTML report and the traces.
+
+One avoidable cost is left on the table: the e2e job installs the whole backend
+including `torch`, which it never uses, because `straticate.main` imports the
+RoFormer builder at import time (`inference/registry.py`). Making the real
+engines an optional dependency group with a lazily imported builder would drop
+~183 MiB and most of that minute from this job — it is a backend dependency
+change, so it belongs in its own numbered feature rather than in 030.
 
 A later `integration-gpu` workflow (manual `workflow_dispatch`, self-hosted or
 skipped by default) covers real-model validation: it would install the weights
