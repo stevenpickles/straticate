@@ -210,10 +210,14 @@ that the asset the built page asks for is served, and that an unknown
 `/api/v1/**` path is still the JSON envelope.
 
 It is in the **`e2e` job** because that job already installs both toolchains, so
-the marginal cost is one `vite build` and one server start — about 15 s, on a
-job that is not the pipeline's critical path — rather than the ~1 min a job of
-its own would spend installing Python and Node to do the same thing. Adding Node
-to the `backend` job would have slowed the critical path instead.
+the marginal cost is one `vite build` and one server start — **measured at 5 s**
+on its first run (4 s of build, 1 s to start and check), on a job that is not
+the pipeline's critical path — rather than the ~1 min a job of its own would
+spend installing Python and Node to do the same thing. Adding Node to the
+`backend` job would have slowed the critical path instead.
+
+Measured on that run: `backend` 2 min 59 s, `e2e` 1 min 50 s (of which these two
+steps are 5 s), `frontend` 52 s. The pipeline's wall clock is unchanged.
 
 It is deliberately **not a Playwright spec**, which was the obvious alternative:
 Playwright's `webServer` is global to the config, not per-project, so a

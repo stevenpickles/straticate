@@ -593,8 +593,9 @@ against a running `python -m straticate`, that the root URL and a deep link are
 the built app, that the asset the built page asks for is served, and that an
 unknown `/api/v1/**` path is still the JSON envelope.
 
-It costs about 15 s — a `vite build` and a server start — because it runs in the
-job that **already has both toolchains installed**. A job of its own would have
+It costs **5 s** — measured on its first run: 4 s of `vite build`, 1 s to start
+the server and make the checks — because it runs in the job that **already has
+both toolchains installed**. A job of its own would have
 spent a minute installing Python and Node to do the same thing, and adding Node
 to the `backend` job would have slowed the pipeline's critical path. It is
 deliberately *not* a Playwright spec: `webServer` is global to the config, so a

@@ -171,9 +171,10 @@ jobs:
       # hermetic test still passes while the served app loads nothing.
       #
       # It lives here because this job already has both toolchains installed,
-      # so the marginal cost is one `vite build` (~10 s) and one server start,
-      # not the ~1 min a job of its own would spend installing Python and Node
-      # to do it. It is deliberately *not* a Playwright spec: `webServer` is
+      # so the marginal cost is one `vite build` and one server start —
+      # measured at 5 s (4 s + 1 s) — rather than the ~1 min a job of its own
+      # would spend installing Python and Node to do the same thing.
+      # It is deliberately *not* a Playwright spec: `webServer` is
       # global to the config, so a production spec would make every local
       # `npm run e2e` build the frontend and start a third server first.
       #
