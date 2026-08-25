@@ -116,7 +116,7 @@ parameters or chunk sizing. GPU support for any other separator.
       its inference parameters recorded
 - [x] Following DEVELOPMENT.md's CUDA section end to end leaves a working CUDA
       build and reports it correctly — done from `rm -rf .venv`, all seven steps
-- [ ] NVML guidance names `nvidia-ml-py` and explains the `pynvml` trap
+- [x] NVML guidance names `nvidia-ml-py` and explains the `pynvml` trap
 - [ ] The GPU test's docstring matches reality
 - [ ] Suite still clean under `-W error`
 
@@ -431,6 +431,60 @@ So both of the old text's named examples are dead for this torch, and on Windows
 the real choice is `cu130` or `cu126`. The table is in DEVELOPMENT.md with the
 `curl` that produced it and a note that it is version-specific and must be
 re-checked when the torch pin moves.
+
+### NVML: `nvidia-ml-py`, and why `pynvml` is a trap rather than a synonym
+
+Reproduced both ways on this branch. `pip install pynvml` does **not** install a
+competing binding — it installs `nvidia-ml-py` *plus* a `_pynvml_redirector`
+meta-path finder whose `find_spec` warns:
+
+```text
+$ uv pip install pynvml
+Installed 2 packages in 62ms
+ + nvidia-ml-py==13.610.43
+ + pynvml==13.0.1
+$ .venv/Scripts/python.exe -W error -c "import torch"
+  File "…\torch\__init__.py", line 2189, in <module>
+    _C._initExtension(_manager_path())
+  File "…\torch\cuda\__init__.py", line 64, in <module>
+    import pynvml
+  File "…\_pynvml_redirector.py", line 29, in find_spec
+    warnings.warn(PYNVML_MSG, FutureWarning, stacklevel=2)
+FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py
+instead. …
+```
+
+The blast radius is what makes it worth documenting. `torch/cuda/__init__.py`
+line 64 imports `pynvml` **at torch import time**, unconditionally — so the
+warning does not fire when telemetry is sampled, it fires when anything imports
+torch. Under `-W error` that is every test in the real-separator tier, failing
+at import, with a message about a package installed for an optional feature.
+
+`uv pip uninstall pynvml` removes only the shim and leaves the `nvidia-ml-py` it
+dragged in, which then works:
+
+```text
+$ .venv/Scripts/python.exe -W error -c "…"
+torch 2.13.0+cu130 True
+name NVIDIA GeForce RTX 4060 Laptop GPU
+util 0 temp 51
+driver 610.47
+```
+
+…and under load, through `RoFormerSeparator.runtime_stats()` during a real
+separation, `utilization: 1.0` at 62–66 °C. The suite is clean under `-W error`
+with `nvidia-ml-py 13.610.43` installed.
+
+Documented in DEVELOPMENT.md (a new *Optional: NVML* subsection with the
+traceback and the recovery), in feature 026's document where NVML was listed as
+never exercised, and in `NvmlProbe`'s own docstring — that last one because the
+code reads `importlib.import_module("pynvml")`, which is precisely the sight
+that sends someone to `pip install pynvml`.
+
+**It is not added as a dependency**, per ARCHITECTURE.md §12 and this feature's
+out-of-scope list. One consequence worth stating where the reader will meet it:
+being outside the lock file means `uv sync` prunes it, along with the CUDA
+wheel — which is why it appears in the `uv` table above rather than only here.
 
 ### `minimum_vram_mb` was added — a schema change, and why it earns its keep
 

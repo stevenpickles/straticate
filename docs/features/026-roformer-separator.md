@@ -73,8 +73,9 @@ is milestone **M2**.
 - [x] Cancellation stops the run promptly at a chunk boundary and leaves no
       partial stem.
 - [x] `runtime_stats()` reports real memory figures on CUDA and `gpu: null` on
-      CPU; NVML remains optional. *(The CUDA branch was **not executed** — see
-      "What was and was not validated".)*
+      CPU; NVML remains optional. *(The CUDA branch was not executed when this
+      feature shipped; it was executed on real hardware on 2026-08-25 and
+      passed — see "What was and was not validated".)*
 - [x] Weights absent → `model_weights_missing` (409), not a crash.
 - [x] A model whose `capabilities` exclude the resolved device is rejected at
       **create** time with `model_device_unsupported` (409), documented in
@@ -376,8 +377,10 @@ meaningless and whose control flow is identical.
 
 ### What was and was not validated
 
-This host is **CPU-only**: `GET /api/v1/system/devices` returns one device,
-`cpu` / `Intel64 Family 6 Model 170 Stepping 4`.
+This host was **CPU-only** while this feature was developed:
+`GET /api/v1/system/devices` returned one device, `cpu` /
+`Intel64 Family 6 Model 170 Stepping 4`. It has a GPU now — see *Validated
+later, on real hardware* below.
 
 **Validated by running it:**
 
@@ -416,7 +419,7 @@ This host is **CPU-only**: `GET /api/v1/system/devices` returns one device,
   behaving correctly — it is trained to find human voices, not sawtooth vowels —
   and it is why the measurement above uses real synthesised speech.
 
-**Not validated — stated plainly:**
+**Not validated when this feature shipped — stated plainly:**
 
 - **The CUDA path was never executed on real hardware.** No GPU was present.
   `torch.autocast`, the flash-attention backend selection, and the actual
@@ -431,15 +434,59 @@ This host is **CPU-only**: `GET /api/v1/system/devices` returns one device,
   CPU), the peak reset happening once per run, and the NVML lifecycle. Those are
   real tests in normal CI; they do not make the claim "it works on CUDA", and
   nothing here should be read as making it.
+
+  **Superseded on 2026-08-25 — see *Validated later, on real hardware* below.**
 - **NVML** (`utilization`, `temperature_celsius`) was never exercised against a
   real driver; the binding is not installed and never becomes a dependency. Its
   *lifecycle* — initialised once, handles cached, never shut down mid-job,
   absent-binding and driver-failure paths — is tested against a double.
+
+  **Superseded on 2026-08-25**, with `nvidia-ml-py` — which is the package to
+  install, and not `pynvml`; see below.
 - **A real music file** was never separated — nothing copyrighted was
   downloaded. The quality figures above come from a synthesised voice over a
   generated backing, which is a real measurement of a real model but is not the
   same as a mastered recording.
 - **Only this one checkpoint** was tried, at its own hyperparameters.
+
+### Validated later, on real hardware (2026-08-25)
+
+A GPU became available after this feature merged, so the two "unrun" items above
+were run. **CUDA is verified.** NVIDIA GeForce RTX 4060 Laptop GPU (8,188 MiB,
+driver 610.47 / CUDA 13.3) with `torch 2.13.0+cu130`; nothing in this feature
+changed to make it work — swapping the wheel made `cuda:0` appear first and jobs
+resolved to it, exactly as feature 018 designed and as this document assumed.
+
+- The full integration tier passes **4/4**, including
+  `test_cuda_runtime_stats_report_real_memory`, which had never executed.
+- A job driven through the real HTTP API resolved to `cuda:0`, reported real
+  chunk progress, and delivered a `runtime_metrics` event carrying genuine GPU
+  figures over the WebSocket.
+- **Performance**, 30 s clip: 100.5 s on CPU (RTF 0.299) against 6.7 s on
+  `cuda:0` (RTF 4.496) — **~15× faster, and faster than real time**. The CPU
+  figures earlier in this document stand; they are CPU figures and are labelled
+  as such. A 3-minute track separates in about 40 s instead of 10 minutes, which
+  changes what the CPU-oriented "Next" reasoning in the ROADMAP is about but not
+  whether it is right — most hosts still have no GPU.
+- **NVML works, and the package to install is `nvidia-ml-py`** — not `pynvml`,
+  which is a deprecated shim whose import hook raises `FutureWarning` from
+  inside `torch/cuda/__init__.py` and so breaks the whole suite under `-W error`
+  at `import torch`. With `nvidia-ml-py 13.610.43` the two optional fields
+  report (`utilization: 1.0`, 59–66 °C) and the suite stays clean. The binding
+  is still not a dependency and never becomes one. DEVELOPMENT.md, *Optional:
+  NVML*, carries the traceback and the recovery.
+
+**Memory**: peak allocation on a 30 s clip is **1,575 MiB** at this model's
+`chunk_size: 352800` / `num_overlap: 2`. That figure is *not* bounded by
+chunking — the "Whole-track memory" limitation below puts the mixture, the
+accumulator and the weight tensor on the device for the whole track, so the peak
+grows about 1.35 MiB per second of audio, reaching 2,343 MiB on a 10-minute
+track. Feature 036 measured that properly and corrected the catalog's
+`recommended_vram_mb` from it; see `docs/features/036-gpu-validation-followups.md`
+for the method, the parameters and the whole-device figures.
+
+The four defects this exercise exposed — none of them reachable without a GPU —
+are feature **036**.
 
 ### `frontend/src/api/generated/api.d.ts`
 

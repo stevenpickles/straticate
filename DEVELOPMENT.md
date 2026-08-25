@@ -305,6 +305,57 @@ on the CPU, and every timing figure printed is a CPU figure. Immediately before
 it, the same tier under `uv run --no-sync pytest -m integration` was **4 passed
 on `cuda:0`**. Use `--no-sync` here.
 
+### Optional: NVML, for GPU utilization and temperature
+
+GPU telemetry works without NVML: memory allocated, peak and total come from
+torch's own CUDA APIs, and `utilization` / `temperature_celsius` are simply
+`null` (ARCHITECTURE.md §12 — basic operation must never require NVML, and
+nothing here makes it a dependency). If you want those two fields filled in
+locally:
+
+```bash
+cd backend
+uv pip install nvidia-ml-py        # NOT pynvml — see below
+```
+
+**Install `nvidia-ml-py`, never `pynvml`.** They are not alternatives with the
+same result. `nvidia-ml-py` is NVIDIA's binding and provides the module named
+`pynvml`, which is what `inference/roformer/separator.py` imports and what torch
+imports. The PyPI package *called* `pynvml` is a deprecated shim: it installs
+`nvidia-ml-py` plus a `_pynvml_redirector` import hook that raises a
+`FutureWarning` the first time anything imports `pynvml`.
+
+That would be a nuisance anywhere. Here it breaks the test suite, because
+`torch/cuda/__init__.py` imports `pynvml` **at torch import time** and the suite
+treats a warning as a finding:
+
+```text
+$ uv pip install pynvml
+$ python -W error -c "import torch"
+  File "…/torch/__init__.py", line 2189, in <module>
+    _C._initExtension(_manager_path())
+  File "…/torch/cuda/__init__.py", line 64, in <module>
+    import pynvml
+  File "…/_pynvml_redirector.py", line 29, in find_spec
+    warnings.warn(PYNVML_MSG, FutureWarning, stacklevel=2)
+FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py
+instead. If you did not install pynvml directly, please report this to the
+maintainers of the package that installed pynvml for you.
+```
+
+Every test that imports torch fails, at import, with a message about a package
+you installed for telemetry. If you have already done it,
+`uv pip uninstall pynvml` removes the shim and leaves `nvidia-ml-py` — which it
+pulled in as a dependency — in place and working.
+
+Verified on 2026-08-25 with `nvidia-ml-py 13.610.43`, driver 610.47: the suite
+is clean under `-W error`, and a real separation reported `utilization: 1.0` and
+`temperature_celsius: 62.0`.
+
+**Do not add it to `backend/pyproject.toml`.** NVML stays optional and outside
+the lock file, which also means the next `uv sync` prunes it (see the table
+above) and you reinstall it the same way.
+
 ### Model weights
 
 Weights are never committed (ARCHITECTURE.md §9) and never downloaded by tests.
