@@ -119,10 +119,18 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 - **030** (Playwright E2E tier) — overdue since M1; it would have caught two
   M1 defects that unit tests did not.
 - Whether `quality_options` should hide tiers whose weights are not installed
-  is still open (010 raised it, 025 and 026 both deliberately deferred it). It
-  now has a concrete shape: `POST /jobs` answers `model_weights_missing` and
-  `GET /models` carries `installation`, so a client can render an "Install"
-  affordance instead. The decision belongs with a model-management UI.
+  is **settled by 037: no.** Raised by 010 and deferred by 025, 026 and 032.
+  Hiding makes the product silently differ from machine to machine, and on a
+  default server — one mode, one real tier — it would empty the configure step
+  with no explanation. The tier is also the only place a model's price, its
+  hardware requirements and its licence can be read *before* the download, and
+  the failure hiding was meant to prevent has been prevented directly since
+  035, which disables "Start separation" with a stated reason until the weights
+  are there. 037 acts on the decision rather than only recording it: every tier
+  is now priced where it is chosen ("Needs a 870 MB download" / "Installed" /
+  "Downloading its weights…" / "Its last install failed"), from `GET /models`,
+  so a mode with several uninstalled tiers no longer has to be clicked through.
+  Reasoning in `docs/features/037-model-management-ui.md`.
 - **032 hides the development fixtures** from the user-facing catalog. A default
   server therefore offers one separation mode (`vocals`) with one tier
   (`high_quality`, `vocals-hq-001`) and requires an 870 MiB weights install
@@ -172,7 +180,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 034 | Lazy separator builders (torch optional again)| MERGED  | 026        | `034-lazy-separator-builders` | #40 |
 | 035 | First-run model install affordance (UI)      | MERGED  | 025, 032   | `035-install-affordance` | #41 |
 | 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
-| 037 | Model management UI (install/remove/browse)  | PLANNED | 025, 035   | | |
+| 037 | Model management UI (install/remove/browse)  | PR OPEN | 025, 035   | `037-model-management-ui` | |
 | 038 | Streaming overlap-add (bounded VRAM)         | PLANNED | 026        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
