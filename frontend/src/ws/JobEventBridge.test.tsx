@@ -268,6 +268,43 @@ describe('JobEventBridge', () => {
     expect(screen.getByTestId('tracked-state')).toHaveTextContent('separating')
   })
 
+  it('does not let the confirming resync rewind a job the events moved on', async () => {
+    // The race the `jobId` trigger opens on the hot path of job creation:
+    // `POST /jobs` answers `queued`, the bridge confirms with
+    // `GET /jobs/{id}`, the backend serves that while the job is still
+    // queued — and the socket delivers `separating` before the HTTP response
+    // is processed. HTTP and the WebSocket are separate connections; their
+    // relative arrival order is not guaranteed.
+    //
+    // Applied, the stale answer would put the panel back to "waiting in the
+    // queue" with no progress bar until the next event landed.
+    const pending = deferred<Response>()
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(pending.promise))
+    renderBridge()
+
+    await open()
+    await userEvent.click(screen.getByRole('button', { name: 'track' }))
+    expect(screen.getByTestId('tracked-state')).toHaveTextContent('queued')
+
+    act(() => {
+      sockets.last.emitMessage(
+        JSON.stringify({
+          type: 'job_stage_changed',
+          job_id: sampleJobId,
+          stage: 'separating',
+          previous_stage: 'loading_model',
+        }),
+      )
+    })
+    expect(screen.getByTestId('tracked-state')).toHaveTextContent('separating')
+
+    await act(async () => {
+      pending.resolve(jsonResponse(jobIn('queued')))
+    })
+
+    expect(screen.getByTestId('tracked-state')).toHaveTextContent('separating')
+  })
+
   it('does not refetch when an event updates the job it already tracks', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse(sampleJob))
     vi.stubGlobal('fetch', fetchMock)

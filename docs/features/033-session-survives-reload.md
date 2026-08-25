@@ -27,6 +27,10 @@ ran on to completion, unreachable from the UI.
 - **`frontend/src/ws/JobEventBridge.tsx`** — resync now also fires when a job
   becomes the tracked one while the socket is already open, which is what a
   restored job does.
+- **`frontend/src/state/jobState.tsx`** — feature 031's "a REST snapshot may
+  not demote a terminal job" generalised to "a REST snapshot may not move a
+  job backwards", because the resync above put the same race on the hot path
+  of every job creation (PR review).
 - **`frontend/e2e/resync.spec.ts`** — the reload test that asserted the old
   behaviour now asserts the new one, plus reload-after-completion and a stale
   stored id.
@@ -47,6 +51,7 @@ ran on to completion, unreachable from the UI.
 - `frontend/src/App.tsx` (+ `App.test.tsx`)
 - `frontend/src/ws/JobEventBridge.tsx` (+ `JobEventBridge.test.tsx`)
 - `frontend/src/api/audio.ts`
+- `frontend/src/state/jobState.tsx` (+ `jobState.test.tsx`)
 - `frontend/e2e/resync.spec.ts`
 
 ## Acceptance criteria
@@ -61,7 +66,7 @@ ran on to completion, unreachable from the UI.
 - [x] A job that finished while the page was closed rehydrates as completed,
       and rehydration cannot rewind a terminal job.
 - [x] E2E covers all of the above with no fixed sleeps; `npm test` unaffected
-      (517 → 553 tests, all passing).
+      (517 → 561 tests, all passing).
 - [x] All frontend gates green: `format:check`, `lint`, `typecheck`, `test`,
       `build`, and `npm run e2e` (13 → 15 tests).
 
@@ -71,7 +76,8 @@ ran on to completion, unreachable from the UI.
 | --- | --- |
 | `persistence.test.ts` (19) | round trip; identifiers-only; validation of a corrupt or foreign payload; storage absent, throwing on every method, and throwing on property access |
 | `SessionGate.test.tsx` (17) | restoring running / completed / upload-only sessions; fetching rather than trusting; every failure path (404 job, 404 audio, unreachable backend, a backend that never answers); the persist loop; `restoredPhase` |
-| `JobEventBridge.test.tsx` (+3) | resync when a job is tracked while the socket is open; no refetch when an event updates the same job; an answer about a different job is ignored |
+| `jobState.test.tsx` (+8) | `isBackwardJobTransition` over every ordered pair, both directions, and both terminal cases; the reducer refusing a stage rewind and a progress rewind, and accepting an equal-stage snapshot |
+| `JobEventBridge.test.tsx` (+4) | resync when a job is tracked while the socket is open; the confirming resync losing to an event that already moved the job on; no refetch when an event updates the same job; an answer about a different job is ignored |
 | `App.test.tsx` (+1) | the wiring: a stored snapshot restores the `separate` phase and the drop zone is never live in between |
 | `e2e/resync.spec.ts` (+2, 1 rewritten) | reload mid-run resumes and reaches `completed` in the UI without creating a second job; reload after completion returns to `inspect`; an unknown stored id is fetched, refused, and started over cleanly |
 
@@ -202,13 +208,72 @@ While there, the "is this answer still relevant" guard was tightened from
 "is this the id I asked for" to "is this the id I am tracking", read off the
 returned record. It is the same question asked of the authoritative field.
 
-### Rehydration and the terminal-state rule
+**Why the extra `GET` per created job is worth keeping.** It closes the
+restore window described above with one mechanism rather than two, and the
+alternative — firing the resync only for restore-adopted jobs — would leave
+the store's correctness depending on *which caller* tracked a job, which is
+precisely the knowledge the reducer exists so that nobody needs. The cost is
+one in-memory lookup per job created, on a local single-user app that runs one
+separation at a time. It is only defensible because the answer is now guarded
+(next section); before that guard it was a regression, and the PR review was
+right to call it one.
+
+### The guard 031 drew one notch too narrow (PR review)
+
+Feature 031 established, in `trackJob`, that a REST snapshot may not demote a
+**terminal** job. That is where the race is *permanent* — the job has stopped,
+so no event will ever correct the demotion — but it is not the only place the
+race is visible, and the resync above moved the rest of it onto the hot path
+of every job creation:
+
+> `POST /jobs` answers `queued`; the bridge confirms with `GET /jobs/{id}`;
+> the backend serves that answer while the job is still `queued`; the socket
+> delivers `job_stage_changed` → `separating` before the HTTP response is
+> processed; the older answer then lands and writes `queued` back.
+
+`SeparationProgress` renders `queued` as "waiting in the queue" and suppresses
+the progress bar, so the panel visibly jumps backwards until the next event.
+HTTP and the WebSocket are separate connections and their relative arrival
+order is not guaranteed, so this is not a narrow window — it is the same
+read-races-the-stream class, one notch below terminal.
+
+The fix is in the reducer, not in the caller that exposed it, so that the rule
+keeps being inherited by every present and future `job/track` producer — which
+is exactly why 031 put it there. The rule now reads: **a REST snapshot may
+never move the tracked job backwards.**
+
+- `JOB_STAGE_RANK` gives each non-terminal stage its position in the linear
+  processing order (ARCHITECTURE.md §6), mirroring the backend's
+  `_PROCESSING_ORDER` in `backend/src/straticate/jobs/state.py`. `cancelled`
+  and `failed` deliberately have no rank: a job reaches them from *any* stage,
+  so they are not points on a forward ordering.
+- `isBackwardJobTransition(tracked, incoming)` is the whole rule: nothing
+  leaves a terminal state except another terminal state (031's rule, intact
+  and still covered by its original tests); any stage may reach a terminal
+  state; between two stages, rank decides. Equal stages are **not** backwards
+  — a later record of the same stage is still newer information and may carry
+  fields no event does (`started_at`).
+- One clause finer: an equal-stage snapshot whose `progress` is *lower* than
+  the tracked one is also refused. Chunk counts only climb, so a smaller
+  figure is a record the events have already overtaken, and applying it walks
+  the progress bar back — the same mistake at one more level of detail.
+
+The rank table is a `Record<ProcessingJobStage, number>`, and that annotation
+is doing real work: `ProcessingJobStage` is
+`Exclude<JobState, TerminalJobState>` over the *generated* contract type, so a
+stage added to (or removed from) the backend's enum makes the object the wrong
+shape and **fails the build right there** — which is where the new stage's
+position has to be decided. Verified by deleting a key: `tsc` reports
+`Property 'decoding' is missing`. There is deliberately no fallback rank for an
+unknown stage, because silently ranking one at `-1` would turn a contract
+change into a subtly wrong UI.
+
+### Rehydration and that rule
 
 Rehydration goes through `job/track` like every other REST snapshot, so it
-inherits feature 031's guard rather than bypassing it — the reason that rule
-lives in the reducer. In practice nothing is tracked when a restore lands, so
-there is nothing to rewind; what the guard protects against is the *next*
-snapshot, including the confirming resync described above.
+inherits the guard rather than bypassing it. In practice nothing is tracked
+when a restore lands, so there is nothing to rewind; what the guard protects
+is the *next* snapshot, including the confirming resync described above.
 
 A job that finished while the page was closed needs nothing special: the
 backend answers `completed`, with its result, and that is what is tracked.
@@ -235,9 +300,17 @@ asserts that the app **fetched** the planted id and was answered `404`: without
 that, it would pass just as well against an app that never reads storage at
 all. The mutation was reverted.
 
+The backwards-transition guard was checked the same way, by restoring the
+narrower terminal-only rule: exactly the three new regression tests failed
+(*refuses to rewind a running job to an earlier stage*, *refuses a snapshot
+whose progress the events have already overtaken*, and the bridge's *does not
+let the confirming resync rewind a job the events moved on*), and every one of
+031's terminal-demotion tests still passed unchanged — they are the same rule,
+and they had to stay covered. Reverted.
+
 ### Cost
 
-`npm test`: 517 → 553 tests, still ~11 s. `npm run e2e`: 13 → 15 tests, ~35 s →
+`npm test`: 517 → 561 tests, still ~11 s. `npm run e2e`: 13 → 15 tests, ~35 s →
 ~50 s locally (the mid-run reload test uses the 60 s fixture, for the same
 reason the cancel spec does — the reload has to land while the run is still
 going).

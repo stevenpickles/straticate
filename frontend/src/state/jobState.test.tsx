@@ -5,6 +5,7 @@ import {
   JobStateProvider,
   TERMINAL_JOB_STATES,
   initialJobState,
+  isBackwardJobTransition,
   isTerminalJobState,
   jobReducer,
   useJobDispatch,
@@ -50,6 +51,56 @@ describe('isTerminalJobState', () => {
     }
     expect(isTerminalJobState('queued')).toBe(false)
     expect(isTerminalJobState('separating')).toBe(false)
+  })
+})
+
+describe('isBackwardJobTransition', () => {
+  // The linear processing order (ARCHITECTURE.md 6), which the backend's
+  // `assert_transition` enforces on the way up. Named here so the assertions
+  // below read as "every pair", not as a handful of chosen examples.
+  const order = [
+    'queued',
+    'preparing',
+    'decoding',
+    'loading_model',
+    'separating',
+    'post_processing',
+    'encoding',
+  ] as const
+
+  it('refuses every backward step and allows every forward one', () => {
+    for (const [from, tracked] of order.entries()) {
+      for (const [to, incoming] of order.entries()) {
+        expect(
+          isBackwardJobTransition(tracked, incoming),
+          `${tracked} -> ${incoming}`,
+        ).toBe(to < from)
+      }
+    }
+  })
+
+  it('lets any non-terminal stage reach any terminal state', () => {
+    for (const stage of order) {
+      for (const terminal of TERMINAL_JOB_STATES) {
+        expect(isBackwardJobTransition(stage, terminal)).toBe(false)
+      }
+    }
+  })
+
+  it('lets nothing out of a terminal state', () => {
+    for (const terminal of TERMINAL_JOB_STATES) {
+      for (const stage of order) {
+        expect(isBackwardJobTransition(terminal, stage)).toBe(true)
+      }
+    }
+  })
+
+  it('still allows terminal to terminal, which feature 031 left open', () => {
+    for (const tracked of TERMINAL_JOB_STATES) {
+      for (const incoming of TERMINAL_JOB_STATES) {
+        expect(isBackwardJobTransition(tracked, incoming)).toBe(false)
+      }
+    }
   })
 })
 
@@ -130,6 +181,69 @@ describe('jobReducer job/track', () => {
     })
     expect(stale.job?.state).toBe('cancelled')
     expect(stale.cancelledAtStage).toBe('separating')
+  })
+
+  it('refuses to rewind a running job to an earlier stage', () => {
+    // The race `POST /jobs` opened: the create response is `queued`, the
+    // socket has already moved the job to `separating`, and the confirming
+    // `GET /jobs/{id}` was served in between. Not permanent the way a
+    // demoted terminal job is — the next event corrects it — but the panel
+    // says "waiting in the queue" and hides the progress bar until then.
+    const separating = apply(tracked(), {
+      type: 'job_stage_changed',
+      job_id: sampleJobId,
+      stage: 'separating',
+      previous_stage: 'loading_model',
+    })
+
+    const stale = jobReducer(separating, {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'queued' },
+    })
+    expect(stale).toBe(separating)
+    expect(stale.job?.state).toBe('separating')
+  })
+
+  it('refuses a snapshot whose progress the events have already overtaken', () => {
+    const advanced = apply(tracked(), {
+      type: 'job_progress',
+      job_id: sampleJobId,
+      stage: 'separating',
+      progress: 0.75,
+      chunks_completed: 36,
+      chunks_total: 48,
+      elapsed_seconds: 18,
+      audio_processed_seconds: 170,
+      audio_total_seconds: 227.4,
+    })
+
+    const stale = jobReducer(advanced, {
+      type: 'job/track',
+      job: { ...sampleJob, state: 'separating', progress: 0.25 },
+    })
+    expect(stale).toBe(advanced)
+    expect(stale.job?.progress).toBe(0.75)
+  })
+
+  it('accepts a snapshot of the same stage that is not behind', () => {
+    // Equal is not backwards: a later record of the same stage is still
+    // newer information, and may carry fields no event does (`started_at`).
+    const separating = apply(tracked(), {
+      type: 'job_stage_changed',
+      job_id: sampleJobId,
+      stage: 'separating',
+      previous_stage: 'loading_model',
+    })
+
+    const next = jobReducer(separating, {
+      type: 'job/track',
+      job: {
+        ...sampleJob,
+        state: 'separating',
+        started_at: '2026-08-23T12:00:01Z',
+      },
+    })
+    expect(next.job?.started_at).toBe('2026-08-23T12:00:01Z')
   })
 
   it('still accepts a snapshot that carries the job forward', () => {
