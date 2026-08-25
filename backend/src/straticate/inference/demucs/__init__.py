@@ -38,7 +38,6 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing only
         DEFAULT_TRANSITION_POWER,
         DemucsParameters,
         DemucsSeparator,
-        NvmlProbe,
         load_checkpoint_package,
     )
 
@@ -48,7 +47,6 @@ _LAZY_FROM_SEPARATOR = frozenset(
         "DEFAULT_TRANSITION_POWER",
         "DemucsParameters",
         "DemucsSeparator",
-        "NvmlProbe",
         "load_checkpoint_package",
     }
 )
@@ -91,6 +89,5 @@ __all__ = [
     "DEMUCS_ARCHITECTURE",
     "DemucsParameters",
     "DemucsSeparator",
-    "NvmlProbe",
     "load_checkpoint_package",
 ]

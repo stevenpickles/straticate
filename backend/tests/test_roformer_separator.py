@@ -13,27 +13,18 @@ sleeps for a duration as a way of synchronising.
 
 import asyncio
 import hashlib
-import sys
 import threading
-from array import array
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import torch
 
 from straticate.errors import ApplicationError
+from straticate.inference import torch_separator as skeleton_module
 from straticate.inference.base import SeparationProgress
 from straticate.inference.pcm import PcmAudio, decode_to_pcm, interleave
-from straticate.inference.roformer import NvmlProbe, RoFormerParameters, RoFormerSeparator
-from straticate.inference.roformer import separator as separator_module
-from straticate.inference.roformer.separator import (
-    device_stats,
-    pcm_to_tensor,
-    reset_peak_memory,
-    tensor_to_pcm,
-)
+from straticate.inference.roformer import RoFormerParameters, RoFormerSeparator
 from straticate.jobs.cancellation import CancellationToken, JobCancelled
 from straticate.schemas.jobs import JobState, SeparationConfiguration, SeparationResult
 from tests.audio_fixtures import peak_amplitude, read_wav, write_tone_wav
@@ -386,7 +377,7 @@ async def test_a_failure_removes_every_stem_it_had_already_written(
 ) -> None:
     """The first stem is written before the second fails; neither may survive."""
     output = tmp_path / "stems"
-    original = separator_module.write_wav
+    original = skeleton_module.write_wav
     written = 0
 
     def exploding_write(path: Path, audio: PcmAudio) -> None:
@@ -396,7 +387,10 @@ async def test_a_failure_removes_every_stem_it_had_already_written(
             raise OSError("disk full")
         original(path, audio)
 
-    monkeypatch.setattr(separator_module, "write_wav", exploding_write)
+    # Feature 039 moved ``_encode`` into the shared skeleton, so that is the
+    # module whose ``write_wav`` a stem is written through. Same seam, same
+    # assertions — it just lives in one place now instead of two.
+    monkeypatch.setattr(skeleton_module, "write_wav", exploding_write)
 
     with pytest.raises(OSError, match="disk full"):
         await run(make_separator(weights), source, output)
@@ -773,138 +767,43 @@ def test_the_separator_exposes_what_it_was_configured_with(weights: Path) -> Non
     assert separator.info.architecture == "mel_band_roformer"
 
 
-def test_planar_conversion_round_trips_through_the_pcm_module() -> None:
-    """Guards the int16-to-float bridge every stem is written through."""
-    original = PcmAudio(
-        sample_rate=TINY_SAMPLE_RATE,
-        channels=(array("h", [0, 1000, -1000, 32767, -32768]), array("h", [5, -5, 15, -15, 25])),
-    )
-    tensor = pcm_to_tensor(original, 2)
-    restored = tensor_to_pcm(tensor, TINY_SAMPLE_RATE)
-    # -32768 clamps to -32767: one LSB, and the only value that cannot survive a
-    # symmetric float scaling. Everything else is exact.
-    assert list(interleave(restored))[:8] == list(interleave(original))[:8]
-    assert restored.channels[0][4] == -32767
+async def test_a_second_run_of_one_separator_is_byte_identical_to_the_first(
+    weights: Path, source: Path, tmp_path: Path
+) -> None:
+    """A separator is cached per model for the life of the process, so it is *reused*.
+
+    Feature 039 moved the run lifecycle into a shared skeleton, which is a
+    refactor whose most plausible way of going wrong is state that outlives a
+    run — an accumulator, a device, a normalization — and quietly changes the
+    second job's audio. Nothing announces that; only the bytes do. So the same
+    instance separates the same input twice and every stem must hash the same
+    both times.
+    """
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    separator = make_separator(weights)
+    await run(separator, source, first)
+    await run(separator, source, second)
+
+    for name in ("vocals", "instrumental"):
+        assert digest(first / f"{name}.wav") == digest(second / f"{name}.wav"), (
+            f"{name}.wav differed between two runs of one separator"
+        )
 
 
 # --------------------------------------------------------------------------
-# The CUDA telemetry path, exercised on a CPU-only host through one seam
+# The CUDA peak is reset once per run
 # --------------------------------------------------------------------------
 #
-# Everything below replaces ``separator_module.cuda_namespace`` with a double.
-# It is the only way this code gets covered before it meets real hardware, and
-# feature 026 shipped it explicitly unrun — so the parts that are checkable
-# without a GPU are checked here rather than left to a reviewer's reading.
-
-
-class FakeProperties:
-    """What ``torch.cuda.get_device_properties`` gives us, minus everything else."""
-
-    def __init__(self, name: str, total_memory: int) -> None:
-        self.name = name
-        self.total_memory = total_memory
-
-
-class FakeCuda:
-    """A recording stand-in for the ``torch.cuda`` namespace."""
-
-    def __init__(self, *, allocated: int = 1 << 30, peak: int = 3 << 30) -> None:
-        self.allocated = allocated
-        self.peak = peak
-        self.resets: list[str] = []
-
-    def is_available(self) -> bool:
-        return True
-
-    def get_device_properties(self, index: int) -> FakeProperties:
-        return FakeProperties(f"NVIDIA Fake {index}", 8 << 30)
-
-    def memory_allocated(self, index: int) -> int:
-        return self.allocated
-
-    def max_memory_allocated(self, index: int) -> int:
-        return self.peak
-
-    def reset_peak_memory_stats(self, device: object) -> None:
-        self.resets.append(str(device))
-        # What torch really does: the high-water mark drops to what is
-        # currently allocated, so the resident model still counts.
-        self.peak = self.allocated
-
-
-class FakeAtexit:
-    """Captures teardown registrations instead of leaking them into the session."""
-
-    def __init__(self) -> None:
-        self.hooks: list[object] = []
-
-    def register(self, hook: Any) -> Any:
-        self.hooks.append(hook)
-        return hook
-
-
-class FakeNvml:
-    """A ``pynvml`` double that counts how often it is initialised."""
-
-    NVML_TEMPERATURE_GPU = 0
-
-    def __init__(self) -> None:
-        self.inits = 0
-        self.shutdowns = 0
-        self.handles = 0
-        self.samples = 0
-
-    def nvmlInit(self) -> None:
-        self.inits += 1
-
-    def nvmlShutdown(self) -> None:
-        self.shutdowns += 1
-
-    def nvmlDeviceGetHandleByIndex(self, index: int) -> str:
-        self.handles += 1
-        return f"handle-{index}"
-
-    def nvmlDeviceGetUtilizationRates(self, handle: str) -> Any:
-        self.samples += 1
-        return SimpleNamespace(gpu=63)
-
-    def nvmlDeviceGetTemperature(self, handle: str, sensor: int) -> int:
-        return 61
-
-
-@pytest.fixture
-def fake_cuda(monkeypatch: pytest.MonkeyPatch) -> FakeCuda:
-    cuda = FakeCuda()
-    monkeypatch.setattr(separator_module, "cuda_namespace", lambda: cuda)
-    return cuda
-
-
-def test_device_stats_report_the_devices_real_memory_figures(fake_cuda: FakeCuda) -> None:
-    stats = device_stats(torch.device("cuda:1"))
-    assert stats is not None
-    assert stats.device_id == "cuda:1"
-    assert stats.backend == "cuda"
-    assert stats.name == "NVIDIA Fake 1"
-    assert stats.memory_allocated_bytes == 1 << 30
-    assert stats.memory_peak_bytes == 3 << 30
-    assert stats.memory_total_bytes == 8 << 30
-    # NVML absent: the two optional fields stay empty, everything else does not.
-    assert stats.utilization is None
-    assert stats.temperature_celsius is None
-    assert stats.to_gpu_metrics().device_id == "cuda:1"
-
-
-def test_device_stats_are_absent_on_cpu(fake_cuda: FakeCuda) -> None:
-    """The contract renders "no device block" as ``gpu: null``."""
-    assert device_stats(torch.device("cpu")) is None
-    assert fake_cuda.resets == []
-
-
-def test_reset_peak_memory_only_touches_cuda(fake_cuda: FakeCuda) -> None:
-    reset_peak_memory(torch.device("cpu"))
-    assert fake_cuda.resets == []
-    reset_peak_memory(torch.device("cuda:0"))
-    assert fake_cuda.resets == ["cuda:0"]
+# What used to follow here was feature 026's CUDA/NVML block, which replaced
+# this module's ``cuda_namespace`` with a double so the telemetry path could be
+# covered on a host with no GPU. Feature 039 moved that code into
+# ``straticate/inference/torch_device.py``, and the tests moved with it, to
+# ``tests/test_inference_torch_device.py`` — one copy, same assertions.
+#
+# This one stayed, because it is about a *run*: it needs a real separator to
+# separate twice. Its seam moved from this module's globals to the shared
+# skeleton's, which is where ``_separate`` now calls ``reset_peak_memory``.
 
 
 async def test_the_peak_is_reset_once_per_run_not_once_per_device(
@@ -922,124 +821,10 @@ async def test_the_peak_is_reset_once_per_run_not_once_per_device(
     def record(device: torch.device) -> None:
         resets.append(str(device))
 
-    monkeypatch.setattr(separator_module, "reset_peak_memory", record)
+    monkeypatch.setattr(skeleton_module, "reset_peak_memory", record)
 
     separator = make_separator(weights)
     await run(separator, source, tmp_path / "first")
     await run(separator, source, tmp_path / "second")
 
     assert resets == ["cpu", "cpu"], "the peak measurement must restart with every separation"
-
-
-def test_a_reset_restarts_the_high_water_mark_from_the_resident_allocation(
-    fake_cuda: FakeCuda,
-) -> None:
-    """A previous run's peak does not survive the reset; the resident model does."""
-    fake_cuda.allocated = 2 << 30
-    fake_cuda.peak = 7 << 30
-    before = device_stats(torch.device("cuda:0"))
-    assert before is not None
-    assert before.memory_peak_bytes == 7 << 30
-
-    reset_peak_memory(torch.device("cuda:0"))
-
-    after = device_stats(torch.device("cuda:0"))
-    assert after is not None
-    assert after.memory_peak_bytes == 2 << 30
-
-
-# --------------------------------------------------------------------------
-# NVML stays optional, and stays cheap
-# --------------------------------------------------------------------------
-
-
-def test_nvml_is_initialised_once_and_not_per_sample(
-    fake_cuda: FakeCuda, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``runtime_stats()`` is called on the event loop, ~1 Hz, for a whole job.
-
-    ``straticate.telemetry.sampler`` polls it directly on the loop because
-    ``inference/base.py`` promises a "cheap, non-blocking snapshot". An
-    ``nvmlInit``/``nvmlShutdown`` pair per sample is tens of milliseconds of
-    driver setup in front of every WebSocket frame the loop owes somebody, so
-    the binding is initialised once and the handles are cached.
-    """
-    nvml = FakeNvml()
-    exit_hooks = FakeAtexit()
-    monkeypatch.setitem(sys.modules, "pynvml", nvml)
-    monkeypatch.setattr(separator_module, "atexit", exit_hooks)
-    monkeypatch.setattr(separator_module, "_NVML", NvmlProbe())
-
-    for _ in range(5):
-        stats = device_stats(torch.device("cuda:0"))
-        assert stats is not None
-        assert stats.utilization == 0.63
-        assert stats.temperature_celsius == 61.0
-
-    assert nvml.inits == 1, "NVML was re-initialised per sample"
-    assert nvml.shutdowns == 0, "NVML was torn down while a job was still sampling"
-    assert nvml.handles == 1, "the device handle was re-fetched per sample"
-    assert nvml.samples == 5
-    assert len(exit_hooks.hooks) == 1, "teardown must be registered once, at exit"
-
-
-def test_nvml_shuts_down_at_teardown(fake_cuda: FakeCuda, monkeypatch: pytest.MonkeyPatch) -> None:
-    nvml = FakeNvml()
-    exit_hooks = FakeAtexit()
-    monkeypatch.setitem(sys.modules, "pynvml", nvml)
-    monkeypatch.setattr(separator_module, "atexit", exit_hooks)
-    probe = NvmlProbe()
-    monkeypatch.setattr(separator_module, "_NVML", probe)
-
-    assert device_stats(torch.device("cuda:0")) is not None
-    hook = exit_hooks.hooks[0]
-    assert callable(hook)
-    hook()
-    assert nvml.shutdowns == 1
-    # Idempotent: a second teardown is not a second shutdown.
-    hook()
-    assert nvml.shutdowns == 1
-
-
-def test_a_missing_nvml_binding_costs_one_failed_import(
-    fake_cuda: FakeCuda, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """NVML is optional (ARCHITECTURE.md §12) and its absence is not an error."""
-    attempts = 0
-
-    def refuse(name: str) -> Any:
-        nonlocal attempts
-        attempts += 1
-        raise ImportError(f"No module named {name!r}")
-
-    monkeypatch.setattr(separator_module.importlib, "import_module", refuse)
-    monkeypatch.setattr(separator_module, "_NVML", NvmlProbe())
-
-    for _ in range(4):
-        stats = device_stats(torch.device("cuda:0"))
-        assert stats is not None
-        assert stats.utilization is None
-        assert stats.temperature_celsius is None
-        # Everything that does not come from NVML is unaffected.
-        assert stats.memory_total_bytes == 8 << 30
-
-    assert attempts == 1, "an absent binding must not be re-imported on every sample"
-
-
-def test_a_driver_failure_mid_job_does_not_break_the_snapshot(
-    fake_cuda: FakeCuda, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    nvml = FakeNvml()
-
-    def explode(handle: str) -> Any:
-        raise RuntimeError("NVML_ERROR_GPU_IS_LOST")
-
-    monkeypatch.setitem(sys.modules, "pynvml", nvml)
-    monkeypatch.setattr(separator_module, "atexit", FakeAtexit())
-    monkeypatch.setattr(separator_module, "_NVML", NvmlProbe())
-    monkeypatch.setattr(nvml, "nvmlDeviceGetUtilizationRates", explode)
-
-    stats = device_stats(torch.device("cuda:0"))
-    assert stats is not None
-    assert stats.utilization is None
-    assert stats.memory_allocated_bytes == 1 << 30

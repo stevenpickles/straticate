@@ -68,7 +68,6 @@ LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
     "straticate.inference.roformer": (
         "DEFAULT_CHUNK_SAMPLES",
         "DEFAULT_NUM_OVERLAP",
-        "NvmlProbe",
         "RoFormerParameters",
         "RoFormerSeparator",
     ),
@@ -77,7 +76,6 @@ LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "DEFAULT_TRANSITION_POWER",
         "DemucsParameters",
         "DemucsSeparator",
-        "NvmlProbe",
         "load_checkpoint_package",
     ),
     "straticate.inference": (
@@ -102,7 +100,20 @@ BACKEND_MODULE = "straticate.inference.roformer.separator"
 DEMUCS_BACKEND_MODULE = "straticate.inference.demucs.separator"
 """The Hybrid Transformer Demucs implementation module (feature 028)."""
 
-BACKEND_MODULES = (BACKEND_MODULE, DEMUCS_BACKEND_MODULE)
+SHARED_TORCH_MODULES = (
+    "straticate.inference.torch_separator",
+    "straticate.inference.torch_device",
+    "straticate.inference.torch_audio",
+)
+"""The skeleton feature 039 extracted from both backends — also torch at module scope.
+
+Nothing imports these except the two implementation modules above, so they are
+never reached without torch in practice; they are listed because the invariant
+this constant states is "every module that imports torch", and a module missing
+from it would be one the window below fails to simulate the absence of.
+"""
+
+BACKEND_MODULES = (BACKEND_MODULE, DEMUCS_BACKEND_MODULE, *SHARED_TORCH_MODULES)
 """Every Straticate module that imports torch at module scope."""
 
 EVICTED_PREFIXES = ("torch", *BACKEND_MODULES)
