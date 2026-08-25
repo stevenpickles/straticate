@@ -8,7 +8,11 @@ import {
   type AppState,
 } from '../state/appState'
 import { JobStateProvider } from '../state/jobState'
-import { sampleAudioFile, sampleSeparationModes } from '../test/fixtures'
+import {
+  sampleAudioFile,
+  sampleBuiltInModel,
+  sampleSeparationModes,
+} from '../test/fixtures'
 import type { AudioFile } from '../api/types'
 import { deleteAudio } from '../api/audio'
 
@@ -21,6 +25,14 @@ vi.mock('../api/audio', async (importOriginal) => ({
 // loads the catalog on mount; this suite is about the metadata summary.
 vi.mock('../api/modes', () => ({
   listSeparationModes: vi.fn(() => Promise.resolve(sampleSeparationModes)),
+}))
+
+// …and reads the selected tier's model to see whether its weights need
+// installing (feature 035). A model that needs no download renders nothing.
+vi.mock('../api/models', () => ({
+  getModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
+  installModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
+  removeModelWeights: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
 }))
 
 const deleteAudioMock = vi.mocked(deleteAudio)
