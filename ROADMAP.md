@@ -162,7 +162,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |
 | 032 | Keep development models out of user catalog  | MERGED  | 010, 026   | `032-hide-development-models` | #36 |
 | 033 | Session survives a page reload               | PR OPEN | 016, 017   | `033-session-survives-reload` | #39 |
-| 034 | Lazy separator builders (torch optional again)| PLANNED | 026        | | |
+| 034 | Lazy separator builders (torch optional again)| PR OPEN | 026        | `034-lazy-separator-builders` | |
 | 035 | First-run model install affordance (UI)      | PLANNED | 025, 032   | | |
 | 036 | GPU validation follow-ups                    | PLANNED | 026, 029   | | |
 
