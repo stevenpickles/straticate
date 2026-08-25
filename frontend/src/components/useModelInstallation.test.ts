@@ -96,6 +96,15 @@ async function tick(times = 1): Promise<void> {
   }
 }
 
+/** A promise plus its resolver, for parking a request in flight. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settleWith) => {
+    resolve = settleWith
+  })
+  return { promise, resolve }
+}
+
 /** Set `document.visibilityState` and fire the event the browser would fire. */
 function setVisibility(value: 'visible' | 'hidden'): void {
   Object.defineProperty(document, 'visibilityState', {
@@ -117,29 +126,49 @@ afterEach(() => {
   setVisibility('visible')
 })
 
+/** A `startBlockedReason` argument for a model that has been read. */
+function read(model: Model) {
+  return { modelId: model.id, model, status: 'loaded' as const }
+}
+
 describe('needsInstall / startBlockedReason', () => {
   it('a model with no downloadable artifact is never in the way', () => {
     expect(needsInstall(sampleBuiltInModel)).toBe(false)
-    expect(startBlockedReason(sampleBuiltInModel)).toBeNull()
+    expect(startBlockedReason(read(sampleBuiltInModel))).toBeNull()
   })
 
   it('an installed downloadable model is not in the way either', () => {
     const installed = modelInstalling({ state: 'installed' })
     expect(needsInstall(installed)).toBe(false)
-    expect(startBlockedReason(installed)).toBeNull()
+    expect(startBlockedReason(read(installed))).toBeNull()
   })
 
   it('gives a distinct reason for each state that blocks a start', () => {
     const reasons = (['available', 'downloading', 'failed'] as const).map(
-      (state) => startBlockedReason(modelInstalling({ state })),
+      (state) => startBlockedReason(read(modelInstalling({ state }))),
     )
     expect(reasons.every((reason) => reason !== null)).toBe(true)
     expect(new Set(reasons).size).toBe(3)
   })
 
-  it('an unread model blocks nothing: the client not knowing is not a reason', () => {
+  it('blocks while the model has not been read yet — unknown is not ready', () => {
     expect(needsInstall(null)).toBe(false)
-    expect(startBlockedReason(null)).toBeNull()
+    expect(
+      startBlockedReason({
+        modelId: MODEL_ID,
+        model: null,
+        status: 'loading',
+      }),
+    ).not.toBeNull()
+    expect(
+      startBlockedReason({ modelId: MODEL_ID, model: null, status: 'error' }),
+    ).not.toBeNull()
+  })
+
+  it('blocks nothing when no tier is selected at all', () => {
+    expect(
+      startBlockedReason({ modelId: null, model: null, status: 'idle' }),
+    ).toBeNull()
   })
 })
 
@@ -372,5 +401,186 @@ describe('useModelInstallation installing', () => {
     expect(result.current.error?.code).toBe('model_busy')
     expect(result.current.installing).toBe(false)
     expect(result.current.model?.installation?.state).toBe('available')
+  })
+})
+
+describe('useModelInstallation recovering', () => {
+  it('a retry after a failed read resumes the poll', async () => {
+    const fetchMock = stubModelReads([
+      modelInstalling({ state: 'downloading', progress: 0.1 }),
+      errorResponse('service_unavailable', 'Backend is down.', 503),
+      modelInstalling({ state: 'downloading', progress: 0.5 }),
+      modelInstalling({ state: 'installed', progress: 1 }),
+    ])
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    // The read that fails mid-download stops the loop…
+    await tick(4)
+    expect(reads(fetchMock)).toBe(2)
+    expect(result.current.error?.code).toBe('service_unavailable')
+    expect(result.current.model?.installation?.state).toBe('downloading')
+
+    // …and one retry — the panel's "Try again" — is all it takes to resume it.
+    act(() => {
+      result.current.refresh()
+    })
+    await settle()
+    expect(reads(fetchMock)).toBe(3)
+    expect(result.current.error).toBeNull()
+
+    await tick()
+    expect(reads(fetchMock)).toBe(4)
+    expect(result.current.model?.installation?.state).toBe('installed')
+  })
+
+  it('a read already in flight cannot overwrite the install it raced', async () => {
+    // The read the panel's own `noteWeightsMissing` refresh started, still in
+    // the air when the user clicks Install one round trip later.
+    const stale = deferred<Response>()
+    stubModelReads(
+      [sampleInstallableModel, stale.promise],
+      jsonResponse(
+        modelInstalling({ state: 'downloading', progress: 0.1 }),
+        202,
+      ),
+    )
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    act(() => {
+      result.current.refresh()
+    })
+    act(() => {
+      result.current.install()
+    })
+    await settle()
+    expect(result.current.model?.installation?.state).toBe('downloading')
+
+    // The read answers with what was true before the install started.
+    stale.resolve(jsonResponse(sampleInstallableModel))
+    await settle()
+
+    expect(
+      result.current.model?.installation?.state,
+      'the older answer does not un-start the download',
+    ).toBe('downloading')
+    expect(startBlockedReason(result.current)).toBe(
+      'The model weights are still downloading.',
+    )
+  })
+
+  it('a hung install for one tier still lets another be installed', async () => {
+    const otherId = 'vocals-fast-001'
+    const other: Model = { ...sampleInstallableModel, id: otherId }
+    const installs: string[] = []
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith('/install')) {
+        installs.push(url)
+        // Never settles: the POST hangs.
+        return new Promise<Response>(() => undefined)
+      }
+      return Promise.resolve(
+        jsonResponse(url.includes(otherId) ? other : sampleInstallableModel),
+      )
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useModelInstallation(id),
+      { initialProps: { id: MODEL_ID } },
+    )
+    await settle()
+    act(() => {
+      result.current.install()
+    })
+    await settle()
+    expect(installs).toHaveLength(1)
+    expect(result.current.installing).toBe(true)
+
+    rerender({ id: otherId })
+    await settle()
+    expect(
+      result.current.installing,
+      'the other tier is not the one with a request in flight',
+    ).toBe(false)
+
+    act(() => {
+      result.current.install()
+    })
+    await settle()
+    expect(installs).toHaveLength(2)
+    expect(installs[1]).toContain(otherId)
+  })
+})
+
+describe('useModelInstallation and a model_weights_missing job', () => {
+  it('records the refusal and re-reads the model', async () => {
+    const fetchMock = stubModelReads([
+      modelInstalling({ state: 'installed' }),
+      sampleInstallableModel,
+    ])
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+    expect(reads(fetchMock)).toBe(1)
+
+    act(() => {
+      result.current.noteWeightsMissing('The weights are not installed.')
+    })
+    expect(result.current.weightsMissingMessage).toBe(
+      'The weights are not installed.',
+    )
+
+    await settle()
+    expect(reads(fetchMock), 'the refusal triggered a re-read').toBe(2)
+    // The re-read agrees, so the message stays: it explains the refused start.
+    expect(result.current.weightsMissingMessage).toBe(
+      'The weights are not installed.',
+    )
+    expect(result.current.model?.installation?.state).toBe('available')
+  })
+
+  it('drops the refusal as soon as a download supersedes it', async () => {
+    stubModelReads(
+      [sampleInstallableModel],
+      jsonResponse(
+        modelInstalling({ state: 'downloading', progress: 0.1 }),
+        202,
+      ),
+    )
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+    act(() => {
+      result.current.noteWeightsMissing('The weights are not installed.')
+    })
+    await settle()
+
+    act(() => {
+      result.current.install()
+    })
+    await settle()
+
+    expect(
+      result.current.weightsMissingMessage,
+      'a running download is newer news than the job that was refused',
+    ).toBeNull()
+    expect(result.current.model?.installation?.state).toBe('downloading')
+  })
+
+  it('drops the refusal when a read reports the weights installed', async () => {
+    stubModelReads([
+      modelInstalling({ state: 'installed' }),
+      modelInstalling({ state: 'installed' }),
+    ])
+    const { result } = renderHook(() => useModelInstallation(MODEL_ID))
+    await settle()
+
+    act(() => {
+      result.current.noteWeightsMissing('The weights are not installed.')
+    })
+    await settle()
+
+    expect(result.current.weightsMissingMessage).toBeNull()
+    expect(startBlockedReason(result.current)).toBeNull()
   })
 })

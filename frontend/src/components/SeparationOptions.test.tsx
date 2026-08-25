@@ -601,3 +601,147 @@ describe('SeparationOptions model weights', () => {
     expect(attempts).toBe(2)
   })
 })
+
+describe('SeparationOptions after a model_weights_missing job', () => {
+  /**
+   * The whole flow this feature exists for, in order: the record says the
+   * weights are there, `POST /jobs` says otherwise, and the user installs them
+   * from the panel that answer produced.
+   */
+  function stubRefusedThenInstall() {
+    let current: Model = modelInstalling({ state: 'installed' })
+    let installs = 0
+    const fetchMock = stubFetch({
+      model: () => jsonResponse(current),
+      job: errorResponse(
+        'model_weights_missing',
+        "Model 'vocals-hq-001' is catalogued but its weights are not installed.",
+        409,
+      ),
+      install: () => {
+        installs += 1
+        current = modelInstalling({
+          state: 'downloading',
+          downloaded_bytes: sampleWeightsBytes / 2,
+          progress: 0.5,
+        })
+        return jsonResponse(current, 202)
+      },
+    })
+    return {
+      fetchMock,
+      installs: () => installs,
+      // The weights really are gone; the next read says so.
+      vanish() {
+        current = sampleInstallableModel
+      },
+      finish() {
+        current = modelInstalling({ state: 'installed' })
+      },
+    }
+  }
+
+  it('shows the install it started, not the job error it followed', async () => {
+    const backend = stubRefusedThenInstall()
+    renderOptions()
+
+    const start = await screen.findByRole('button', {
+      name: 'Start separation',
+    })
+    await waitFor(() => {
+      expect(start).toBeEnabled()
+    })
+    backend.vanish()
+    await userEvent.click(start)
+
+    // The refusal is rendered as the invitation…
+    const install = await screen.findByRole('button', { name: 'Install model' })
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'its weights are not installed',
+    )
+
+    // …and pressing it shows the download, not 870 MB of nothing behind a
+    // stale error.
+    await userEvent.click(install)
+    const bar = await screen.findByRole('progressbar', {
+      name: 'Model download progress',
+    })
+    expect(bar).toHaveAttribute('aria-valuenow', '50')
+    expect(
+      screen.getByRole('region', { name: 'Model weights' }),
+    ).toHaveTextContent(
+      `${formatFileSize(sampleWeightsBytes / 2)} of ${formatFileSize(sampleWeightsBytes)}`,
+    )
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+
+    // No second install beside a running one — that only earns `model_busy`.
+    expect(
+      screen.queryByRole('button', { name: /install/i }),
+    ).not.toBeInTheDocument()
+    expect(backend.installs()).toBe(1)
+
+    // Start stays refused, now for the honest reason.
+    expect(start).toBeDisabled()
+    const reasonId = start.getAttribute('aria-describedby')
+    expect(document.getElementById(reasonId ?? '')?.textContent ?? '').toMatch(
+      /downloading/i,
+    )
+  })
+
+  it('re-enables Start once the download the refusal prompted has finished', async () => {
+    const backend = stubRefusedThenInstall()
+    renderOptions()
+
+    const start = await screen.findByRole('button', {
+      name: 'Start separation',
+    })
+    await waitFor(() => {
+      expect(start).toBeEnabled()
+    })
+    backend.vanish()
+    await userEvent.click(start)
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Install model' }),
+    )
+    await screen.findByRole('progressbar', { name: 'Model download progress' })
+
+    // The poll lands the terminal state (its interval is real; this waits on
+    // the DOM, not on a duration).
+    backend.finish()
+    await waitFor(
+      () => {
+        expect(start).toBeEnabled()
+      },
+      { timeout: 3000 },
+    )
+    expect(
+      screen.getByRole('region', { name: 'Model weights' }),
+    ).toHaveTextContent('Model weights installed')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(start).not.toHaveAttribute('aria-describedby')
+  })
+})
+
+describe('SeparationOptions before the model has been read', () => {
+  it('refuses to start while the installation state is still unknown', async () => {
+    const pending = deferred<Response>()
+    stubFetch({ model: () => pending.promise })
+    renderOptions()
+
+    const start = await screen.findByRole('button', {
+      name: 'Start separation',
+    })
+    // Not knowing is not ready: a click here would produce exactly the
+    // `model_weights_missing` refusal the affordance exists to prevent.
+    expect(start).toBeDisabled()
+    const reasonId = start.getAttribute('aria-describedby')
+    expect(document.getElementById(reasonId ?? '')?.textContent ?? '').toMatch(
+      /checking/i,
+    )
+
+    pending.resolve(jsonResponse(sampleBuiltInModel))
+    await waitFor(() => {
+      expect(start).toBeEnabled()
+    })
+  })
+})

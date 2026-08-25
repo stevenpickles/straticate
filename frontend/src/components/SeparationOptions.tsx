@@ -99,11 +99,16 @@ export function SeparationOptions() {
   // Each tier names the model backing it, and a catalogued model is not
   // necessarily a ready one: weights are a download (ARCHITECTURE.md §9).
   const installation = useModelInstallation(selectedOption?.model_id ?? null)
-  const blockedReason = startBlockedReason(installation.model)
+
+  // The single question "may a separation start?", asked of the whole handle:
+  // an unread model is not a ready one, so this also covers the round trip
+  // right after entering the step or switching mode.
+  const blockedReason = startBlockedReason(installation)
 
   // Weights can vanish between the check and the job, so `POST /jobs` can
-  // still answer `model_weights_missing`. It is rendered as the actionable
-  // state — the install panel, with an Install button — not as a raw error.
+  // still answer `model_weights_missing`. The install panel renders that
+  // answer as the actionable state, and the hook drops it as soon as a read
+  // supersedes it — so a raw duplicate here would only ever be stale.
   const weightsMissing =
     create.status === 'error' && create.code === 'model_weights_missing'
 
@@ -113,10 +118,6 @@ export function SeparationOptions() {
     audioId !== null &&
     modeId !== null &&
     qualityId !== null &&
-    // Deliberately *not* also gated on `weightsMissing`: the model record is
-    // the authority, and the refetch that answer triggers is what turns it
-    // into a blocked reason. Gating on both would strand the user if the
-    // weights turned out to be present after all.
     blockedReason === null
 
   const start = () => {
@@ -143,9 +144,10 @@ export function SeparationOptions() {
           reason instanceof ApiError &&
           reason.code === 'model_weights_missing'
         ) {
-          // The record we based the check on is stale; re-read it so the
-          // panel shows the real state and offers the install.
-          installation.refresh()
+          // The record we based the check on is stale; hand the message to
+          // the panel and re-read, so what the user sees next is the real
+          // state with the install offered.
+          installation.noteWeightsMissing(reason.message)
         }
       })
       .finally(() => {
@@ -245,14 +247,7 @@ export function SeparationOptions() {
             </fieldset>
           )}
 
-          <ModelInstallPanel
-            installation={installation}
-            weightsMissingMessage={
-              weightsMissing && create.status === 'error'
-                ? create.message
-                : null
-            }
-          />
+          <ModelInstallPanel installation={installation} />
 
           <div className="separation-options-start-row">
             <button

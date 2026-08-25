@@ -78,12 +78,28 @@ export interface ModelInstallationHandle {
    * this: it rides on `model.installation.error`.
    */
   readonly error: InstallationError | null
-  /** Whether a `POST /install` is in flight (it returns in milliseconds). */
+  /** Whether a `POST /install` for **this** model is in flight. */
   readonly installing: boolean
-  /** Start (or retry) the download. Ignored while a request is in flight. */
+  /**
+   * The message of a `model_weights_missing` answer to `POST /jobs` that no
+   * read has superseded yet, or `null`.
+   *
+   * It is a **hint that the record is stale**, not a state of its own: the
+   * moment a read (or the install's own answer) reports `downloading` or
+   * `installed`, the server has spoken more recently than the job refusal did
+   * and this clears itself.
+   */
+  readonly weightsMissingMessage: string | null
+  /** Start (or retry) the download. Ignored while a request for it is in flight. */
   readonly install: () => void
-  /** Re-read the model now — after a `model_weights_missing`, or after a failed read. */
+  /** Re-read the model now — after a failed read, or after a failed job. */
   readonly refresh: () => void
+  /**
+   * Record that `POST /jobs` refused with `model_weights_missing`, and re-read
+   * the model. The weights vanished between the check and the job, so what is
+   * held is known to be out of date.
+   */
+  readonly noteWeightsMissing: (message: string) => void
 }
 
 /**
@@ -97,19 +113,31 @@ interface HookState {
   readonly modelId: string | null
   readonly model: Model | null
   readonly error: InstallationError | null
-  readonly installing: boolean
+  /**
+   * The model an install request is in flight for, or `null`. Keyed by ID
+   * rather than a boolean so a request that never settles cannot disable — or
+   * silently swallow a click on — a *different* tier's install.
+   */
+  readonly installingFor: string | null
+  /** A `model_weights_missing` job refusal no read has superseded yet. */
+  readonly weightsMissing: string | null
 }
 
 const IDLE_STATE: HookState = {
   modelId: null,
   model: null,
   error: null,
-  installing: false,
+  installingFor: null,
+  weightsMissing: null,
 }
 
 /**
  * Fold a settled request for `modelId` into the state, dropping anything that
  * described a different model.
+ *
+ * `installingFor` is deliberately carried across a changed selection: it names
+ * the model its request is about, so it stays true while that request is in
+ * flight no matter what the user selects meanwhile.
  */
 function applyRead(
   previous: HookState,
@@ -121,9 +149,26 @@ function applyRead(
     modelId,
     model: same ? previous.model : null,
     error: same ? previous.error : null,
-    installing: same && previous.installing,
+    installingFor: previous.installingFor,
+    weightsMissing: same ? previous.weightsMissing : null,
     ...patch,
   }
+}
+
+/**
+ * The patch for a model record that has just landed.
+ *
+ * A record reporting `downloading` or `installed` is the server speaking more
+ * recently than any `model_weights_missing` refusal, so it clears that hint —
+ * which is what stops a stale job error from hiding a download's progress, or
+ * from offering a second install beside one that is already running.
+ */
+function landed(model: Model): Partial<HookState> {
+  const state = model.installation?.state
+  const supersedes = state === 'downloading' || state === 'installed'
+  return supersedes
+    ? { model, error: null, weightsMissing: null }
+    : { model, error: null }
 }
 
 /** The installation block of a model, or `null` when there is no model yet. */
@@ -151,16 +196,33 @@ export function needsInstall(model: Model | null): boolean {
  * Why "Start separation" cannot be pressed, in one sentence, or `null` when
  * nothing about the model's weights is in the way.
  *
- * A model that could not be read at all is deliberately **not** a reason: the
- * user is not blocked on a fact the client failed to fetch, and `POST /jobs`
- * answers `model_weights_missing` if the weights really are absent.
+ * It takes the whole handle, not just the record, because **not knowing is not
+ * ready**. Until a read answers, the client has no idea whether the weights
+ * exist; enabling Start on that would mean the one round trip after entering
+ * the configure step — and after every mode switch — is a window where a click
+ * produces exactly the `model_weights_missing` refusal this feature exists to
+ * prevent. So every state other than "the server said these weights are here"
+ * blocks, and every blocking state has a control on screen: an install, a
+ * retry, or a wait that ends by itself.
  */
-export function startBlockedReason(model: Model | null): string | null {
-  const installation = installationOf(model)
-  if (installation === null || !needsInstall(model)) {
+export function startBlockedReason(
+  installation: Pick<ModelInstallationHandle, 'modelId' | 'model' | 'status'>,
+): string | null {
+  const { modelId, model, status } = installation
+  if (modelId === null) {
+    // No tier selected: whatever is stopping the user, it is not this.
     return null
   }
-  switch (installation.state) {
+  if (model === null) {
+    return status === 'error'
+      ? 'The model weights could not be checked. Try again to continue.'
+      : 'Checking whether the model weights are installed…'
+  }
+  const block = installationOf(model)
+  if (block === null || !needsInstall(model)) {
+    return null
+  }
+  switch (block.state) {
     case 'downloading':
       return 'The model weights are still downloading.'
     case 'failed':
@@ -193,10 +255,35 @@ export function useModelInstallation(
     modelIdRef.current = modelId
   }, [modelId])
 
-  // Flips synchronously, before React re-renders, so a double click on
-  // "Install" is a single POST (the same guard `SeparationOptions` uses for
-  // "Start separation").
-  const installingRef = useRef(false)
+  // Every request takes a sequence number when it *starts*, and a response is
+  // applied only if nothing newer has been applied already.
+  //
+  // Without this, a read that was already in flight when Install was clicked
+  // lands *after* the install's own answer and overwrites `downloading` with
+  // the `available` the server described a round trip ago: the poll never
+  // starts, no progress is ever shown, and Start stays disabled for a download
+  // that has long since finished. Cancelling on unmount is not enough, because
+  // that read belongs to the same model and the same `readCount` — nothing
+  // about it changed, only what happened while it was in the air.
+  const sequenceRef = useRef(0)
+  const appliedRef = useRef(0)
+  const claim = useCallback(() => {
+    sequenceRef.current += 1
+    return sequenceRef.current
+  }, [])
+  const isCurrent = useCallback((sequence: number) => {
+    if (sequence <= appliedRef.current) {
+      return false
+    }
+    appliedRef.current = sequence
+    return true
+  }, [])
+
+  // Names the model an install POST is in flight for, and flips synchronously
+  // — before React re-renders — so a double click is a single POST (the guard
+  // `SeparationOptions` uses for "Start separation"). Keyed by model so a
+  // request that never settles cannot swallow a click on another tier.
+  const installingForRef = useRef<string | null>(null)
 
   const refresh = useCallback(() => {
     setReadCount((count) => count + 1)
@@ -209,16 +296,15 @@ export function useModelInstallation(
       return
     }
     let cancelled = false
+    const sequence = claim()
     getModel(modelId)
       .then((model) => {
-        if (!cancelled) {
-          setState((previous) =>
-            applyRead(previous, modelId, { model, error: null }),
-          )
+        if (!cancelled && isCurrent(sequence)) {
+          setState((previous) => applyRead(previous, modelId, landed(model)))
         }
       })
       .catch((reason: unknown) => {
-        if (!cancelled) {
+        if (!cancelled && isCurrent(sequence)) {
           setState((previous) =>
             applyRead(previous, modelId, { error: errorInfo(reason) }),
           )
@@ -229,7 +315,7 @@ export function useModelInstallation(
     }
     // `readCount` is the refresh trigger; the request itself depends only on
     // the model ID.
-  }, [modelId, readCount])
+  }, [modelId, readCount, claim, isCurrent])
 
   // Everything below describes the model that is *selected right now*. A
   // record left over from another tier is not shown and not polled — no reset
@@ -271,39 +357,57 @@ export function useModelInstallation(
 
   const install = useCallback(() => {
     const id = modelId
-    if (id === null || installingRef.current) {
+    if (id === null || installingForRef.current === id) {
       return
     }
-    installingRef.current = true
+    installingForRef.current = id
+    const sequence = claim()
     setState((previous) =>
-      applyRead(previous, id, { installing: true, error: null }),
+      applyRead(previous, id, { installingFor: id, error: null }),
     )
     installModel(id)
       .then((installed) => {
-        if (modelIdRef.current === id) {
+        if (modelIdRef.current === id && isCurrent(sequence)) {
           setState((previous) =>
             applyRead(previous, id, {
-              model: installed,
-              error: null,
-              installing: false,
+              ...landed(installed),
+              installingFor: null,
             }),
           )
         }
       })
       .catch((reason: unknown) => {
-        if (modelIdRef.current === id) {
+        if (modelIdRef.current === id && isCurrent(sequence)) {
           setState((previous) =>
             applyRead(previous, id, {
               error: errorInfo(reason),
-              installing: false,
+              installingFor: null,
             }),
           )
         }
       })
       .finally(() => {
-        installingRef.current = false
+        if (installingForRef.current === id) {
+          installingForRef.current = null
+        }
       })
-  }, [modelId])
+  }, [modelId, claim, isCurrent])
+
+  const noteWeightsMissing = useCallback(
+    (message: string) => {
+      const id = modelId
+      if (id === null) {
+        return
+      }
+      // The refusal says only that what is held is out of date; the re-read is
+      // what replaces it with the truth.
+      setState((previous) =>
+        applyRead(previous, id, { weightsMissing: message }),
+      )
+      refresh()
+    },
+    [modelId, refresh],
+  )
 
   let status: ModelInstallationStatus = 'idle'
   if (modelId !== null) {
@@ -317,8 +421,10 @@ export function useModelInstallation(
     model,
     status,
     error,
-    installing: current?.installing ?? false,
+    installing: state.installingFor !== null && state.installingFor === modelId,
+    weightsMissingMessage: current?.weightsMissing ?? null,
     install,
     refresh,
+    noteWeightsMissing,
   }
 }

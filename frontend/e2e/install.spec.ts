@@ -347,3 +347,132 @@ test('a tier whose model needs no download shows none of it', async ({
   await expect(step.weights).toHaveCount(0)
   await expect(step.startButton).toBeEnabled()
 })
+
+test('a job refused for missing weights becomes an install that finishes', async ({
+  page,
+  request,
+}) => {
+  const step = new ConfigureStep(page)
+  const modes = await defaultServerModes(request)
+  const mode = modes[0]
+  const modelId = mode?.quality_options[0]?.model_id ?? ''
+  const record = (await listModels(request)).find(
+    (candidate) => candidate.id === modelId,
+  )
+
+  await page.route(
+    (url) => url.pathname === '/api/v1/separation-modes',
+    async (route) => {
+      await route.fulfill({ json: modes })
+    },
+  )
+
+  // The weights vanish between the check and the job: the record says
+  // `installed` until the job is refused, and the truth arrives on the re-read
+  // that refusal triggers.
+  let refused = false
+  let installStarted = false
+  let readsAfterInstall = 0
+  const progressScript = [0.3, 0.7]
+
+  await page.route(
+    (url) => modelIdOf(url) === modelId,
+    async (route) => {
+      const url = new URL(route.request().url())
+      const model: ModelRecord = record ?? {
+        id: modelId,
+        display_name: modelId,
+        development_only: false,
+      }
+      if (url.pathname.endsWith('/install')) {
+        installStarted = true
+        await route.fulfill({
+          status: 202,
+          json: { ...model, installation: installation('downloading', 0) },
+        })
+        return
+      }
+      if (!refused) {
+        await route.fulfill({
+          json: { ...model, installation: installation('installed', 1) },
+        })
+        return
+      }
+      if (!installStarted) {
+        await route.fulfill({
+          json: { ...model, installation: installation('available') },
+        })
+        return
+      }
+      const sample = progressScript[readsAfterInstall]
+      readsAfterInstall += 1
+      await route.fulfill({
+        json: {
+          ...model,
+          installation:
+            sample === undefined
+              ? installation('installed', 1)
+              : installation('downloading', sample),
+        },
+      })
+    },
+  )
+
+  // The documented answer, scripted rather than provoked: on a machine that
+  // *does* have these weights the real backend would happily start an 870 MiB
+  // model's separation, which is not what this spec is about.
+  await page.route(
+    (url) => url.pathname === '/api/v1/jobs',
+    async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.fallback()
+        return
+      }
+      refused = true
+      await route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: 'model_weights_missing',
+            message: `Model '${modelId}' is catalogued but its weights are not installed.`,
+            detail: { model_id: modelId },
+          },
+        },
+      })
+    },
+  )
+
+  await step.workflow.open()
+  await step.workflow.uploadWithPicker(fixture.path)
+  await expect(step.workflow.phase).toHaveText('Configure')
+
+  // The record claims the weights are there, so Start is offered and there is
+  // nothing to install.
+  await expect(step.startButton).toBeEnabled()
+  await expect(step.weights).toContainText('Model weights installed')
+  await expect(step.installButton).toHaveCount(0)
+
+  // The job is refused — and that is rendered as the install, not as a raw
+  // error the user cannot act on.
+  await step.startButton.click()
+  await expect(step.weights).toContainText('weights are not installed')
+  await expect(step.installButton).toBeEnabled()
+  await expect(step.startButton).toBeDisabled()
+
+  // Pressing it shows the download. This is the flow the whole feature exists
+  // for, and the one where a stale job error used to hide 870 MB of progress.
+  await step.installButton.click()
+  await expect(step.downloadProgress).toHaveAttribute('aria-valuenow', '30')
+  await expect(step.weights).toContainText(TOTAL_LABEL)
+  await expect(
+    step.weights.getByRole('alert'),
+    'the refusal is gone: the server has spoken more recently than it did',
+  ).toHaveCount(0)
+  await expect(
+    step.installButton,
+    'and no second install is offered beside a running one',
+  ).toHaveCount(0)
+
+  await expect(step.weights).toContainText('Model weights installed')
+  await expect(step.startButton).toBeEnabled()
+})

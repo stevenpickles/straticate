@@ -9,13 +9,6 @@ import './ModelInstallPanel.css'
 export interface ModelInstallPanelProps {
   /** The watched model, from `useModelInstallation`. */
   readonly installation: ModelInstallationHandle
-  /**
-   * The message of a `model_weights_missing` answer to `POST /jobs`, if the
-   * last attempt to start a separation got one. Weights can vanish between the
-   * check and the job, so this is rendered as the actionable state — with the
-   * install offered — rather than as a raw error the user cannot act on.
-   */
-  readonly weightsMissingMessage?: string | null
 }
 
 /** Clamp a `0..1` fraction to a whole percentage. */
@@ -46,32 +39,46 @@ function toPercent(fraction: number): number {
  * Progress is read from `installation.progress` / `downloaded_bytes` — real
  * bytes from the backend, polled once a second (see `useModelInstallation`),
  * never an animation standing in for work.
+ *
+ * **The live installation state outranks a `model_weights_missing` job
+ * refusal.** That refusal is a hint that the record was stale, and the hook
+ * clears it as soon as a read supersedes it; here, a download in flight
+ * suppresses it outright. Otherwise a user who pressed Start, was refused, and
+ * then installed would watch an 870 MiB download behind a stale error, with no
+ * progress, no byte counts and a live "Install model" button beside it.
  */
-export function ModelInstallPanel({
-  installation,
-  weightsMissingMessage = null,
-}: ModelInstallPanelProps) {
-  const { model, error, installing, install, refresh } = installation
+export function ModelInstallPanel({ installation }: ModelInstallPanelProps) {
+  const { model, error, installing, install, refresh, weightsMissingMessage } =
+    installation
   const block = installationOf(model)
-  const weightsMissing =
-    weightsMissingMessage !== null && weightsMissingMessage !== ''
+  const hint =
+    weightsMissingMessage === null || weightsMissingMessage === ''
+      ? null
+      : weightsMissingMessage
 
   // A model that needs no weights is never presented as something to install.
-  if (block !== null && !block.requires_download && !weightsMissing) {
+  if (block !== null && !block.requires_download && hint === null) {
     return null
   }
 
   // Nothing has been read yet: say nothing rather than flash a panel that a
   // built-in model would not have shown at all.
-  if (block === null && error === null && !weightsMissing) {
+  if (block === null && error === null && hint === null) {
     return null
   }
 
   const state = block?.state ?? 'available'
   const name = model?.display_name ?? 'This quality tier'
-  const downloading = state === 'downloading' && !weightsMissing
-  const installed = state === 'installed' && !weightsMissing
-  const failed = state === 'failed' && !weightsMissing
+
+  // Precedence, newest fact first. A download in flight and a failure both
+  // *are* the live state and say everything the hint would; a record claiming
+  // `installed` while the backend has just refused a job for missing weights
+  // is the one the hint is about, so there the hint wins.
+  const downloading = state === 'downloading'
+  const failed = state === 'failed'
+  const showHint = hint !== null && !downloading && !failed
+  const installed = state === 'installed' && !showHint
+  const available = !downloading && !failed && !installed
 
   const receivedBytes = block?.downloaded_bytes ?? null
   const totalBytes = block?.total_bytes ?? null
@@ -87,37 +94,34 @@ export function ModelInstallPanel({
   const received = receivedBytes === null ? null : formatFileSize(receivedBytes)
   const size = totalBytes === null ? null : formatFileSize(totalBytes)
 
-  // With nothing read and nothing missing there is no honest install to offer;
-  // a `model_weights_missing` from the backend is itself the invitation.
-  const canInstall = downloading
-    ? false
-    : weightsMissing || (block !== null && !installed)
+  // Never beside a running download — a second `POST /install` only earns a
+  // `model_busy` for a transfer that is going perfectly well. With nothing
+  // read at all there is no honest install to offer either; a job refused for
+  // missing weights is itself the invitation.
+  const canInstall =
+    !downloading && !installed && (block !== null || hint !== null)
   const buttonLabel = failed ? 'Retry install' : 'Install model'
+
+  // A failed *request* — a read that did not answer, or an install that was
+  // refused — always comes with the one control that can clear it. Without
+  // this, a read that fails mid-download leaves a frozen bar, an error line and
+  // nothing to press: the poll only resumes when a record lands.
+  const requestFailureMessage =
+    error === null
+      ? null
+      : block === null
+        ? 'Could not check whether the model weights are installed.'
+        : error.message
 
   return (
     <section className="model-install" aria-label="Model weights">
-      {weightsMissing && (
+      {showHint && (
         <p className="model-install-error" role="alert">
-          {weightsMissingMessage}
+          {hint}
         </p>
       )}
 
-      {!weightsMissing && block === null && error !== null && (
-        <div className="model-install-row">
-          <p className="model-install-note">
-            Could not check whether the model weights are installed.
-          </p>
-          <button
-            type="button"
-            className="model-install-secondary"
-            onClick={refresh}
-          >
-            Try again
-          </button>
-        </div>
-      )}
-
-      {block !== null && state === 'available' && !weightsMissing && (
+      {available && block !== null && (
         <p className="model-install-note">
           {name} needs its model weights before it can separate anything
           {size === null ? '' : ` — a ${size} download`}.
@@ -169,10 +173,19 @@ export function ModelInstallPanel({
         </p>
       )}
 
-      {error !== null && block !== null && (
-        <p className="model-install-error" role="alert">
-          {error.message}
-        </p>
+      {requestFailureMessage !== null && (
+        <div className="model-install-row">
+          <p className="model-install-error" role="alert">
+            {requestFailureMessage}
+          </p>
+          <button
+            type="button"
+            className="model-install-secondary"
+            onClick={refresh}
+          >
+            Try again
+          </button>
+        </div>
       )}
 
       {canInstall && (

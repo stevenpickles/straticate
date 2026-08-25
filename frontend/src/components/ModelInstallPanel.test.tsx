@@ -31,22 +31,16 @@ function handle(
     status,
     error: null,
     installing: false,
+    weightsMissingMessage: null,
     install: vi.fn(),
     refresh: vi.fn(),
+    noteWeightsMissing: vi.fn(),
     ...overrides,
   }
 }
 
-function renderPanel(
-  installation: ModelInstallationHandle,
-  weightsMissingMessage: string | null = null,
-) {
-  return render(
-    <ModelInstallPanel
-      installation={installation}
-      weightsMissingMessage={weightsMissingMessage}
-    />,
-  )
+function renderPanel(installation: ModelInstallationHandle) {
+  return render(<ModelInstallPanel installation={installation} />)
 }
 
 /** The panel's own region, or `null` when it rendered nothing. */
@@ -190,6 +184,7 @@ describe('ModelInstallPanel outcomes', () => {
       'An install is already running',
     )
     expect(screen.getByRole('button', { name: 'Install model' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled()
   })
 
   it('offers a retry when the model could not be read at all', async () => {
@@ -216,23 +211,109 @@ describe('ModelInstallPanel outcomes', () => {
 })
 
 describe('ModelInstallPanel and a model_weights_missing job', () => {
+  const REFUSED =
+    "Model 'vocals-hq-001' is catalogued but its weights are not installed."
+
   it('renders the backend message as the install invitation', async () => {
     const install = vi.fn()
     renderPanel(
-      handle({ model: modelInstalling({ state: 'installed' }), install }),
-      "Model 'vocals-hq-001' is catalogued but its weights are not installed.",
+      handle({
+        model: modelInstalling({ state: 'installed' }),
+        install,
+        weightsMissingMessage: REFUSED,
+      }),
     )
 
     expect(screen.getByRole('alert')).toHaveTextContent(
       'its weights are not installed',
     )
+    // The record claiming `installed` is the stale one the refusal is about.
+    expect(panel()).not.toHaveTextContent('Model weights installed')
     await userEvent.click(screen.getByRole('button', { name: 'Install model' }))
     expect(install).toHaveBeenCalledTimes(1)
   })
 
   it('speaks up even for a model that claims it needs no download', () => {
-    renderPanel(handle({ model: sampleBuiltInModel }), 'The weights are gone.')
+    renderPanel(
+      handle({
+        model: sampleBuiltInModel,
+        weightsMissingMessage: 'The weights are gone.',
+      }),
+    )
 
     expect(screen.getByRole('alert')).toHaveTextContent('The weights are gone.')
+  })
+
+  it('still names the download size, so the invitation is priced', () => {
+    renderPanel(
+      handle({ model: sampleInstallableModel, weightsMissingMessage: REFUSED }),
+    )
+
+    expect(panel()).toHaveTextContent(SIZE)
+    expect(screen.getByRole('button', { name: 'Install model' })).toBeEnabled()
+  })
+
+  it('shows the download it started, not the job error it followed', () => {
+    // The flow this feature exists for: Start → refused → Install. The live
+    // state is newer than the refusal, so it wins — otherwise the user watches
+    // 870 MB arrive behind a stale alert, with no progress at all.
+    renderPanel(
+      handle({
+        model: modelInstalling({
+          state: 'downloading',
+          downloaded_bytes: sampleWeightsBytes / 2,
+          progress: 0.5,
+        }),
+        weightsMissingMessage: REFUSED,
+      }),
+    )
+
+    expect(
+      screen.getByRole('progressbar', { name: 'Model download progress' }),
+    ).toHaveAttribute('aria-valuenow', '50')
+    expect(panel()).toHaveTextContent(
+      `${formatFileSize(sampleWeightsBytes / 2)} of ${SIZE}`,
+    )
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('offers no second install beside a download a stale error is about', () => {
+    renderPanel(
+      handle({
+        model: modelInstalling({ state: 'downloading', progress: 0.5 }),
+        weightsMissingMessage: REFUSED,
+      }),
+    )
+
+    // A second POST /install would earn `model_busy` for a transfer that is
+    // going perfectly well.
+    expect(
+      screen.queryByRole('button', { name: /install/i }),
+    ).not.toBeInTheDocument()
+  })
+})
+
+describe('ModelInstallPanel recovering from a failed read', () => {
+  it('offers a retry when a read fails mid-download', async () => {
+    const refresh = vi.fn()
+    renderPanel(
+      handle({
+        model: modelInstalling({ state: 'downloading', progress: 0.4 }),
+        status: 'error',
+        error: { code: 'service_unavailable', message: 'Backend is down.' },
+        refresh,
+      }),
+    )
+
+    // The bar is frozen at the last real figure and the poll has stopped, so
+    // the one control that can restart it has to be here — this is otherwise a
+    // dead end escapable only by switching tiers or reloading the page.
+    expect(
+      screen.getByRole('progressbar', { name: 'Model download progress' }),
+    ).toHaveAttribute('aria-valuenow', '40')
+    expect(screen.getByRole('alert')).toHaveTextContent('Backend is down.')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    expect(refresh).toHaveBeenCalledTimes(1)
   })
 })
