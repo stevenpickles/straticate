@@ -24,6 +24,9 @@ export type AudioFile = components['schemas']['AudioFile']
 
 // Models and modes
 export type ModelRequirements = components['schemas']['ModelRequirements']
+export type ModelInstallState = components['schemas']['ModelInstallState']
+export type ModelInstallation = components['schemas']['ModelInstallation']
+export type ModelLicensing = components['schemas']['ModelLicensing']
 export type Model = components['schemas']['Model']
 export type QualityOption = components['schemas']['QualityOption']
 export type SeparationMode = components['schemas']['SeparationMode']

@@ -5,12 +5,24 @@ import { Workspace } from './Workspace'
 import { AppStateProvider } from '../state/appState'
 import { JobStateProvider } from '../state/jobState'
 import { installMockXhr, lastXhr, MockXMLHttpRequest } from '../test/mockXhr'
-import { sampleAudioFile, sampleSeparationModes } from '../test/fixtures'
+import {
+  sampleAudioFile,
+  sampleBuiltInModel,
+  sampleSeparationModes,
+} from '../test/fixtures'
 
 // Reaching the configure phase mounts SeparationOptions (feature 011),
 // which loads the mode catalog; this suite is about the drop zone.
 vi.mock('../api/modes', () => ({
   listSeparationModes: vi.fn(() => Promise.resolve(sampleSeparationModes)),
+}))
+
+// …and reads the selected tier's model to see whether its weights need
+// installing (feature 035). A model that needs no download renders nothing.
+vi.mock('../api/models', () => ({
+  getModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
+  installModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
+  removeModelWeights: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
 }))
 
 function renderWorkspace() {

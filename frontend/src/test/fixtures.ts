@@ -2,6 +2,8 @@
 import type {
   AudioFile,
   Job,
+  Model,
+  ModelInstallation,
   RuntimeMetricsEvent,
   SeparationConfiguration,
   SeparationMode,
@@ -182,3 +184,81 @@ export const sampleSeparationModes: SeparationMode[] = [
     ],
   },
 ]
+
+/**
+ * Size of the representative downloadable weights artifact: 870 MiB, which
+ * `formatFileSize` renders as `870 MB`. Close to the real `vocals-hq-001`
+ * artifact, so a test asserting "the UI names the download size" is asserting
+ * something the size of the thing a user actually waits for.
+ */
+export const sampleWeightsBytes = 870 * 1024 * 1024
+
+/**
+ * A catalogued model whose weights are a download and are **not** installed —
+ * exactly what a fresh checkout offers since feature 032.
+ */
+export const sampleInstallableModel: Model = {
+  id: 'vocals-hq-001',
+  display_name: 'Vocals — High Quality',
+  architecture: 'mel_band_roformer',
+  version: '1.0',
+  development_only: false,
+  separation_mode: 'vocals',
+  quality_tier: 'high_quality',
+  stems: ['vocals', 'instrumental'],
+  sample_rate: 44100,
+  requirements: { recommended_vram_mb: 8192, minimum_ram_mb: null },
+  capabilities: { cuda: true, cpu: true },
+  licensing: null,
+  installation: {
+    state: 'available',
+    requires_download: true,
+    total_bytes: sampleWeightsBytes,
+    downloaded_bytes: null,
+    progress: null,
+    error: null,
+  },
+}
+
+/**
+ * A model that needs no weights at all — a built-in separator, which feature
+ * 025 defines as `installed` by definition and never offers as a download.
+ */
+export const sampleBuiltInModel: Model = {
+  ...sampleInstallableModel,
+  id: 'fake-vocals-001',
+  display_name: 'Fake Vocals (development)',
+  architecture: 'fake',
+  development_only: true,
+  quality_tier: 'balanced',
+  installation: {
+    state: 'installed',
+    requires_download: false,
+    total_bytes: null,
+    downloaded_bytes: null,
+    progress: null,
+    error: null,
+  },
+}
+
+/**
+ * {@link sampleInstallableModel} with its `installation` block overridden —
+ * the four states of one model, without restating the rest of the manifest.
+ */
+export function modelInstalling(
+  installation: Partial<ModelInstallation>,
+  model: Model = sampleInstallableModel,
+): Model {
+  return {
+    ...model,
+    installation: {
+      state: 'available',
+      requires_download: true,
+      total_bytes: sampleWeightsBytes,
+      downloaded_bytes: null,
+      progress: null,
+      error: null,
+      ...installation,
+    },
+  }
+}
