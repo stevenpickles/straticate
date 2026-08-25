@@ -12,6 +12,20 @@ API or in the frontend (ARCHITECTURE.md §1). What crosses the seam is exactly
 what :class:`~straticate.inference.base.Separator` defines: a descriptor, chunk
 counts, stages, stems and a result.
 
+What is *not* here
+------------------
+
+Since feature 039, the run lifecycle is not: stages, decode plumbing, device
+placement, CUDA/NVML telemetry, the PCM bridge, encoding, cleanup and RTF live
+in :mod:`straticate.inference.torch_separator`,
+:mod:`straticate.inference.torch_device` and
+:mod:`straticate.inference.torch_audio`, shared with every other torch backend.
+This module is the Mel-Band RoFormer *difference*: the catalog parameters, the
+loader, the residual stem, and the two methods
+:class:`~straticate.inference.torch_separator.TorchSeparator` leaves open —
+:meth:`RoFormerSeparator._run_chunks` and
+:meth:`RoFormerSeparator._finish_stems`.
+
 How a run is shaped
 -------------------
 
@@ -54,48 +68,32 @@ onto the loop, which is exactly why the contract puts that adapter there.
 
 from __future__ import annotations
 
-import asyncio
-import atexit
-import importlib
 import logging
 import math
 import time
-from array import array
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Protocol, Self, cast
+from typing import Any, Final, Self, cast
 
 import torch
 from torch import Tensor
 
-from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS, FFmpegTimeout
+from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
 from straticate.errors import ApplicationError
-from straticate.inference.base import (
-    DeviceStats,
-    ProcessingStats,
-    ProgressCallback,
-    SeparationProgress,
-    SeparatorInfo,
-    SeparatorRuntimeStats,
-    StageCallback,
+from straticate.inference.base import ProgressCallback, SeparatorInfo
+from straticate.inference.model_errors import (
+    parameters_invalid,
+    positive_int,
+    require_installed_weights,
+    weights_not_loadable,
 )
-from straticate.inference.pcm import (
-    AudioDecodeError,
-    PcmAudio,
-    decode_to_pcm,
-    write_wav,
-)
+from straticate.inference.pcm import PcmAudio
 from straticate.inference.roformer.architecture import ROFORMER_ARCHITECTURE
 from straticate.inference.roformer.vendor import MelBandRoformer
+from straticate.inference.torch_audio import pcm_to_tensor, tensor_to_pcm, to_source_channels
+from straticate.inference.torch_separator import RunState, TorchSeparator
 from straticate.jobs.cancellation import CancellationToken
-from straticate.schemas.jobs import (
-    JobState,
-    SeparationConfiguration,
-    SeparationResult,
-    SeparationResultMetrics,
-    Stem,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -116,9 +114,6 @@ DEFAULT_NUM_OVERLAP: Final = 2
 
 FADE_FRACTION: Final = 10
 """The cross-fade at each window edge is ``chunk_samples // FADE_FRACTION`` long."""
-
-INT16_SCALE: Final = 32767.0
-"""Full-scale multiplier for the float → 16-bit PCM conversion."""
 
 _MODEL_PARAMETER_NAMES: Final = frozenset(
     {
@@ -220,16 +215,16 @@ class RoFormerParameters:
                 network.
         """
         if not raw:
-            raise _parameters_invalid(model_id, "no default_inference_parameters block")
+            raise parameters_invalid(model_id, "no default_inference_parameters block")
         model_block = raw.get("model")
         if not isinstance(model_block, Mapping):
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 model_id, "default_inference_parameters.model must be an object"
             )
         parameters = cast(Mapping[str, Any], model_block)
         unknown = sorted(set(parameters) - _MODEL_PARAMETER_NAMES)
         if unknown:
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 model_id, f"unknown architecture parameters: {', '.join(unknown)}"
             )
         normalized: dict[str, Any] = {
@@ -240,13 +235,13 @@ class RoFormerParameters:
         inference = cast(
             Mapping[str, Any], inference_block if isinstance(inference_block, Mapping) else {}
         )
-        chunk_samples = _positive_int(inference.get("chunk_size", DEFAULT_CHUNK_SAMPLES), model_id)
-        num_overlap = _positive_int(inference.get("num_overlap", DEFAULT_NUM_OVERLAP), model_id)
+        chunk_samples = positive_int(inference.get("chunk_size", DEFAULT_CHUNK_SAMPLES), model_id)
+        num_overlap = positive_int(inference.get("num_overlap", DEFAULT_NUM_OVERLAP), model_id)
         output_block = raw.get("output")
         output = cast(Mapping[str, Any], output_block if isinstance(output_block, Mapping) else {})
         residual = output.get("residual_stem")
         if residual is not None and not isinstance(residual, str):
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 model_id, f"output.residual_stem must be a stem name, got {residual!r}"
             )
         return cls(
@@ -257,25 +252,13 @@ class RoFormerParameters:
         )
 
 
-@dataclass(slots=True)
-class _RunState:
-    """Mutable bookkeeping for the separation currently in flight."""
-
-    job_id: str
-    stage: JobState
-    device: torch.device
-    chunks_total: int
-    audio_total_seconds: float
-    started_monotonic: float
-    chunks_completed: int = 0
-    audio_processed_seconds: float = 0.0
-    chunk_seconds_total: float = 0.0
-    last_chunk_seconds: float | None = None
-    finished_seconds: float | None = None
-
-
-class RoFormerSeparator:
+class RoFormerSeparator(TorchSeparator):
     """A :class:`~straticate.inference.base.Separator` running Mel-Band RoFormer.
+
+    The run lifecycle is
+    :class:`~straticate.inference.torch_separator.TorchSeparator`'s; what this
+    class adds is the two architecture-specific holes — the overlap-add chunk
+    loop and the residual stem — plus the catalog parameters and the loader.
 
     Construction is the expensive half: it reads a few hundred megabytes of
     weights off disk and builds a 228-million-parameter network. That is why
@@ -310,243 +293,22 @@ class RoFormerSeparator:
         parameters: RoFormerParameters,
         ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
     ) -> None:
-        if ffmpeg_timeout_seconds <= 0:
-            raise ValueError("ffmpeg_timeout_seconds must be positive")
-        self._info = info
+        super().__init__(info, ffmpeg_timeout_seconds=ffmpeg_timeout_seconds)
         self._parameters = parameters
-        self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         self._residual_stem = _residual_stem_index(info, parameters)
         self._model = _load_model(info, weights_file, parameters)
-        self._loaded_device: torch.device | None = torch.device("cpu")
-        self._active = False
-        self._run: _RunState | None = None
-
-    @property
-    def ffmpeg_timeout_seconds(self) -> float:
-        """The bound this separator applies to its decode subprocesses."""
-        return self._ffmpeg_timeout_seconds
 
     @property
     def parameters(self) -> RoFormerParameters:
         """The catalog parameters this separator was built with (for tests/telemetry)."""
         return self._parameters
 
-    # -- Separator protocol -------------------------------------------------
-
-    @property
-    def info(self) -> SeparatorInfo:
-        """The model descriptor this separator advertises."""
-        return self._info
-
-    def runtime_stats(self) -> SeparatorRuntimeStats | None:
-        """Snapshot of the current (or most recent) run; ``None`` before the first.
-
-        Unlike the fake separator, every number here is measured. On CUDA the
-        memory figures come from ``torch.cuda.memory_allocated`` /
-        ``max_memory_allocated`` and the device's own total; ``utilization`` and
-        ``temperature_celsius`` are filled in only if NVML happens to be
-        importable, because ARCHITECTURE.md §12 requires that basic operation
-        never depend on it. On CPU there is no device block at all — the
-        contract renders that as ``gpu: null``.
-        """
-        run = self._run
-        if run is None:
-            return None
-        elapsed = (
-            run.finished_seconds
-            if run.finished_seconds is not None
-            else time.monotonic() - run.started_monotonic
-        )
-        elapsed = max(elapsed, 0.0)
-        mean = run.chunk_seconds_total / run.chunks_completed if run.chunks_completed else None
-        return SeparatorRuntimeStats(
-            job_id=run.job_id,
-            model=self._info,
-            device=device_stats(run.device),
-            processing=ProcessingStats(
-                stage=run.stage,
-                chunks_completed=run.chunks_completed,
-                chunks_total=run.chunks_total,
-                elapsed_seconds=elapsed,
-                audio_processed_seconds=run.audio_processed_seconds,
-                audio_total_seconds=run.audio_total_seconds,
-                realtime_factor=_realtime_factor(run.audio_processed_seconds, elapsed),
-                last_chunk_seconds=run.last_chunk_seconds,
-                mean_chunk_seconds=mean,
-            ),
-        )
-
-    async def separate(
-        self,
-        input_path: Path,
-        configuration: SeparationConfiguration,
-        progress_callback: ProgressCallback,
-        cancellation_token: CancellationToken,
-        *,
-        job_id: str,
-        output_dir: Path,
-        stage_callback: StageCallback | None = None,
-    ) -> SeparationResult:
-        """Separate ``input_path`` into real stems. See :class:`RoFormerSeparator`.
-
-        Raises:
-            RuntimeError: A separation is already running on this instance.
-            JobCancelled: Cancellation was observed at a chunk boundary.
-            ApplicationError: ``audio_decode_failed`` (422),
-                ``audio_decode_timed_out`` (504),
-                ``separation_mode_mismatch`` (400) or
-                ``compute_device_unavailable`` (409).
-        """
-        if self._active:
-            raise RuntimeError("RoFormerSeparator supports one separation at a time")
-        self._active = True
-        try:
-            return await self._separate(
-                input_path,
-                configuration,
-                progress_callback,
-                cancellation_token,
-                job_id=job_id,
-                output_dir=output_dir,
-                stage_callback=stage_callback,
-            )
-        finally:
-            self._active = False
-
-    # -- implementation -----------------------------------------------------
-
-    async def _separate(
-        self,
-        input_path: Path,
-        configuration: SeparationConfiguration,
-        progress_callback: ProgressCallback,
-        cancellation_token: CancellationToken,
-        *,
-        job_id: str,
-        output_dir: Path,
-        stage_callback: StageCallback | None,
-    ) -> SeparationResult:
-        self._check_mode(configuration)
-        device = _resolve_torch_device(configuration.device_id)
-        started = time.monotonic()
-        run = _RunState(
-            job_id=job_id,
-            stage=JobState.DECODING,
-            device=device,
-            chunks_total=0,
-            audio_total_seconds=0.0,
-            started_monotonic=started,
-        )
-        self._run = run
-        try:
-            _announce(stage_callback, JobState.DECODING)
-            source = await self._decode(input_path)
-            cancellation_token.raise_if_cancelled()
-
-            _announce(stage_callback, JobState.LOADING_MODEL)
-            run.stage = JobState.LOADING_MODEL
-            await asyncio.to_thread(self._place_on_device, device)
-            cancellation_token.raise_if_cancelled()
-
-            _announce(stage_callback, JobState.SEPARATING)
-            run.stage = JobState.SEPARATING
-            # Per **run**, not per device placement: ``max_memory_allocated`` is
-            # a per-device high-water mark that nothing else resets, so without
-            # this a ten-second track following a six-minute one would report
-            # the six-minute track's peak as its own. It resets to the *current*
-            # allocation, so the resident model still counts.
-            reset_peak_memory(device)
-            estimates = await asyncio.to_thread(
-                self._run_chunks, source, run, progress_callback, cancellation_token, device
-            )
-
-            _announce(stage_callback, JobState.POST_PROCESSING)
-            run.stage = JobState.POST_PROCESSING
-            stems = await asyncio.to_thread(self._finish_stems, estimates, source)
-            cancellation_token.raise_if_cancelled()
-
-            _announce(stage_callback, JobState.ENCODING)
-            run.stage = JobState.ENCODING
-            written = await self._encode(stems, output_dir, cancellation_token)
-        except BaseException:
-            # Cancellation (or any failure) must never leave a stem behind —
-            # complete or partial — that a later reader would take for output.
-            _discard_outputs(output_dir, self._info.stems)
-            raise
-
-        run.finished_seconds = time.monotonic() - started
-        return SeparationResult(
-            job_id=job_id,
-            model_id=self._info.model_id,
-            stems=written,
-            metrics=SeparationResultMetrics(
-                processing_seconds=run.finished_seconds,
-                realtime_factor=_realtime_factor(source.duration_seconds, run.finished_seconds),
-            ),
-        )
-
-    def _check_mode(self, configuration: SeparationConfiguration) -> None:
-        """Reject a configuration this separator does not serve (a wiring bug)."""
-        if configuration.mode_id and configuration.mode_id != self._info.separation_mode:
-            raise ApplicationError(
-                "separation_mode_mismatch",
-                (
-                    f"Model {self._info.model_id!r} serves separation mode "
-                    f"{self._info.separation_mode!r}, not {configuration.mode_id!r}."
-                ),
-                status_code=400,
-                detail={
-                    "requested_mode_id": configuration.mode_id,
-                    "model_separation_mode": self._info.separation_mode,
-                },
-            )
-
-    async def _decode(self, input_path: Path) -> PcmAudio:
-        """Decode the source to the model's native sample rate."""
-        try:
-            return await decode_to_pcm(
-                input_path,
-                sample_rate=self._info.sample_rate,
-                timeout_seconds=self._ffmpeg_timeout_seconds,
-            )
-        except AudioDecodeError as exc:
-            raise ApplicationError(
-                "audio_decode_failed",
-                f"The input audio could not be decoded: {exc}",
-                status_code=422,
-            ) from exc
-        except FFmpegTimeout as exc:
-            raise ApplicationError(
-                "audio_decode_timed_out",
-                "Decoding the input audio timed out.",
-                status_code=504,
-                detail={"timeout_seconds": exc.timeout_seconds},
-            ) from exc
-
-    def _place_on_device(self, device: torch.device) -> None:
-        """Move the network onto ``device`` (a no-op when it is already there).
-
-        The network's location is forgotten *before* the move, not after it.
-        ``nn.Module.to`` walks the parameters and moves them one at a time, so a
-        failure part-way — a CUDA OOM is the realistic one — leaves the network
-        split across two devices. A separator is cached per model for the life of
-        the process, so recording the *intended* device only on success is not
-        the safe order it looks like: it is the order in which the next job, on
-        any device, takes the early-out above, skips the move, and dies with
-        "Expected all tensors to be on the same device" forever. ``None`` matches
-        no device, so the next run always re-places the network, which is the one
-        thing that can put it back together.
-        """
-        if self._loaded_device == device:
-            return
-        self._loaded_device = None
-        self._model.to(device)
-        self._loaded_device = device
+    # -- the architecture-specific halves -----------------------------------
 
     def _run_chunks(
         self,
         source: PcmAudio,
-        run: _RunState,
+        run: RunState,
         progress_callback: ProgressCallback,
         cancellation_token: CancellationToken,
         device: torch.device,
@@ -555,6 +317,11 @@ class RoFormerSeparator:
 
         Returns the per-network-stem estimates as a ``(num_stems, channels,
         samples)`` float tensor on the CPU, in the model's channel layout.
+
+        See
+        :meth:`straticate.inference.torch_separator.TorchSeparator._run_chunks`
+        for the contract this keeps — and note that it is the method feature 038
+        will work inside.
         """
         parameters = self._parameters
         chunk = parameters.chunk_samples
@@ -644,7 +411,8 @@ class RoFormerSeparator:
         The residual is inserted at the position the catalog gave it (see
         :func:`_residual_stem_index`), so the list returned here lines up with
         :attr:`SeparatorInfo.stems` index for index — which is what
-        :meth:`_encode` then relies on when it zips the two together.
+        :meth:`~straticate.inference.torch_separator.TorchSeparator._encode` then
+        relies on when it zips the two together.
         """
         parameters = self._parameters
         mixture = pcm_to_tensor(source, parameters.audio_channels)
@@ -656,43 +424,9 @@ class RoFormerSeparator:
             planes.insert(self._residual_stem, residual)
         channels = source.channel_count
         return [
-            tensor_to_pcm(_to_source_channels(plane, channels), source.sample_rate)
+            tensor_to_pcm(to_source_channels(plane, channels), source.sample_rate)
             for plane in planes
         ]
-
-    async def _encode(
-        self,
-        stems: Sequence[PcmAudio],
-        output_dir: Path,
-        cancellation_token: CancellationToken,
-    ) -> list[Stem]:
-        """Write one WAV per stem and describe them for the result record."""
-        written: list[Stem] = []
-        for name, audio in zip(self._info.stems, stems, strict=True):
-            cancellation_token.raise_if_cancelled()
-            target = output_dir / f"{name}.wav"
-            temporary = target.with_name(f"{target.name}.part")
-            await asyncio.to_thread(write_wav, temporary, audio)
-            temporary.replace(target)
-            written.append(
-                Stem(
-                    name=name,
-                    duration_seconds=audio.duration_seconds,
-                    sample_rate_hz=audio.sample_rate,
-                    channels=audio.channel_count,
-                )
-            )
-        return written
-
-    def _report(self, progress_callback: ProgressCallback, run: _RunState) -> None:
-        progress_callback(
-            SeparationProgress(
-                chunks_completed=run.chunks_completed,
-                chunks_total=run.chunks_total,
-                audio_processed_seconds=run.audio_processed_seconds,
-                audio_total_seconds=run.audio_total_seconds,
-            )
-        )
 
 
 # --------------------------------------------------------------------------
@@ -709,17 +443,11 @@ def _load_model(
     vendored architecture exactly must fail here, loudly, rather than load
     partially and produce plausible-sounding nonsense.
     """
-    if not weights_file.is_file():
-        raise ApplicationError(
-            "model_weights_missing",
-            f"Model {info.model_id!r} is catalogued but its weights are not installed.",
-            status_code=409,
-            detail={"model_id": info.model_id},
-        )
+    require_installed_weights(info, weights_file)
     try:
         model = MelBandRoformer(**parameters.model)
     except (TypeError, ValueError, AssertionError) as exc:
-        raise _parameters_invalid(info.model_id, str(exc)) from exc
+        raise parameters_invalid(info.model_id, str(exc)) from exc
     try:
         state = cast(
             "dict[str, Tensor]", torch.load(weights_file, map_location="cpu", weights_only=True)
@@ -729,15 +457,7 @@ def _load_model(
         raise
     except Exception as exc:
         logger.exception("Loading weights for model %s failed", info.model_id)
-        raise ApplicationError(
-            "model_weights_invalid",
-            (
-                f"The installed weights for model {info.model_id!r} could not be loaded "
-                f"into its architecture."
-            ),
-            status_code=500,
-            detail={"model_id": info.model_id, "reason": type(exc).__name__},
-        ) from exc
+        raise weights_not_loadable(info.model_id, type(exc).__name__) from exc
     model.eval()
     for parameter in model.parameters():
         parameter.requires_grad_(False)
@@ -778,7 +498,7 @@ def _residual_stem_index(info: SeparatorInfo, parameters: RoFormerParameters) ->
 
     if advertised == produced:
         if named is not None:
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 info.model_id,
                 (
                     f"output.residual_stem is {named!r}, but the network emits all "
@@ -788,13 +508,13 @@ def _residual_stem_index(info: SeparatorInfo, parameters: RoFormerParameters) ->
         return None
 
     if advertised != produced + 1:
-        raise _parameters_invalid(
+        raise parameters_invalid(
             info.model_id,
             f"the catalog advertises {advertised} stems but the network produces {produced}",
         )
 
     if named is None:
-        raise _parameters_invalid(
+        raise parameters_invalid(
             info.model_id,
             (
                 f"the network produces {produced} of the {advertised} advertised stems, "
@@ -803,7 +523,7 @@ def _residual_stem_index(info: SeparatorInfo, parameters: RoFormerParameters) ->
             ),
         )
     if named not in info.stems:
-        raise _parameters_invalid(
+        raise parameters_invalid(
             info.model_id,
             (
                 f"output.residual_stem is {named!r}, which this model does not "
@@ -813,271 +533,14 @@ def _residual_stem_index(info: SeparatorInfo, parameters: RoFormerParameters) ->
     return info.stems.index(named)
 
 
-def _parameters_invalid(model_id: str, reason: str) -> ApplicationError:
-    """The one error for "this catalog entry cannot be run as configured"."""
-    return ApplicationError(
-        "model_parameters_invalid",
-        f"Model {model_id!r} has unusable inference parameters: {reason}.",
-        status_code=500,
-        detail={"model_id": model_id, "reason": reason},
-    )
-
-
 def _as_tuple(value: Any) -> Any:
     """JSON has arrays; the architecture's type hints demand tuples."""
     return tuple(cast("Sequence[Any]", value)) if isinstance(value, list) else value
 
 
-def _positive_int(value: Any, model_id: str) -> int:
-    """Coerce a catalog number to a positive int, or fail loudly."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise _parameters_invalid(model_id, f"expected a positive integer, got {value!r}")
-    return value
-
-
 # --------------------------------------------------------------------------
-# Devices
+# Windowing
 # --------------------------------------------------------------------------
-
-
-def _resolve_torch_device(device_id: str | None) -> torch.device:
-    """Map a *logical* device ID (feature 018) onto a torch device.
-
-    This is the only place the two vocabularies meet, and it is deliberately one
-    small function: ARCHITECTURE.md §10 says raw torch device objects never leak
-    through application-level APIs, so they are constructed here from the ID the
-    job already resolved and recorded.
-
-    Raises:
-        ApplicationError: ``compute_device_unavailable`` (409) when the job
-            names a device this process cannot use — a CUDA device on a host
-            whose CUDA runtime has gone away since detection.
-    """
-    if device_id is None or device_id == "cpu":
-        return torch.device("cpu")
-    try:
-        device = torch.device(device_id)
-    except (RuntimeError, ValueError) as exc:
-        raise _device_unavailable(device_id, "not a device this build understands") from exc
-    if device.type == "cpu":
-        return device
-    if device.type != "cuda" or not torch.cuda.is_available():
-        raise _device_unavailable(device_id, "no such compute backend is available")
-    if (device.index or 0) >= torch.cuda.device_count():
-        raise _device_unavailable(device_id, "no such device index")
-    return device
-
-
-def _device_unavailable(device_id: str, reason: str) -> ApplicationError:
-    return ApplicationError(
-        "compute_device_unavailable",
-        f"Compute device {device_id!r} is not available: {reason}.",
-        status_code=409,
-        detail={"device_id": device_id, "reason": reason},
-    )
-
-
-class _CudaDevicePropertiesLike(Protocol):
-    """The subset of ``torch.cuda.get_device_properties()`` this module reads.
-
-    The same narrowing :mod:`straticate.system.devices` applies, and for the
-    same reason: torch's own return type is untyped, and a structural protocol
-    states exactly what is consumed instead of spraying ``Any`` through a strict
-    type check.
-    """
-
-    name: str
-    total_memory: int
-
-
-def cuda_namespace() -> Any:
-    """The ``torch.cuda`` namespace, as ``Any``.
-
-    Two jobs in one small function. It is where torch's unannotated CUDA
-    members are reached (strict mode reports them as partially unknown, and
-    :mod:`straticate.system.devices` narrows the same way), and it is the single
-    seam a test replaces to exercise the CUDA telemetry path on a host with no
-    GPU — which is the only way any of this gets covered until real hardware
-    runs it.
-    """
-    return torch.cuda
-
-
-def reset_peak_memory(device: torch.device) -> None:
-    """Start a fresh peak-memory measurement for ``device``; a no-op off CUDA.
-
-    ``torch.cuda.max_memory_allocated`` is a **per-device high-water mark that
-    only an explicit reset clears**, so this belongs once per separation. It
-    resets the peak to the currently allocated figure rather than to zero, so
-    the resident network still counts towards the run's peak.
-    """
-    if device.type != "cuda":
-        return
-    cuda_namespace().reset_peak_memory_stats(device)
-
-
-def device_stats(device: torch.device) -> DeviceStats | None:
-    """Real device telemetry, or ``None`` on CPU (the contract's ``gpu: null``).
-
-    ARCHITECTURE.md §12 lists utilization and temperature as NVML-sourced and
-    **optional**; they stay ``None`` unless an NVML binding happens to be
-    importable, so nothing here can make basic operation depend on it.
-    """
-    cuda = cuda_namespace()
-    if device.type != "cuda" or not cuda.is_available():
-        return None
-    index = device.index or 0
-    properties = cast(_CudaDevicePropertiesLike, cuda.get_device_properties(index))
-    utilization, temperature = _NVML.sample(index)
-    return DeviceStats(
-        device_id=f"cuda:{index}",
-        name=str(properties.name),
-        backend="cuda",
-        memory_allocated_bytes=int(cuda.memory_allocated(index)),
-        memory_peak_bytes=int(cuda.max_memory_allocated(index)),
-        memory_total_bytes=int(properties.total_memory),
-        utilization=utilization,
-        temperature_celsius=temperature,
-    )
-
-
-class NvmlProbe:
-    """Optional NVML utilization/temperature, initialised **at most once**.
-
-    NVML is not a dependency and never becomes one (ARCHITECTURE.md §12: basic
-    operation must never require it). But it is sampled from
-    :meth:`RoFormerSeparator.runtime_stats`, which
-    :class:`straticate.telemetry.TelemetrySampler` calls **directly on the event
-    loop** — deliberately, because :mod:`straticate.inference.base` promises that
-    ``runtime_stats()`` "must be a cheap, non-blocking snapshot".
-
-    An ``nvmlInit()``/``nvmlShutdown()`` pair per sample is not that: it is tens
-    of milliseconds of driver setup and teardown, once a second, for the whole
-    length of a job, in front of every WebSocket frame, job event and HTTP
-    request the loop owes somebody. So the binding is loaded and initialised
-    lazily on the first sample, the device handles are cached, and shutdown is
-    left to :mod:`atexit` — which is how a long-running NVML consumer is meant
-    to behave anyway. What remains per sample is two driver queries.
-
-    A failure at any point is absorbed: the two optional fields stay ``None``
-    and every other number in the snapshot is unaffected. A failure to *load*
-    is remembered, so an absent binding costs one failed import per process
-    rather than one per sample.
-
-    The module imported here is ``pynvml``, but the package that supplies it is
-    **``nvidia-ml-py``** — NVIDIA's own binding. The PyPI package *named*
-    ``pynvml`` is a deprecated shim that installs an import hook raising
-    ``FutureWarning``, and since ``torch.cuda`` imports ``pynvml`` at torch
-    import time, installing it makes every test that imports torch fail under
-    ``-W error``. DEVELOPMENT.md, *Optional: NVML*, has the traceback.
-    """
-
-    __slots__ = ("_handles", "_module", "_unavailable")
-
-    def __init__(self) -> None:
-        self._module: Any | None = None
-        self._handles: dict[int, Any] = {}
-        self._unavailable = False
-
-    def sample(self, index: int) -> tuple[float | None, float | None]:
-        """Utilization (0..1) and temperature in °C, or ``(None, None)``."""
-        module = self._load()
-        if module is None:
-            return None, None
-        try:  # pragma: no cover - needs a real NVML binding and driver
-            handle = self._handles.get(index)
-            if handle is None:
-                handle = module.nvmlDeviceGetHandleByIndex(index)
-                self._handles[index] = handle
-            rates = module.nvmlDeviceGetUtilizationRates(handle)
-            celsius = module.nvmlDeviceGetTemperature(handle, module.NVML_TEMPERATURE_GPU)
-            return round(float(rates.gpu) / 100.0, 3), float(celsius)
-        except Exception:
-            self._handles.pop(index, None)
-            return None, None
-
-    def _load(self) -> Any | None:
-        """Import and initialise NVML once, or remember that it is unusable."""
-        if self._module is not None:
-            return self._module
-        if self._unavailable:
-            return None
-        try:
-            module: Any = importlib.import_module("pynvml")
-            module.nvmlInit()
-        except Exception:
-            logger.debug("NVML is unavailable; GPU utilization and temperature stay empty.")
-            self._unavailable = True
-            return None
-        atexit.register(self._shutdown)
-        self._module = module
-        return module
-
-    def _shutdown(self) -> None:
-        """Release NVML at interpreter exit. Never raises."""
-        module, self._module = self._module, None
-        self._handles.clear()
-        if module is None:
-            return
-        try:  # pragma: no cover - only runs at interpreter exit on an NVML host
-            module.nvmlShutdown()
-        except Exception:
-            logger.debug("NVML shutdown failed; ignoring at teardown.")
-
-
-_NVML = NvmlProbe()
-"""Process-wide NVML probe. Replaced wholesale in tests; never re-created here."""
-
-
-# --------------------------------------------------------------------------
-# Audio conversion
-# --------------------------------------------------------------------------
-
-
-def pcm_to_tensor(source: PcmAudio, wanted_channels: int) -> Tensor:
-    """Decoded 16-bit PCM → a ``(channels, samples)`` float tensor in ``[-1, 1]``.
-
-    A mono source fed to a stereo network is duplicated across both channels
-    (and folded back down afterwards by :func:`_to_source_channels`), so the
-    application never has to care that this particular checkpoint is stereo-only.
-    """
-    frames = source.frame_count
-    planes = [_plane_to_tensor(plane, frames) for plane in source.channels]
-    stacked = torch.stack(planes)
-    if stacked.shape[0] == wanted_channels:
-        return stacked
-    if stacked.shape[0] == 1:
-        return stacked.expand(wanted_channels, -1).contiguous()
-    return stacked.mean(dim=0, keepdim=True).expand(wanted_channels, -1).contiguous()
-
-
-def _plane_to_tensor(plane: array[int], frames: int) -> Tensor:
-    """One ``array("h")`` channel → a float tensor scaled to ``[-1, 1]``."""
-    buffer = memoryview(plane)[:frames]
-    return torch.frombuffer(bytearray(buffer), dtype=torch.int16).to(torch.float32) / INT16_SCALE
-
-
-def _to_source_channels(plane: Tensor, channels: int) -> Tensor:
-    """Return a ``(channels, samples)`` view of a model-layout stem."""
-    if plane.shape[0] == channels:
-        return plane
-    if channels == 1:
-        return plane.mean(dim=0, keepdim=True)
-    return plane[:1].expand(channels, -1).contiguous()
-
-
-def tensor_to_pcm(plane: Tensor, sample_rate: int) -> PcmAudio:
-    """Float ``(channels, samples)`` in ``[-1, 1]`` → 16-bit planar PCM."""
-    quantized = (plane.clamp(-1.0, 1.0) * INT16_SCALE).round().to(torch.int16).contiguous()
-    channels = tuple(_tensor_to_plane(quantized[index]) for index in range(quantized.shape[0]))
-    return PcmAudio(sample_rate=sample_rate, channels=channels)
-
-
-def _tensor_to_plane(row: Tensor) -> array[int]:
-    """One int16 row → the ``array("h")`` :mod:`straticate.inference.pcm` speaks."""
-    plane: array[int] = array("h")
-    plane.frombytes(row.contiguous().numpy().tobytes())
-    return plane
 
 
 def _fade_window(chunk: int, fade: int, device: torch.device) -> Tensor:
@@ -1103,38 +566,10 @@ def _pad_tail(part: Tensor, chunk: int, length: int) -> Tensor:
     return torch.nn.functional.pad(part, (0, missing), mode="constant", value=0.0)
 
 
-# --------------------------------------------------------------------------
-# Small shared helpers
-# --------------------------------------------------------------------------
-
-
-def _announce(stage_callback: StageCallback | None, stage: JobState) -> None:
-    if stage_callback is not None:
-        stage_callback(stage)
-
-
-def _realtime_factor(audio_seconds: float, processing_seconds: float) -> float:
-    """RTF = audio duration / processing duration (``0.0`` when not meaningful)."""
-    if processing_seconds <= 0.0 or audio_seconds <= 0.0:
-        return 0.0
-    return audio_seconds / processing_seconds
-
-
-def _discard_outputs(output_dir: Path, stems: tuple[str, ...]) -> None:
-    """Remove any stem file this separator may have written under ``output_dir``."""
-    for name in stems:
-        for candidate in (output_dir / f"{name}.wav", output_dir / f"{name}.wav.part"):
-            try:
-                candidate.unlink(missing_ok=True)
-            except OSError:  # pragma: no cover - best-effort cleanup
-                logger.warning("Could not remove partial output %s", candidate)
-
-
 __all__ = [
     "DEFAULT_CHUNK_SAMPLES",
     "DEFAULT_NUM_OVERLAP",
     "ROFORMER_ARCHITECTURE",
-    "NvmlProbe",
     "RoFormerParameters",
     "RoFormerSeparator",
 ]
