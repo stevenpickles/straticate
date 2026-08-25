@@ -257,6 +257,12 @@ The number of stems always comes from the model's stem list, so two-stem and
 four-stem modes exercise the same code path. See
 [docs/features/014-fake-separator.md](docs/features/014-fake-separator.md).
 
+**It is not offered to users.** Its catalog entries declare `development_only`
+and are excluded from the catalog unless
+`STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` (§9, feature 032). CI, the backend
+suite and the Playwright tier set that; a normal run does not, so a fixture is
+never a quality tier a user can pick.
+
 ## 9. Model catalog and model management
 
 The catalog (`models/catalog.json`, validated by
@@ -312,6 +318,23 @@ at create time (`model_weights_missing`, 409) rather than failing mid-run.
 over catalog entries; users are never asked to choose architectures or
 inference parameters. Advanced per-model tuning may appear later behind an
 optional advanced UI.
+
+**Development fixtures are excluded from the catalog by default** (feature
+032). A manifest may declare `development_only: true`, meaning the entry exists
+to exercise the application rather than to separate audio — the fake separator
+of §8 is the only such entry today. Unless
+`Settings.include_development_models` (`STRATICATE_INCLUDE_DEVELOPMENT_MODELS`)
+says otherwise, such entries are filtered out where the catalog is *loaded*, so
+every consumer — `GET /models`, `GET /models/{id}`, `GET /separation-modes`, the
+installer, and a job's mode/quality resolution — is consistent without any of
+them knowing the rule exists. A separation mode left with no models is not
+derived at all, so no empty, unselectable mode is ever served; that is why
+`standard_stems` is absent from a default server until a real four-stem model
+lands. The marker is a manifest field rather than an inference from
+`architecture`, because architecture is an open set application code outside
+`inference/` must not branch on (§1). The catalog is still *validated* as
+written, fixtures included, so hiding one can never change whether a malformed
+catalog is detected.
 
 The mapping is declared in the catalog: a model's optional `quality_tier`
 (`fast` / `balanced` / `high_quality`, defaulting to `balanced`) names the tier

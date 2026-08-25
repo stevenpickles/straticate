@@ -109,27 +109,70 @@ Unknown model ID → `404` with code `model_not_found`.
 
 ```json
 {
-  "id": "fake-vocals-001",
-  "display_name": "Fake Vocals (development)",
-  "architecture": "fake",
-  "version": "1.0",
+  "id": "vocals-hq-001",
+  "display_name": "Vocals — High Quality",
+  "architecture": "mel_band_roformer",
+  "version": "kim-vocal-2",
+  "development_only": false,
   "separation_mode": "vocals",
-  "quality_tier": null,
+  "quality_tier": "high_quality",
   "stems": ["vocals", "instrumental"],
   "sample_rate": 44100,
-  "requirements": { "recommended_vram_mb": 0, "minimum_ram_mb": null },
+  "requirements": { "recommended_vram_mb": 8192, "minimum_ram_mb": 8192 },
   "capabilities": { "cuda": true, "cpu": true },
-  "licensing": null,
+  "licensing": { "code_license": "MIT", "weights_license": "MIT" },
   "installation": {
-    "state": "installed",
-    "requires_download": false,
-    "total_bytes": null,
+    "state": "available",
+    "requires_download": true,
+    "total_bytes": 913106900,
     "downloaded_bytes": null,
     "progress": null,
     "error": null
   }
 }
 ```
+
+### Development fixtures are not served by default
+
+A manifest entry may declare `development_only: true`, meaning it exists to
+exercise the application — CI, the backend suite, the Playwright tier — and does
+not separate audio. The fake separator of ARCHITECTURE.md §8 is exactly that: a
+comb filter that is "not separation and never pretends to be". Such entries are
+**excluded from the catalog** unless the server sets
+`STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1`
+(`Settings.include_development_models`, default off, feature 032).
+
+The filter is applied once, where the catalog is loaded, so it is the same on
+every surface:
+
+| surface | default (fixtures hidden) | `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` |
+| --- | --- | --- |
+| `GET /models` | fixture entries absent | present, `development_only: true` |
+| `GET /models/{fixture_id}` | `404 model_not_found` | `200` |
+| `POST /models/{fixture_id}/install`, `DELETE .../weights` | `404 model_not_found` | as before (`409 model_not_downloadable` — a fixture has no artifact) |
+| `GET /separation-modes` | no fixture-backed tier; a mode left with **no** tier is not served at all | unchanged from before feature 032 |
+| `POST /jobs` naming a fixture's tier | `404 quality_option_not_found`, or `404 separation_mode_not_found` if the whole mode was fixture-backed | accepted |
+
+`/models` filters too, not only `/separation-modes`. `/models` is arguably an
+inventory rather than a rendering source, but Straticate is local-first with no
+authentication and a single audience: an inventory that lists a comb filter
+`/separation-modes` refuses to offer is a contradiction a client must reconcile,
+and a fixture a client can see is one it can offer to install. **No new error
+code was introduced.** On a server that hides fixtures, the ID names nothing the
+catalog contains and `model_not_found` says precisely that; a distinct "hidden"
+code would be a second condition every client must handle and would advertise an
+entry the server chose not to serve.
+
+Today this means `standard_stems` is **not** a separation mode under default
+settings — its only model is a fixture, and there is no real four-stem model
+until feature 028. It disappears rather than being served with an empty
+`quality_options` list, because an empty mode is a choice the frontend would
+render and nobody could act on. No mode is ever served with an empty
+`quality_options`.
+
+`development_only` appears on `Model` (never on `QualityOption`), so a client
+that has deliberately opted in can label what it is showing. On a default server
+it is `false` on every model returned.
 
 Manifest fields that are *not* user-facing — `artifact` and
 `default_inference_parameters` — are deliberately absent from `Model` and never
@@ -175,8 +218,9 @@ weights on disk?** Being catalogued and being ready to run are different facts.
 **A model with no `artifact` block is `installed` by definition** and
 `requires_download` is `false`: it needs no weights, so it is never presented as
 something to download, and installing or removing its weights is a
-`model_not_downloadable` (409). Every built-in model — the fake development
-models today — is in this state permanently.
+`model_not_downloadable` (409). Every built-in model — the development fixtures
+today, which a default server does not serve at all (see above) — is in this
+state permanently.
 
 ```text
 available ──POST install──▶ downloading ──verified──▶ installed
@@ -293,7 +337,9 @@ come from the models (which must agree), and each model contributes one
 `QualityOption` for its tier, ordered `fast → balanced → high_quality`. A mode
 served by a single model still exposes one option. Mode labels come from the
 catalog file's optional `separation_modes` table, falling back to a humanized
-mode ID; tier labels are humanized tier IDs.
+mode ID; tier labels are humanized tier IDs. A mode with **no** models — every one of them a
+hidden development fixture — is not derived at all, so an empty
+`quality_options` list is never served.
 
 ## Jobs
 
@@ -363,8 +409,8 @@ Job error codes:
 | code | status | when |
 | --- | --- | --- |
 | `audio_not_found` | 404 | `audio_id` is unknown, or its file is gone from disk |
-| `separation_mode_not_found` | 404 | `mode_id` is not one of the derived separation modes |
-| `quality_option_not_found` | 404 | `quality_id` is not an option of that mode |
+| `separation_mode_not_found` | 404 | `mode_id` is not one of the derived separation modes — including a mode whose only models were hidden development fixtures |
+| `quality_option_not_found` | 404 | `quality_id` is not an option of that mode — including a tier backed only by a hidden development fixture |
 | `device_not_found` | 404 | `device_id` is not a detected compute device |
 | `model_device_unsupported` | 409 | the resolved model's `capabilities` do not include the resolved device's `backend`. `detail` carries `model_id`, `device_id`, `device_backend` and `supported_backends` |
 | `model_weights_missing` | 409 | the resolved model is catalogued but its weights are not installed. `detail` carries `model_id` |
