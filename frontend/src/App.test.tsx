@@ -1,9 +1,15 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import App from './App'
 import { FakeWebSocket } from './test/mockWebSocket'
 import { SESSION_STORAGE_KEY } from './state/persistence'
-import { sampleAudioFile, sampleJob, sampleJobId } from './test/fixtures'
+import {
+  sampleAudioFile,
+  sampleInstallableModel,
+  sampleJob,
+  sampleJobId,
+} from './test/fixtures'
 
 /** Records every socket the app opens, so nothing reaches the network. */
 class RecordingWebSocket extends FakeWebSocket {
@@ -63,6 +69,55 @@ describe('App', () => {
 
     unmount()
     expect(RecordingWebSocket.instances[0]?.closed).toBe(true)
+  })
+
+  it('opens the model library beside the workflow, and comes back to it', async () => {
+    // The library is not a sixth workflow phase, and opening it must not
+    // disturb the five that are: the workspace is *hidden*, not unmounted, so
+    // a decoded stem player and a running job survive the trip.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(
+              url.endsWith('/models')
+                ? [sampleInstallableModel]
+                : url.includes('/models/')
+                  ? sampleInstallableModel
+                  : { version: '0.1.0' },
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        ),
+      ),
+    )
+
+    const { container } = render(<App />)
+    await screen.findByText(/backend v0\.1\.0/)
+    const workspace = container.querySelector('main')
+    expect(workspace).not.toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Models' }))
+    expect(
+      await screen.findByRole('region', { name: 'Model library' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('main'),
+      'the workflow is out of the accessibility tree while the library is up',
+    ).not.toBeInTheDocument()
+    expect(
+      container.querySelector('main'),
+      'but it is still mounted, so nothing in it was torn down',
+    ).toBe(workspace)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Close models' }))
+    await waitFor(() => {
+      expect(screen.getByRole('main')).toBe(workspace)
+    })
+    expect(
+      screen.queryByRole('region', { name: 'Model library' }),
+    ).not.toBeInTheDocument()
   })
 
   it('restores the workflow a reload interrupted', async () => {

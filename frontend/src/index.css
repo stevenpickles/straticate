@@ -49,6 +49,21 @@ body {
   min-height: 100vh;
 }
 
+/*
+ * The workflow, hidden rather than unmounted while the model library is open
+ * (feature 037): a swapped-out workspace would tear down the stem player's
+ * Web Audio graph and lose a running job's rendered progress.
+ */
+.app-workflow {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.app-workflow[hidden] {
+  display: none;
+}
+
 .header {
   display: flex;
   align-items: baseline;
@@ -76,6 +91,27 @@ body {
   margin: 0;
   font-size: 0.85rem;
   color: var(--color-text-muted);
+}
+
+.header-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.header-models {
+  padding: 0.3rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.35rem;
+  background-color: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.header-models[aria-expanded='true'] {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 .header-backend {
