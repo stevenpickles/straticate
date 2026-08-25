@@ -80,10 +80,33 @@ export interface LicenceNotice {
 export type LicensingSeverity =
   'restricted' | 'unknown' | 'attention' | 'declared'
 
+/**
+ * What {@link describeLicensing} needs to know beyond the licensing block.
+ *
+ * The block itself says nothing about whether the model *has* weights to
+ * fetch, and the cautions differ entirely: "no weights licence is declared" is
+ * the most important thing this module can say about a third-party download,
+ * and is nonsense about a built-in separator, which downloads nothing from
+ * anybody.
+ */
+export interface LicensingContext {
+  /**
+   * Whether this model's weights are fetched from a third party
+   * (`installation.requires_download`). A model with no artifact is installed
+   * by definition (feature 025) and has no separate weights to be licensed.
+   */
+  readonly weightsAreDownloaded: boolean
+}
+
+/** The default: assume a model's weights are a download, which is the risky case. */
+const DOWNLOADED: LicensingContext = { weightsAreDownloaded: true }
+
 /** A model's licensing block, resolved into what a UI may state about it. */
 export interface LicensingSummary {
   /** Whether the manifest declared anything at all. */
   readonly declared: boolean
+  /** Whether the weights this describes are fetched from a third party. */
+  readonly weightsAreDownloaded: boolean
   /** Licence of the implementation code. */
   readonly code: LicenceTerm
   /** Licence of the weights — the one that governs the download. */
@@ -178,30 +201,43 @@ export function severityLabel(severity: LicensingSeverity): string {
   }
 }
 
-/** Build the cautions a summary carries, most consequential first. */
+/**
+ * Build the cautions a summary carries, most consequential first.
+ *
+ * The two `unknown` cautions are about **a download whose terms nobody has
+ * stated**, so they are only raised for a model that actually fetches its
+ * weights. Warning that "the code licence does not cover the weights" about a
+ * built-in separator would be inventing a risk: there is no artifact, nothing
+ * is fetched from a third party, and there are no separate weights to license.
+ * Everything else — a refusal, an informal statement, a difference between the
+ * two licences — is just as true either way and is still raised.
+ */
 function buildNotices(
   declared: boolean,
   code: LicenceTerm,
   weights: LicenceTerm,
   commercialUse: PermissionState,
   redistribution: PermissionState,
+  weightsAreDownloaded: boolean,
 ): LicenceNotice[] {
   const notices: LicenceNotice[] = []
 
-  if (!declared) {
-    notices.push({
-      kind: 'unknown',
-      message:
-        'This model declares no licence terms at all. Nothing here says how its weights may be used — treat them as unlicensed until the publisher states otherwise.',
-    })
-  } else if (weights.kind === 'unstated') {
-    notices.push({
-      kind: 'unknown',
-      message:
-        code.kind === 'unstated'
-          ? 'No weights licence is declared. Treat the terms as unknown until the publisher states them.'
-          : `No weights licence is declared. The code licence (${code.text}) does not cover the weights, so their terms are unknown.`,
-    })
+  if (weightsAreDownloaded) {
+    if (!declared) {
+      notices.push({
+        kind: 'unknown',
+        message:
+          'This model declares no licence terms at all. Nothing here says how its weights may be used — treat them as unlicensed until the publisher states otherwise.',
+      })
+    } else if (weights.kind === 'unstated') {
+      notices.push({
+        kind: 'unknown',
+        message:
+          code.kind === 'unstated'
+            ? 'No weights licence is declared. Treat the terms as unknown until the publisher states them.'
+            : `No weights licence is declared. The code licence (${code.text}) does not cover the weights, so their terms are unknown.`,
+      })
+    }
   }
 
   if (commercialUse === 'not-permitted') {
@@ -265,6 +301,7 @@ function severityOf(notices: readonly LicenceNotice[]): LicensingSeverity {
  */
 export function describeLicensing(
   licensing: ModelLicensing | null | undefined,
+  context: LicensingContext = DOWNLOADED,
 ): LicensingSummary {
   const block = licensing ?? {}
   const code = licenceTerm(block.code_license)
@@ -285,10 +322,12 @@ export function describeLicensing(
     weights,
     commercialUse,
     redistribution,
+    context.weightsAreDownloaded,
   )
 
   return {
     declared,
+    weightsAreDownloaded: context.weightsAreDownloaded,
     code,
     weights,
     commercialUse,
@@ -306,7 +345,13 @@ export function describeLicensing(
  * licence was actually declared. With nothing declared, the honest answer is
  * that nothing is known — a model whose terms are unstated may well require a
  * credit nobody has written down.
+ *
+ * A model that downloads no weights is the exception: there is no third party
+ * whose credit could be owed, so silence there really does mean none.
  */
 export function attributionFallback(summary: LicensingSummary): string {
+  if (!summary.weightsAreDownloaded) {
+    return 'None required'
+  }
   return summary.weights.kind === 'unstated' ? NOT_STATED : 'None required'
 }

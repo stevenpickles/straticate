@@ -44,6 +44,23 @@ export interface ModelCatalogHandle {
   readonly error: InstallationError | null
   /** Read the catalog again. */
   readonly refresh: () => void
+  /**
+   * Fold a freshly-read model back into the held catalog.
+   *
+   * The catalog is read once, so anything derived from it — a quality tier's
+   * price, "2 of 3 installed" — would otherwise still describe the moment the
+   * view opened. A model that has just been installed or removed is known
+   * *exactly*, from the answer that did it, so the honest fix is to write that
+   * answer into the catalog rather than to ask the server again: it costs no
+   * request, and there is no window in which the two disagree.
+   *
+   * Only a change of `installation.state` replaces the entry. A download's
+   * byte counts change every second and nothing derived from the catalog reads
+   * them, so ignoring them keeps a running install from re-rendering every
+   * consumer once a second — and makes this safe to call from an effect that
+   * runs on every read.
+   */
+  readonly applyModel: (model: Model) => void
 }
 
 /**
@@ -64,6 +81,26 @@ export function useModelCatalog(): ModelCatalogHandle {
     // may disprove that is in flight.
     setError(null)
     setReadCount((count) => count + 1)
+  }, [])
+
+  const applyModel = useCallback((model: Model) => {
+    setModels((current) => {
+      if (current === null) {
+        return current
+      }
+      const held = current.find((candidate) => candidate.id === model.id)
+      if (
+        held === undefined ||
+        held.installation?.state === model.installation?.state
+      ) {
+        // Not ours, or nothing a catalog consumer can see has changed. Return
+        // the same array so React bails out of the re-render entirely.
+        return current
+      }
+      return current.map((candidate) =>
+        candidate.id === model.id ? model : candidate,
+      )
+    })
   }, [])
 
   useEffect(() => {
@@ -93,5 +130,5 @@ export function useModelCatalog(): ModelCatalogHandle {
   const status: ModelCatalogStatus =
     error !== null ? 'error' : models === null ? 'loading' : 'loaded'
 
-  return { status, models: models ?? [], error, refresh }
+  return { status, models: models ?? [], error, refresh, applyModel }
 }

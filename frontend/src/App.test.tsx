@@ -120,6 +120,48 @@ describe('App', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('gives focus back to the models button when the library closes itself', async () => {
+    // Regression. "Back to workflow" unmounted the library while it held
+    // focus, dropping it on `<body>`: a keyboard user's next Tab restarted at
+    // the top of the document instead of at the control they came in through.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify(
+              url.endsWith('/models')
+                ? [sampleInstallableModel]
+                : url.includes('/models/')
+                  ? sampleInstallableModel
+                  : { version: '0.1.0' },
+            ),
+            { status: 200, headers: { 'Content-Type': 'application/json' } },
+          ),
+        ),
+      ),
+    )
+
+    render(<App />)
+    await screen.findByText(/backend v0\.1\.0/)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Models' }))
+    const close = await screen.findByRole('button', {
+      name: 'Back to workflow',
+    })
+    close.focus()
+    expect(close).toHaveFocus()
+
+    await userEvent.click(close)
+
+    const toggle = await screen.findByRole('button', { name: 'Models' })
+    expect(
+      toggle,
+      'focus returns to the control it came in through',
+    ).toHaveFocus()
+    expect(document.body).not.toHaveFocus()
+  })
+
   it('restores the workflow a reload interrupted', async () => {
     sessionStorage.setItem(
       SESSION_STORAGE_KEY,

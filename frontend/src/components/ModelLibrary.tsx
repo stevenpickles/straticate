@@ -1,5 +1,5 @@
 import type { Model } from '../api/types'
-import { MODEL_LIBRARY_ID } from './Header'
+import { MODEL_LIBRARY_ID } from './modelLibraryId'
 import { installationOf } from './useModelInstallation'
 import { ModelCard } from './ModelCard'
 import { useModelCatalog } from './useModelCatalog'
@@ -11,7 +11,15 @@ export interface ModelLibraryProps {
   readonly onClose: () => void
 }
 
-/** How many of the catalogued models have their weights on disk. */
+/**
+ * How many of the catalogued models have their weights on disk.
+ *
+ * Counted from the catalog, which each card keeps in step with what it has
+ * actually read (`onModelRead` → `applyModel`). Without that the summary would
+ * go on reporting "0 installed" for the rest of the session after the user
+ * installed one from a card — a `role="status"` line contradicting the card
+ * beneath it.
+ */
 function installedCount(models: readonly Model[]): number {
   return models.filter((model) => installationOf(model)?.state === 'installed')
     .length
@@ -98,7 +106,7 @@ export function ModelLibrary({ onClose }: ModelLibraryProps) {
           <ul className="model-library-list">
             {models.map((model) => (
               <li className="model-library-item" key={model.id}>
-                <ModelCard model={model} />
+                <ModelCard model={model} onModelRead={catalog.applyModel} />
               </li>
             ))}
           </ul>

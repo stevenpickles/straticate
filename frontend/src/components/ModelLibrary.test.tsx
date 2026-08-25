@@ -64,10 +64,13 @@ afterEach(() => {
 })
 
 describe('ModelLibrary', () => {
-  it('says the weights are downloads before it lists anything', () => {
+  it('says the weights are downloads before it lists anything', async () => {
     stubCatalog([])
     const { region } = renderLibrary()
     expect(region).toHaveTextContent(/straticate ships no model weights/i)
+    // Let the catalog read this render started settle inside `act`, rather
+    // than after the test has finished with it.
+    await screen.findByText(/offers no models at all/i)
   })
 
   it('lists every catalogued model, in catalog order', async () => {
@@ -180,5 +183,135 @@ describe('ModelLibrary', () => {
       screen.getByRole('button', { name: 'Back to workflow' }),
     )
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ModelLibrary summary after an install', () => {
+  /**
+   * Stub `fetch` for a mutable catalog: `GET /models` and `GET /models/{id}`
+   * both answer from `models`, and `POST .../install` replaces that model's
+   * record, exactly as the backend's one `ModelInstaller` does.
+   */
+  function stubMutableCatalog(initial: Model[]): { deletes: string[] } {
+    let models = initial
+    const deletes: string[] = []
+    const replace = (model: Model) => {
+      models = models.map((candidate) =>
+        candidate.id === model.id ? model : candidate,
+      )
+    }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith('/models')) {
+        return Promise.resolve(jsonResponse(models))
+      }
+      const id = decodeURIComponent(
+        url.split('/models/')[1]?.split('/')[0] ?? '',
+      )
+      const held = models.find((candidate) => candidate.id === id)
+      if (held === undefined) {
+        return Promise.resolve(
+          jsonResponse(
+            { error: { code: 'model_not_found', message: 'No such model.' } },
+            404,
+          ),
+        )
+      }
+      if (init?.method === 'DELETE') {
+        deletes.push(url)
+        const removed = modelInstalling({ state: 'available' }, held)
+        replace(removed)
+        return Promise.resolve(jsonResponse(removed))
+      }
+      if (url.endsWith('/install')) {
+        const installed = modelInstalling({ state: 'installed' }, held)
+        replace(installed)
+        return Promise.resolve(jsonResponse(installed, 202))
+      }
+      return Promise.resolve(jsonResponse(held))
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    return { deletes }
+  }
+
+  it('counts what is installed now, not what was installed when it opened', async () => {
+    // Regression. The catalog is read once, so `installedCount` went on
+    // reporting the moment the view opened: a `role="status"` line saying
+    // "0 installed" directly above a card saying "Installed — 870 MB on disk".
+    stubMutableCatalog([sampleInstallableModel, sampleBuiltInModel])
+    renderLibrary()
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '2 models catalogued · 1 installed',
+    )
+
+    const card = screen.getByRole('article', {
+      name: sampleInstallableModel.display_name,
+    })
+    await userEvent.click(
+      await within(card).findByRole('button', { name: 'Install' }),
+    )
+
+    await waitFor(() => {
+      expect(card).toHaveTextContent('Installed — 870 MB on disk')
+    })
+    expect(screen.getByRole('status')).toHaveTextContent(
+      '2 models catalogued · 2 installed',
+    )
+  })
+
+  it('counts down again when the weights are removed', async () => {
+    stubMutableCatalog([
+      modelInstalling({ state: 'installed' }),
+      sampleBuiltInModel,
+    ])
+    renderLibrary()
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      '2 models catalogued · 2 installed',
+    )
+
+    const card = screen.getByRole('article', {
+      name: sampleInstallableModel.display_name,
+    })
+    await userEvent.click(
+      await within(card).findByRole('button', { name: 'Remove weights' }),
+    )
+    await userEvent.click(
+      within(card).getByRole('button', { name: 'Delete the weights' }),
+    )
+
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toHaveTextContent(
+        '2 models catalogued · 1 installed',
+      )
+    })
+  })
+
+  it('does not re-read the collection to keep the count honest', async () => {
+    // The answer that installed the weights *is* the fact, so it is written
+    // into the held catalog rather than fetched again. A second collection
+    // read would be a request nobody needs — and the beginning of a poll.
+    let collectionReads = 0
+    stubMutableCatalog([sampleInstallableModel, sampleBuiltInModel])
+    const fetchMock = vi.mocked(fetch)
+    const countCollectionReads = () => {
+      collectionReads = fetchMock.mock.calls.filter(([url]) =>
+        (url as string).endsWith('/models'),
+      ).length
+    }
+
+    renderLibrary()
+    const card = await screen.findByRole('article', {
+      name: sampleInstallableModel.display_name,
+    })
+    await userEvent.click(
+      await within(card).findByRole('button', { name: 'Install' }),
+    )
+    await waitFor(() => {
+      expect(card).toHaveTextContent('Installed — 870 MB on disk')
+    })
+
+    countCollectionReads()
+    expect(collectionReads).toBe(1)
   })
 })

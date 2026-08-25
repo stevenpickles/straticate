@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelCard } from './ModelCard'
 import {
@@ -401,5 +401,104 @@ describe('ModelCard cancelling versus removing', () => {
       'This model has no weights to remove.',
     )
     expect(card).toHaveTextContent('Installed — 870 MB on disk')
+  })
+})
+
+describe('ModelCard confirmation lifetime', () => {
+  /** Set `document.visibilityState` and fire the event the browser would. */
+  async function setVisibility(value: 'visible' | 'hidden'): Promise<void> {
+    Object.defineProperty(document, 'visibilityState', {
+      value,
+      configurable: true,
+    })
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      await Promise.resolve()
+    })
+  }
+
+  afterEach(async () => {
+    await setVisibility('visible')
+  })
+
+  it('drops a confirmation the model has outlived, and never resurrects it', async () => {
+    // Regression. Both branches that render the confirm group are gated on
+    // `installed`, so a flag left standing once the model leaves that state is
+    // invisible rather than gone — and comes back the instant it is installed
+    // again. The sequence below is the one a user can actually walk into:
+    // open the confirmation, tab away, have the weights removed from
+    // somewhere else, come back, install again — and be shown a delete
+    // confirmation nobody asked for, on the heels of a successful install.
+    const installed = modelInstalling({ state: 'installed' })
+    const { set, requests } = stubModel({ model: installed })
+    const card = renderCard(installed)
+
+    await userEvent.click(
+      await within(card).findByRole('button', { name: 'Remove weights' }),
+    )
+    expect(
+      within(card).getByRole('group', { name: 'Confirm removal' }),
+    ).toBeInTheDocument()
+
+    // The weights go away somewhere else while the tab is in the background;
+    // returning re-reads the model, which is how the card finds out.
+    set(modelInstalling({ state: 'available' }))
+    await setVisibility('hidden')
+    await setVisibility('visible')
+
+    await waitFor(() => {
+      expect(
+        within(card).getByRole('button', { name: 'Install' }),
+      ).toBeEnabled()
+    })
+    expect(
+      within(card).queryByRole('group', { name: 'Confirm removal' }),
+    ).not.toBeInTheDocument()
+
+    // Install it again. The download settling must not put a delete
+    // confirmation on screen by itself.
+    await userEvent.click(within(card).getByRole('button', { name: 'Install' }))
+    await within(card).findByRole('progressbar', {
+      name: 'Model download progress',
+    })
+    // The transfer finishes; the next poll is what tells the card.
+    set(modelInstalling({ state: 'installed' }))
+    await waitFor(
+      () => {
+        expect(card).toHaveTextContent('Installed — 870 MB on disk')
+      },
+      { timeout: 4000 },
+    )
+
+    expect(
+      within(card).queryByRole('group', { name: 'Confirm removal' }),
+      'the confirmation belonged to the installation that is gone',
+    ).not.toBeInTheDocument()
+    expect(
+      within(card).getByRole('button', { name: 'Remove weights' }),
+    ).toBeEnabled()
+    expect(
+      requests.filter((request) => request.method === 'DELETE'),
+      'and nothing was deleted along the way',
+    ).toHaveLength(0)
+  }, 15_000)
+
+  it('keeps the confirmation while the model stays installed', async () => {
+    // The reset must be about *leaving* `installed`, not about any re-read:
+    // the poll and the visibility re-read both land fresh records, and neither
+    // is a reason to close a question the user is still answering.
+    const installed = modelInstalling({ state: 'installed' })
+    stubModel({ model: installed })
+    const card = renderCard(installed)
+
+    await userEvent.click(
+      await within(card).findByRole('button', { name: 'Remove weights' }),
+    )
+    await setVisibility('hidden')
+    await setVisibility('visible')
+
+    expect(
+      within(card).getByRole('group', { name: 'Confirm removal' }),
+    ).toBeInTheDocument()
   })
 })

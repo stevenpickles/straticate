@@ -251,3 +251,79 @@ describe('attribution', () => {
     expect(attributionFallback(silent)).toBe(NOT_STATED)
   })
 })
+
+describe('describeLicensing for a model that downloads no weights', () => {
+  const builtIn = { weightsAreDownloaded: false }
+
+  it('does not warn about weights terms a built-in model cannot have', () => {
+    // Regression. `describeLicensing` has no idea whether an artifact exists,
+    // so a development fixture declaring only `code_license` used to be badged
+    // "Terms not stated" and warned that "the code licence does not cover the
+    // weights" — about weights that are never downloaded from anybody.
+    const summary = describeLicensing(
+      {
+        code_license: 'MIT',
+        weights_license: null,
+        redistribution_permitted: null,
+        commercial_use_permitted: null,
+        attribution: null,
+      },
+      builtIn,
+    )
+
+    expect(summary.declared).toBe(true)
+    expect(summary.weightsAreDownloaded).toBe(false)
+    expect(summary.notices).toHaveLength(0)
+    expect(summary.severity).toBe('declared')
+  })
+
+  it('says nothing at all about a built-in that declares nothing', () => {
+    const summary = describeLicensing(null, builtIn)
+    expect(summary.declared).toBe(false)
+    expect(summary.notices).toHaveLength(0)
+  })
+
+  it('still reports a refusal, an informal statement and a difference', () => {
+    // Only the "nobody has stated the download's terms" cautions are about
+    // fetching weights. Everything else is as true of a built-in model.
+    const summary = describeLicensing(
+      {
+        code_license: 'MIT',
+        weights_license: 'Personal use only, by arrangement.',
+        redistribution_permitted: false,
+        commercial_use_permitted: false,
+        attribution: null,
+      },
+      builtIn,
+    )
+
+    expect(summary.notices.map((notice) => notice.kind)).toEqual([
+      'restricted',
+      'restricted',
+      'informal',
+      'differs',
+    ])
+    expect(summary.severity).toBe('restricted')
+  })
+
+  it('needs no credit when there is no third party to credit', () => {
+    expect(attributionFallback(describeLicensing(null, builtIn))).toBe(
+      'None required',
+    )
+  })
+
+  it('leaves a downloadable model’s cautions exactly as they were', () => {
+    // The default is the risky reading, so every existing call site keeps its
+    // behaviour without saying anything.
+    const summary = describeLicensing({
+      code_license: 'MIT',
+      weights_license: null,
+      redistribution_permitted: null,
+      commercial_use_permitted: null,
+      attribution: null,
+    })
+    expect(summary.weightsAreDownloaded).toBe(true)
+    expect(summary.severity).toBe('unknown')
+    expect(summary.notices[0]?.message).toMatch(/does not cover the weights/i)
+  })
+})

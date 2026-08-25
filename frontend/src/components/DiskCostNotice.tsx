@@ -40,6 +40,11 @@ export interface DiskCostNoticeProps {
  */
 export function DiskCostNotice({ totalBytes }: DiskCostNoticeProps) {
   const known = typeof totalBytes === 'number' && totalBytes > 0
+  // An **unpublished** size counts as large. The alternative would be to treat
+  // a transfer nobody has measured as the small case, which is the one reading
+  // the evidence cannot support: a size the catalog does not state could be
+  // anything, and the whole point of the warning styling is to mark a download
+  // the user should think about before starting.
   const large = !known || totalBytes >= LARGE_DOWNLOAD_BYTES
 
   return (

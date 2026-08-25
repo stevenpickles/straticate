@@ -107,12 +107,26 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 
 /** Set `document.visibilityState` and fire the event the browser would fire. */
 function setVisibility(value: 'visible' | 'hidden'): void {
+  declareVisibility(value)
+  act(() => {
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+}
+
+/**
+ * Set `document.visibilityState` **without** firing the event.
+ *
+ * Restoring it between tests must not tell a still-mounted hook that the tab
+ * came back: that fires a re-read, and by the time the teardown runs `fetch`
+ * has been unstubbed — so the read reaches jsdom's own, fails, and lands a
+ * `setState` outside `act` for every test in the file. Each hook reads
+ * `document.visibilityState` when it mounts, so the property is all the next
+ * test needs.
+ */
+function declareVisibility(value: 'visible' | 'hidden'): void {
   Object.defineProperty(document, 'visibilityState', {
     value,
     configurable: true,
-  })
-  act(() => {
-    document.dispatchEvent(new Event('visibilitychange'))
   })
 }
 
@@ -123,7 +137,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers()
   vi.unstubAllGlobals()
-  setVisibility('visible')
+  declareVisibility('visible')
 })
 
 /** A `startBlockedReason` argument for a model that has been read. */

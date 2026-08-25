@@ -36,7 +36,10 @@ to it (025, 032, 035) and a fourth (027) is partly blocked on it.
 - **`frontend/src/components/SeparationOptions.tsx`** — every quality tier
   priced from the catalog, and the selected model's licence and attribution
   rendered where the model is chosen.
-- **`Header.tsx`** / **`App.tsx`** — the way in and out of the library.
+- **`Header.tsx`** / **`App.tsx`** — the way in and out of the library, and the
+  focus that comes back with it.
+- **`frontend/src/state/modelRevision.tsx`** — the one-shot signal that another
+  view may have installed or removed something.
 - **`frontend/e2e/models.spec.ts`**, with the shared model helpers lifted into
   `e2e/app.ts`.
 
@@ -81,6 +84,16 @@ When the weights licence is **absent**, the notice names the code licence
 explicitly so the reader cannot borrow it: *"No weights licence is declared.
 The code licence (MIT) does not cover the weights, so their terms are
 unknown."*
+
+That caution is about **a download whose terms nobody has stated**, so
+`describeLicensing` is told whether the weights are downloaded at all
+(`LicensingContext.weightsAreDownloaded`, defaulting to the risky reading). A
+built-in separator fetches nothing from a third party and has no separate
+weights to license: warning about its unstated weights terms would be inventing
+a risk, and adding `"licensing": {"code_license": "MIT"}` to a development
+fixture used to do exactly that. Everything else — a refusal, an informal
+statement, a difference between the two licences — is as true of a built-in
+model and is still raised.
 
 ### 2. Silence is rendered as silence
 
@@ -172,6 +185,18 @@ back over the network.
 `Cancel download` and `Remove weights` are never on screen at the same time,
 and neither is `Install` while a download is running (a second `POST /install`
 could only earn `model_busy` for a transfer that is going perfectly well).
+
+**A confirmation belongs to the installation it was asked about.** Both
+branches that render the confirm group are gated on `installed`, so a flag left
+standing once the model leaves that state is invisible rather than gone — and
+comes back the instant it is installed again. The reachable sequence: open the
+confirmation, tab away, let the weights be removed from somewhere else, come
+back (the visibility re-read lands `available`, the group disappears), install
+again — and the download settling would put "Delete the 870 MB of weights?" on
+screen, unprompted, on the heels of a successful install. The card therefore
+drops the confirmation whenever the model leaves `installed`, adjusted during
+render rather than in an effect so there is no frame in which the stale
+question is shown.
 
 ## Disk space
 
@@ -298,6 +323,39 @@ what price an unselected quality tier, and what a library row shows for the one
 round trip before its own first read answers, so a card is never blank and
 never flashes.
 
+### …and how it is kept in step without becoming one
+
+Reading once is only honest if what is derived from that read is corrected when
+the world moves. Three things do that, and none of them is a timer.
+
+**The live record outranks the catalog's copy of the same model.** The
+configure step already holds a polled record for the selected tier, so that is
+what prices it. Without this the radio and the panel directly below it
+contradicted each other the moment an install finished — "Needs a 870 MB
+download" above "Model weights installed" — and, because that sentence is the
+radio's `aria-describedby` target, a screen reader announced the tier as
+needing a download that had just completed.
+
+**A freshly-read record is folded back into the catalog** (`applyModel`).
+Preferring the live record keeps the *selected* tier honest; folding keeps it
+honest once the user selects a different one and it is no longer live. In the
+library, each card hands its reads up the same way (`onModelRead`), which is
+what stops the `role="status"` summary reporting "0 installed" above a card
+saying "Installed — 870 MB on disk". It costs **no request**: the answer that
+installed or removed the weights is the answer being written down, so there is
+no window in which the two disagree. Only a change of `installation.state`
+replaces an entry, so a running download's byte counts — which nothing derived
+from the catalog reads — cannot re-render every consumer once a second.
+
+**Closing the library bumps a revision** (`state/modelRevision.tsx`), and the
+configure step re-reads once when it changes. This is the price of keeping the
+workflow *hidden* rather than unmounted: it does not re-read on the way back
+the way a remounted view would, so a model installed from a library card would
+otherwise leave the configure step pricing a tier that is already on disk —
+with "Start separation" disabled for weights that are there. The revision is a
+**known event**: it fires when a user leaves a screen on which they could have
+changed something, and never on its own.
+
 ## Where the library lives
 
 Beside the workflow, not inside it. Managing model weights is not a step of
@@ -314,6 +372,12 @@ screen reader.
 Whether the library is open is `useState` in `App`, deliberately **not** part of
 `AppStateProvider`: it is not a phase, it is not persisted across a reload
 (feature 033), and nothing in the workflow may branch on it.
+
+Closing it from inside — the library's own "Back to workflow" button —
+**returns focus to the header's models button** before the library unmounts. A
+keyboard user who pressed it has conceptually gone back to the control they
+came in through; unmounting a focused button drops focus on `<body>`, and their
+next Tab restarts at the top of the document.
 
 ## Also closed here
 
@@ -349,7 +413,8 @@ Whether the library is open is `useState` in `App`, deliberately **not** part of
 
 ## Tests
 
-**Unit / component — 725 passed (36 files), up from 623 (29 files).**
+**Unit / component — 743 passed (36 files), up from 623 (29 files), and the
+whole suite is now free of `act(...)` warnings (38 → 0).**
 
 - `licensing.test.ts` — named vs. informal classification (including
   `"MIT License"` deliberately landing on informal, and a very long unspaced
@@ -393,6 +458,26 @@ Whether the library is open is `useState` in `App`, deliberately **not** part of
   unblocked; a tier needing no download annotated with nothing; the selected
   model's terms and attribution rendered, before the install, and following the
   selection when it changes.
+Regression tests from code review, **each verified to fail against the code as
+reviewed**:
+
+- `SeparationOptions.test.tsx` — the radio no longer contradicting the panel
+  the moment an install finishes; a tier staying honest after the user selects
+  a different one (the fold); and a bumped revision re-reading **once**, with a
+  re-render that does not change it re-reading nothing.
+- `ModelLibrary.test.tsx` — the summary counting what is installed *now* rather
+  than what was installed when the view opened, up and down again, **without a
+  second collection read**.
+- `ModelCard.test.tsx` — the tab-away / removed-elsewhere / reinstall sequence,
+  proving the delete confirmation does not resurrect itself, and that an
+  ordinary re-read while the model stays installed does not close a question
+  the user is still answering.
+- `licensing.test.ts` / `ModelLicence.test.tsx` — a built-in model that
+  declares a `code_license` no longer warned about weights it never downloads,
+  while the same terms on a downloadable model warn exactly as before.
+- `App.test.tsx` — focus returning to the header's models button when the
+  library closes itself.
+
 - `DiskCostNotice.test.tsx`, `installProgress.test.ts`, `models.test.ts`
   (`listModels`), `format.test.ts` (`formatMemorySize`), `Header.test.tsx` (the
   toggle, its `aria-expanded`, and `aria-controls` pointing at nothing rather
@@ -435,14 +520,21 @@ Per the assignment, found and **not** acted on:
   backend and survives, and the state is re-read on return — but there is
   nothing in the header saying "a download is running" while the user is
   elsewhere.
-- **The library reads the catalog once per opening.** A model installed in
-  another browser tab appears as stale in the *list* until the library is
-  reopened; the per-model watch corrects each card's `installation` on its own
-  first read, so the state is never stale, only the enumeration.
+- **The catalog's *enumeration* is read once per opening.** Installation state
+  is kept in step without re-reading it (each card folds its own reads back in,
+  and closing the library re-reads the configure step), but a model that
+  appears in or disappears from the catalog while the app is running — which
+  needs a server restart, since the catalog is loaded once at startup — is not
+  noticed until the view is reopened.
 - **N+1 requests on opening the library**: one `GET /models` plus one
   `GET /models/{id}` per card. Deliberate (see *Why the catalog is read
   separately*), and cheap for a local application with a handful of models —
   but it would want revisiting for a catalog of dozens.
+- **The model revision is bumped on closing the library, not on every change.**
+  Two browser tabs still drift from each other until one of them re-reads;
+  nothing here is a substitute for the live event stream feature 025
+  deliberately did not add (`model_install_progress`), and the case for one is
+  no stronger now than it was then.
 - **No `update`, no resumable downloads, no re-verification of installed
   weights.** All three are 025's documented limitations and none of them is a
   UI problem; remove-then-install is the whole update story.

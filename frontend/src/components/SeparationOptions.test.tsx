@@ -9,6 +9,7 @@ import {
   type AppState,
 } from '../state/appState'
 import { JobStateProvider, useJobState } from '../state/jobState'
+import { ModelRevisionProvider } from '../state/modelRevision'
 import {
   modelInstalling,
   modelLicensed,
@@ -81,14 +82,26 @@ function stubFetch(options: {
 }): FetchMock {
   const modes = options.modes ?? sampleSeparationModes
   const catalog = options.catalog ?? []
+  // `GET /models/{id}` answers with the catalog's own record for that model
+  // where there is one, exactly as the backend does — both routes are served
+  // from one `ModelInstaller`, so a test whose two answers disagreed would be
+  // asserting against a server that cannot exist. Falling back to a model that
+  // needs no download is what keeps every test that is *not* about
+  // installation reading as it did before feature 035.
   const model =
     options.model ??
-    ((modelId: string) =>
-      jsonResponse({
-        ...sampleBuiltInModel,
-        id: modelId,
-        display_name: modelId,
-      }))
+    ((modelId: string) => {
+      const held = Array.isArray(catalog)
+        ? catalog.find((candidate) => candidate.id === modelId)
+        : undefined
+      return jsonResponse(
+        held ?? {
+          ...sampleBuiltInModel,
+          id: modelId,
+          display_name: modelId,
+        },
+      )
+    })
   const fetchMock = vi.fn((url: string) => {
     if (url.endsWith('/separation-modes')) {
       return Promise.resolve(Array.isArray(modes) ? jsonResponse(modes) : modes)
@@ -140,6 +153,23 @@ function renderOptions() {
       </JobStateProvider>
     </AppStateProvider>,
   )
+}
+
+/** How many times `GET /models` (the collection) has been read. */
+function catalogReads(fetchMock: FetchMock): number {
+  return fetchMock.mock.calls.filter(([url]) =>
+    (url as string).endsWith('/models'),
+  ).length
+}
+
+/** How many times a single model has been read. */
+function modelReads(fetchMock: FetchMock): number {
+  return fetchMock.mock.calls.filter(
+    ([url, init]) =>
+      (url as string).includes('/models/') &&
+      !(url as string).endsWith('/install') &&
+      (init as RequestInit | undefined)?.method === undefined,
+  ).length
 }
 
 /** The request bodies of every `POST /api/v1/jobs` call made so far. */
@@ -982,5 +1012,143 @@ describe('SeparationOptions licensing at the point of choice', () => {
         name: `Licensing for ${other?.model_id ?? ''}`,
       }),
     ).toBeInTheDocument()
+  })
+})
+
+describe('SeparationOptions keeping a tier’s price honest', () => {
+  const [fastTier, hqTier] = twoStemMode?.quality_options ?? []
+  const fastId = fastTier?.model_id ?? ''
+  const hqId = hqTier?.model_id ?? ''
+
+  /** A catalog record for `modelId` in a given installation state. */
+  function entry(modelId: string, state: 'available' | 'installed'): Model {
+    return modelInstalling(
+      { state, total_bytes: sampleWeightsBytes },
+      { ...sampleInstallableModel, id: modelId, display_name: modelId },
+    )
+  }
+
+  /** The sentence a tier's radio points at with `aria-describedby`. */
+  function tierNote(name: string): string | null {
+    const radio = screen.getByRole('radio', { name })
+    const id = radio.getAttribute('aria-describedby')
+    return id === null
+      ? null
+      : (document.getElementById(id)?.textContent ?? null)
+  }
+
+  it('stops the radio contradicting the panel the moment an install finishes', async () => {
+    // Regression. The catalog is read once; the selected tier's model is read
+    // again on every poll. Priced from the frozen catalog, the radio went on
+    // saying "Needs a 870 MB download" directly above a panel reporting
+    // "Model weights installed" — and because that sentence is the radio's
+    // `aria-describedby` target, a screen reader announced the tier as needing
+    // a download that had just completed.
+    let fastState: 'available' | 'installed' = 'available'
+    stubFetch({
+      catalog: [entry(fastId, 'available'), entry(hqId, 'installed')],
+      model: (modelId) =>
+        jsonResponse(
+          entry(modelId, modelId === fastId ? fastState : 'installed'),
+        ),
+      install: (modelId) => {
+        fastState = 'installed'
+        return jsonResponse(entry(modelId, 'installed'), 202)
+      },
+    })
+    renderOptions()
+
+    await waitFor(() => {
+      expect(tierNote(fastTier?.display_name ?? '')).toBe(
+        `Needs a ${formatFileSize(sampleWeightsBytes)} download`,
+      )
+    })
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Install model' }),
+    )
+    await screen.findByText(/Model weights installed/)
+
+    expect(
+      tierNote(fastTier?.display_name ?? ''),
+      'the live record outranks the catalog’s copy of the same model',
+    ).toBe('Installed')
+  })
+
+  it('keeps a tier honest after the user selects a different one', async () => {
+    // The live record covers the *selected* tier. Once the user moves on it is
+    // no longer live, so the answer that installed the weights has to be
+    // written into the catalog behind it — otherwise the price springs back to
+    // "Needs a 870 MB download" for a model that is on disk.
+    let fastState: 'available' | 'installed' = 'available'
+    stubFetch({
+      catalog: [entry(fastId, 'available'), entry(hqId, 'installed')],
+      model: (modelId) =>
+        jsonResponse(
+          entry(modelId, modelId === fastId ? fastState : 'installed'),
+        ),
+      install: (modelId) => {
+        fastState = 'installed'
+        return jsonResponse(entry(modelId, 'installed'), 202)
+      },
+    })
+    renderOptions()
+
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Install model' }),
+    )
+    await screen.findByText(/Model weights installed/)
+
+    await userEvent.click(
+      screen.getByRole('radio', { name: hqTier?.display_name }),
+    )
+    await waitFor(() => {
+      expect(
+        screen.getByRole('radio', { name: hqTier?.display_name }),
+      ).toBeChecked()
+    })
+
+    expect(tierNote(fastTier?.display_name ?? '')).toBe('Installed')
+  })
+
+  it('re-reads once when another view may have changed what is installed', async () => {
+    // The workflow is only *hidden* while the model library is open
+    // (`App.tsx`), never unmounted, so it does not re-read on the way back the
+    // way a remounted view would. A bumped revision is that signal — and it is
+    // a known event, not a timer: nothing re-reads until it changes.
+    const fetchMock = stubFetch({
+      catalog: [entry(fastId, 'available'), entry(hqId, 'installed')],
+      model: (modelId) => jsonResponse(entry(modelId, 'available')),
+    })
+    const initialState: AppState = {
+      phase: 'configure',
+      upload: { status: 'uploaded', file: sampleAudioFile },
+      configure: initialConfigureState,
+    }
+    const view = (revision: number) => (
+      <AppStateProvider initialState={initialState}>
+        <JobStateProvider>
+          <ModelRevisionProvider revision={revision}>
+            <SeparationOptions />
+          </ModelRevisionProvider>
+        </JobStateProvider>
+      </AppStateProvider>
+    )
+    const { rerender } = render(view(0))
+    await screen.findByRole('radio', { name: fastTier?.display_name })
+    await waitFor(() => {
+      expect(catalogReads(fetchMock)).toBe(1)
+    })
+    const modelReadsBefore = modelReads(fetchMock)
+
+    // A re-render that does *not* change the revision changes nothing.
+    rerender(view(0))
+    expect(catalogReads(fetchMock)).toBe(1)
+
+    rerender(view(1))
+    await waitFor(() => {
+      expect(catalogReads(fetchMock)).toBe(2)
+    })
+    expect(modelReads(fetchMock)).toBeGreaterThan(modelReadsBefore)
   })
 })

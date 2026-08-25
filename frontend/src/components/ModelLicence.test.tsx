@@ -201,3 +201,70 @@ describe('ModelLicence compact', () => {
     )
   })
 })
+
+describe('ModelLicence for a built-in model that declares terms', () => {
+  it('does not warn about weights it never downloads', () => {
+    // Regression. The built-in shortcut only fired when a built-in declared
+    // *nothing*. Add `"licensing": {"code_license": "MIT"}` to a development
+    // fixture and the card fell through to the full rendering, which badged it
+    // "Terms not stated" and warned that the code licence "does not cover the
+    // weights" — weights that are never fetched from anybody.
+    const region = renderLicence(
+      modelLicensed(
+        {
+          code_license: 'MIT',
+          weights_license: null,
+          redistribution_permitted: null,
+          commercial_use_permitted: null,
+          attribution: null,
+        },
+        sampleBuiltInModel,
+      ),
+    )
+
+    expect(within(region).queryAllByRole('note')).toHaveLength(0)
+    expect(within(region).getByText('Terms declared')).toBeInTheDocument()
+    expect(region).toHaveTextContent(/no weights are downloaded/i)
+    expect(termValue(region, 'Code licence')).toBe('MIT')
+  })
+
+  it('needs no credit when there is no third party to credit', () => {
+    const region = renderLicence(
+      modelLicensed(
+        {
+          code_license: 'MIT',
+          weights_license: null,
+          redistribution_permitted: null,
+          commercial_use_permitted: null,
+          attribution: null,
+        },
+        sampleBuiltInModel,
+      ),
+    )
+    expect(termValue(region, 'Attribution')).toBe('None required')
+  })
+
+  it('still reports a refusal a built-in model declares', () => {
+    const region = renderLicence(
+      modelLicensed(sampleRestrictiveLicensing, sampleBuiltInModel),
+    )
+
+    expect(termValue(region, 'Commercial use')).toBe('Not permitted')
+    expect(within(region).getByText('Restricted use')).toBeInTheDocument()
+  })
+
+  it('warns exactly as before for the same terms on a downloadable model', () => {
+    const region = renderLicence(
+      modelLicensed({
+        code_license: 'MIT',
+        weights_license: null,
+        redistribution_permitted: null,
+        commercial_use_permitted: null,
+        attribution: null,
+      }),
+    )
+
+    expect(within(region).getByText('Terms not stated')).toBeInTheDocument()
+    expect(within(region).getAllByRole('note').length).toBeGreaterThan(0)
+  })
+})

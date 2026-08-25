@@ -51,25 +51,38 @@ function regionLabel(model: Model): string {
  * - the badge says at most "Terms declared". This component does not read
  *   licence texts, so it never calls anything permissive, free or open.
  *
- * A **built-in** model that declares nothing is the one quiet case: it has no
- * artifact, so nothing is fetched from a third party and there is no separate
- * weights licence to state. It says that in one line instead of warning about
- * terms that do not exist.
+ * A **built-in** model is the one quiet case, and it stays quiet whether or not
+ * it declares anything. It has no artifact, so nothing is fetched from a third
+ * party and there is no separate weights licence to be silent about: the
+ * "no weights licence is declared" caution is suppressed (it would be
+ * inventing a risk), and the block leads with a line saying why. Declaring a
+ * `code_license` on a development fixture must not make the app warn about
+ * weights that are never downloaded.
  */
 export function ModelLicence({ model, compact = false }: ModelLicenceProps) {
-  const summary = describeLicensing(model.licensing)
   const requiresDownload = installationOf(model)?.requires_download ?? false
+  const summary = describeLicensing(model.licensing, {
+    weightsAreDownloaded: requiresDownload,
+  })
   const className = `model-licence${compact ? ' model-licence-compact' : ''}`
 
-  if (!summary.declared && !requiresDownload) {
-    return (
-      <section className={className} aria-label={regionLabel(model)}>
-        <p className="model-licence-builtin">
-          Built in — no weights are downloaded for this model, so it carries no
-          separate weights licence.
-        </p>
-      </section>
-    )
+  const builtInNote = requiresDownload ? null : (
+    <p className="model-licence-builtin">
+      Built in — no weights are downloaded for this model, so it carries no
+      separate weights licence.
+    </p>
+  )
+
+  if (!summary.declared) {
+    // Nothing declared and nothing downloaded: one honest line beats a table
+    // of "Not stated" about terms that cannot exist.
+    if (builtInNote !== null) {
+      return (
+        <section className={className} aria-label={regionLabel(model)}>
+          {builtInNote}
+        </section>
+      )
+    }
   }
 
   const rows: { label: string; value: string; modifier?: string }[] = [
@@ -106,6 +119,7 @@ export function ModelLicence({ model, compact = false }: ModelLicenceProps) {
 
   return (
     <section className={className} aria-label={regionLabel(model)}>
+      {builtInNote}
       <p className={`model-licence-badge model-licence-${summary.severity}`}>
         {severityLabel(summary.severity)}
       </p>

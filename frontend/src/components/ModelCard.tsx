@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { Model } from '../api/types'
 import { formatFileSize, formatMemorySize, formatSampleRate } from '../format'
 import { DiskCostNotice } from './DiskCostNotice'
@@ -12,6 +12,13 @@ import './ModelCard.css'
 export interface ModelCardProps {
   /** The catalogued model, as `GET /models` served it. */
   readonly model: Model
+  /**
+   * Called with each freshly-read record for this model, so the view holding
+   * the catalog can keep whatever it derives from it — "2 of 3 installed" —
+   * in step with what the cards are actually showing. Optional: a card renders
+   * correctly on its own without it.
+   */
+  readonly onModelRead?: (model: Model) => void
 }
 
 /** What the state pill says, per installation state. */
@@ -62,13 +69,25 @@ function supportedBackends(model: Model): string[] {
  * for confirmation first, because that one throws away a download the user
  * waited for.
  */
-export function ModelCard({ model }: ModelCardProps) {
+export function ModelCard({ model, onModelRead }: ModelCardProps) {
   const handle = useModelInstallation(model.id)
   const [confirmingRemove, setConfirmingRemove] = useState(false)
+  // The installation state the last render saw, so a change in it can be
+  // reacted to during render (see below).
+  const [previousState, setPreviousState] = useState<string | null>(null)
 
   // The live record once it has been read, the catalog's own until then. Both
   // describe the same model, so there is no window in which the card is empty.
-  const record = handle.model ?? model
+  const live = handle.model
+  const record = live ?? model
+
+  // The card renders the live record; anything the *library* derives from its
+  // one catalog read would otherwise still describe the moment it opened.
+  useEffect(() => {
+    if (live !== null) {
+      onModelRead?.(live)
+    }
+  }, [live, onModelRead])
   const block = installationOf(record)
   const requiresDownload = block?.requires_download ?? false
   const state = block?.state ?? 'installed'
@@ -78,6 +97,25 @@ export function ModelCard({ model }: ModelCardProps) {
   const size = totalBytes === null ? null : formatFileSize(totalBytes)
   const received = receivedBytes === null ? null : formatFileSize(receivedBytes)
   const busy = handle.installing || handle.removing
+
+  // **A confirmation belongs to the installation it was asked about.** Both
+  // branches that render the confirm group are gated on `installed`, so a flag
+  // left standing after the model leaves that state is invisible rather than
+  // gone — and comes back the moment the model is installed again. That is a
+  // delete confirmation nobody asked for, on the heels of a successful
+  // install: tab away with the group open, let the weights be removed from
+  // somewhere else, come back, install, and the download settling would put
+  // "Delete the 870 MB of weights?" on screen by itself.
+  //
+  // Adjusted during render rather than in an effect (React's "adjusting state
+  // when a prop changes" pattern), so there is no frame in which the stale
+  // confirmation is rendered.
+  if (previousState !== state) {
+    setPreviousState(state)
+    if (state !== 'installed') {
+      setConfirmingRemove(false)
+    }
+  }
 
   const stateLabel = requiresDownload
     ? (STATE_LABELS[state] ?? state)

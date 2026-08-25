@@ -4,6 +4,7 @@ import { createJob } from '../api/jobs'
 import { listSeparationModes } from '../api/modes'
 import { formatFileSize } from '../format'
 import { useAppDispatch, useAppState } from '../state/appState'
+import { useModelRevision } from '../state/modelRevision'
 import { useJobDispatch } from '../state/jobState'
 import type { Model } from '../api/types'
 import { ModelInstallPanel } from './ModelInstallPanel'
@@ -160,15 +161,57 @@ export function SeparationOptions() {
   // out what each costs. A failed catalog read simply leaves the tiers
   // unannotated: it is an enrichment, never a gate.
   const catalog = useModelCatalog()
-  const modelFor = (modelId: string | undefined): Model | undefined =>
-    modelId === undefined
-      ? undefined
-      : catalog.models.find((model) => model.id === modelId)
+
+  // **The live record always outranks the catalog's copy of the same model.**
+  // The catalog is read once; the selected tier's model is read again on every
+  // poll. Without this the radio and the panel directly below it contradict
+  // each other the moment an install finishes — "Needs a 870 MB download"
+  // above "Model weights installed" — and since that sentence is the radio's
+  // `aria-describedby` target, a screen reader announces the tier as needing a
+  // download that has just completed.
+  const liveModel = installation.model
+  const modelFor = (modelId: string | undefined): Model | undefined => {
+    if (modelId === undefined) {
+      return undefined
+    }
+    if (liveModel !== null && liveModel.id === modelId) {
+      return liveModel
+    }
+    return catalog.models.find((model) => model.id === modelId)
+  }
+
+  // Preferring it above keeps the *selected* tier honest with no lag; folding
+  // it into the catalog keeps it honest after the user selects a different
+  // tier, when it is no longer the live one. It costs no request: the answer
+  // that installed or removed the weights is the answer being written down.
+  const { applyModel } = catalog
+  useEffect(() => {
+    if (liveModel !== null) {
+      applyModel(liveModel)
+    }
+  }, [liveModel, applyModel])
+
+  // Another view may have installed or removed something while this one sat
+  // hidden behind the model library (`App.tsx`). A bump means "re-read once",
+  // for the selected tier's live record and for the catalog behind the other
+  // tiers' prices alike.
+  const modelRevision = useModelRevision()
+  const actedOnRevision = useRef(modelRevision)
+  const refreshInstallation = installation.refresh
+  const refreshCatalog = catalog.refresh
+  useEffect(() => {
+    if (actedOnRevision.current === modelRevision) {
+      return
+    }
+    actedOnRevision.current = modelRevision
+    refreshInstallation()
+    refreshCatalog()
+  }, [modelRevision, refreshInstallation, refreshCatalog])
 
   // Licensing is read from whichever record is fresher, but it is manifest
   // data and identical in both: the point is that it is on screen *before* an
   // install, which is the only moment its terms can still change the decision.
-  const selectedModel = installation.model ?? modelFor(selectedOption?.model_id)
+  const selectedModel = liveModel ?? modelFor(selectedOption?.model_id)
 
   // The single question "may a separation start?", asked of the whole handle:
   // an unread model is not a ready one, so this also covers the round trip
