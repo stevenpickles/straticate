@@ -86,7 +86,11 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 
 - **027** (MDX fast tier) — the CPU story: RoFormer is 3.5–5× slower than real
   time, so a fast tier is a product requirement, not a nicety.
-- **028** (4-stem model + capability-driven modes).
+- **028** (4-stem model + capability-driven modes). **Note:** `standard_stems`
+  already has `fast` claimed by the hidden development fixture; declare
+  `balanced` or `high_quality`, or omit the field. **027** has it worse —
+  `vocals` has no free tier left, so `fake-vocals-001` must be retiered or
+  dropped in that PR. See `docs/features/032-hide-development-models.md`.
 - **030** (Playwright E2E tier) — overdue since M1; it would have caught two
   M1 defects that unit tests did not.
 - Whether `quality_options` should hide tiers whose weights are not installed

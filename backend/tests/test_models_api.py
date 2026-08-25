@@ -86,7 +86,8 @@ async def test_get_model_returns_one_model(client: httpx2.AsyncClient) -> None:
     assert body["separation_mode"] == "standard_stems"
     assert body["stems"] == ["vocals", "drums", "bass", "other"]
     assert body["capabilities"] == {"cuda": True, "cpu": True}
-    assert body["quality_tier"] is None
+    # Explicit since feature 032: a fixture may not squat on the default tier.
+    assert body["quality_tier"] == "fast"
 
 
 async def test_get_unknown_model_returns_the_error_envelope(client: httpx2.AsyncClient) -> None:
@@ -298,3 +299,41 @@ async def test_separation_modes_are_unchanged_when_fixtures_are_enabled(
     for mode in modes:
         for option in mode["quality_options"]:
             assert set(option) == QUALITY_OPTION_KEYS
+
+
+async def test_a_catalog_of_only_fixtures_starts_and_serves_nothing(tmp_path: Path) -> None:
+    """An empty *result* is not a startup failure; an invalid catalog is.
+
+    ``create_app`` refuses to start on a catalog it cannot read — that part is
+    unchanged. But a catalog that is perfectly valid and simply offers this
+    server nothing now exists: it is what this repository shipped before feature
+    026, and what any fork carrying only fixtures still has. It loads, and both
+    routes answer ``200`` with an empty list, which a client can render as
+    "nothing installed yet". This pins the behaviour ``create_app``'s docstring
+    describes.
+    """
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    write_catalog(
+        models_dir,
+        [
+            make_model("m-dev-a", development_only=True, quality_tier="fast"),
+            make_model(
+                "m-dev-b",
+                development_only=True,
+                separation_mode="standard_stems",
+                stems=["vocals", "drums", "bass", "other"],
+            ),
+        ],
+    )
+    app = create_app(
+        Settings(
+            models_dir=models_dir,
+            data_dir=tmp_path / "data",
+            include_development_models=False,
+        )
+    )
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get(MODELS_URL)).json() == []
+        assert (await client.get(MODES_URL)).json() == []

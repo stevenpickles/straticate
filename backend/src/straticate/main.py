@@ -259,10 +259,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ``STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1`` is what CI, the test suite and
     the end-to-end tier set to get them back (feature 032).
 
+    **An empty catalog is not a startup failure; an invalid one is.** The
+    refusal is about *unreadable* data — a missing file, malformed JSON, models
+    of one mode disagreeing on stems — because serving a silently truncated set
+    of separation choices would be worse than not starting. A catalog that is
+    valid and simply offers this server nothing is a different situation, and
+    since feature 032 it is a reachable one: a checkout whose every entry is a
+    development fixture (which is what this repository shipped before feature
+    026, and what any fork carrying only fixtures still has) loads cleanly with
+    the default settings and serves empty ``/models`` and ``/separation-modes``
+    lists. That is deliberate — the honest answer to "what can you separate?" is
+    "nothing yet", and a client can render it — and it is pinned by
+    ``tests/test_models_api.py``.
+
     Raises:
-        ModelCatalogError: If ``settings.models_dir`` holds no valid model
-            catalog. The application deliberately refuses to start rather than
-            serve an empty set of separation choices.
+        ModelCatalogError: If ``settings.models_dir`` holds no *valid* model
+            catalog — missing, unreadable, malformed, or internally
+            inconsistent. Never merely because the catalog turned out to offer
+            no models.
     """
     settings = settings or get_settings()
 

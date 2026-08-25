@@ -30,13 +30,45 @@ One fixture therefore covers all of them, and a test that wants the *default*
 """
 
 
+FAKE_QUALITY_TIERS = {"vocals": "balanced", "standard_stems": "fast"}
+"""Quality tier the shipped development fixture of each mode backs.
+
+Both fixtures declare their tier explicitly in ``models/catalog.json`` (feature
+032): relying on the manifest default meant an untiered fixture silently
+occupied ``balanced``, the tier a *real* model gets by saying nothing, which
+would have blocked feature 028's four-stem model at load for every user. The
+mapping lives here because three test modules build create-job bodies and a
+fixture's tier is a coordinate of the mode, not the subject of any of them.
+"""
+
+
+def fake_quality_id(mode_id: str) -> str:
+    """The ``quality_id`` a job must ask for to get ``mode_id``'s fake model.
+
+    Unknown modes fall back to ``balanced``, so a test probing a mode that does
+    not exist still sends a well-formed body.
+    """
+    return FAKE_QUALITY_TIERS.get(mode_id, "balanced")
+
+
 @pytest.fixture(autouse=True, scope="session")
 def include_development_models() -> Iterator[None]:
     """Enable development fixtures for the whole test session.
 
     See :data:`DEVELOPMENT_MODELS_ENV`. ``get_settings`` is cached process-wide,
-    so its cache is cleared on the way in and on the way out; nothing may
-    observe a ``Settings`` built before the variable was set.
+    so its cache is cleared on the way in and on the way out.
+
+    **One object escapes this fixture: ``straticate.main.app``.** It is built at
+    module import — ``app = create_app()`` at the bottom of ``main.py`` — which
+    happens when this very file imports ``create_app``, before any fixture runs.
+    It therefore permanently holds a catalog with the fixtures *hidden*, while
+    every application built during a test has them visible. Nothing depends on
+    that today (the tests that touch ``main.app`` assert its identity and title,
+    not its catalog), and it is not repaired here because reassigning a module
+    global from a fixture is a worse trap than the one it would close. A future
+    test that drives ``main.app`` through a client must therefore build its own
+    application with :func:`~straticate.main.create_app`, or it will see one
+    model where the rest of the suite sees three.
     """
     patch = pytest.MonkeyPatch()
     patch.setenv(DEVELOPMENT_MODELS_ENV, "1")

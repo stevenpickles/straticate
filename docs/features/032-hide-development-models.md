@@ -112,6 +112,40 @@ mode is simply not there — never served with an empty `quality_options` list,
 which is a choice the frontend would render and nobody could act on. No fake
 four-stem model was added to compensate.
 
+### Both fixtures now declare an explicit `quality_tier` — read this before 028
+
+`quality_tier` is optional and defaults to `balanced`. Both fixtures were
+untiered, so both silently claimed `balanced` — **the tier a real model gets by
+saying nothing**. Catalog validation deliberately reads every declared entry,
+fixtures included (see above), so a hidden entry can still block a visible one:
+
+> Feature 028 adds a real four-stem model to `standard_stems` without an
+> explicit `quality_tier` → it collides with `fake-standard-001` on `balanced`
+> → `ModelCatalog` raises at startup **for every user**, including the ones who
+> never see fixtures and cannot see the entry that blocked them.
+
+`fake-standard-001` therefore now declares `quality_tier: "fast"`, vacating the
+default. `fake-vocals-001` declares `quality_tier: "balanced"` — explicitly,
+because in `vocals` it is the only tier left: `high_quality` is `vocals-hq-001`
+(026) and `fast` is what 027's MDX model will claim, so moving the fixture to
+either would *guarantee* the collision rather than avoid it.
+
+**Consequences for whoever specs 027 and 028:**
+
+- **028** (four stems): `standard_stems` has `fast` taken by the fixture.
+  Declare `balanced` or `high_quality`, or omit the field (which means
+  `balanced`) — all three are free.
+- **027** (fast vocals): `vocals` has no free tier. `fake-vocals-001` must be
+  retiered or dropped from the catalog in that same PR. The failure is loud, at
+  load, and names both model IDs — but it will happen.
+
+Making the claims explicit does not remove the collision (nothing can, while
+validation reads the whole file — and it must, or CI and a user's machine would
+disagree about which catalogs load). It makes every fixture's claim visible in
+the file, beside the entry a contributor is adding. A test pins that every
+`development_only` entry declares its tier, and another pins that a hidden entry
+colliding with a visible one still fails loudly.
+
 ### `development_only` is on `Model`, not on `QualityOption`
 
 `GET /separation-modes` is therefore byte-identical to its pre-032 response when
@@ -159,7 +193,9 @@ explicitly with `Settings(include_development_models=False)`.
 - `backend/src/straticate/config.py` · `models/catalog.py` · `main.py` ·
   `schemas/models.py` · `api/models.py` (docs) · `jobs/resolution.py` (docs)
 - `backend/tests/conftest.py` · `test_model_catalog.py` · `test_models_api.py` ·
-  `test_api_jobs.py` · `test_inference_registry.py`
+  `test_api_jobs.py` · `test_api_export.py` · `test_api_results.py` ·
+  `test_inference_registry.py`
+- `DEVELOPMENT.md` (the opt-in, beside the local run command)
 - `frontend/src/api/generated/api.d.ts` (regenerated)
 - `ARCHITECTURE.md` · `docs/contracts/rest-api.md` · `ROADMAP.md`
 
@@ -188,22 +224,36 @@ explicitly with `Settings(include_development_models=False)`.
   hidden model is not a catalog key; hiding a fixture frees the tier it
   occupied; a mode with every model hidden is not derived; an all-fixture
   catalog loads and serves nothing; a hidden entry is still validated (stems,
-  duplicate tier, duplicate ID); an unmarked entry defaults to visible.
+  duplicate tier, duplicate ID); an unmarked entry defaults to visible; a hidden
+  *untiered* entry blocks a visible untiered one and the error names both; every
+  shipped fixture declares an explicit `quality_tier`.
 - `test_models_api.py`: `/models`, `/models/{id}`, install, remove and
   `/separation-modes` in **both** settings states, including the 404 envelope
   for a hidden model and the unchanged `QualityOption` shape.
+  Plus: a catalog whose every entry is a fixture starts and serves empty
+  `/models` and `/separation-modes` lists — an empty *result* is not a startup
+  failure, only an invalid catalog is.
 - `test_api_jobs.py`: `POST /jobs` naming a hidden fixture's tier → 404
   `quality_option_not_found`; naming a fixture-only mode → 404
   `separation_mode_not_found`; the same request accepted with the opt-in on.
 
 ## Notes / decisions
 
-**A default server now needs a download before it can separate anything.** The
-only visible model is `vocals-hq-001`, whose weights are an 870 MiB install via
-`POST /models/vocals-hq-001/install`. That is the honest state of the product —
-the alternative was shipping a comb filter as the default quality tier — but it
-means "clone and run" no longer produces audio without a network fetch. A
-first-run install affordance belongs with the unclaimed model-management UI.
+**Clone-and-run no longer produces audio without a network fetch.** The only
+visible model on a default server is `vocals-hq-001`, whose weights are a 913 MB
+download; until they are installed via
+`POST /api/v1/models/vocals-hq-001/install`, pressing **Start separation**
+fails with `model_weights_missing` (409), and the frontend has no install
+affordance because it never reads `installation`. This is a **conscious trade,
+accepted at review**: an honest failure is better than silently serving
+comb-filtered fixture audio as a real separation, which is what happened before
+this feature. A follow-up feature is being allocated for the install affordance;
+it belongs with the unclaimed model-management UI.
+
+Contributors are not affected: `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1`
+restores the fake separator and the full loop with no weights, no CUDA and no
+network. That is now documented next to the local run command in
+DEVELOPMENT.md.
 
 **`GET /models` may briefly look empty of anything installable.** With fixtures
 hidden, `list_models()` on a checkout whose weights are absent returns exactly

@@ -199,9 +199,10 @@ def test_modes_derived_from_the_repository_catalog(real_catalog: ModelCatalog) -
     vocals = modes["vocals"]
     assert vocals.display_name == "Vocal Isolation"
     assert vocals.stems == ["vocals", "instrumental"]
-    # Two tiers since feature 026: the fake development model is untiered (hence
-    # balanced) and the Mel-Band RoFormer backs high_quality. Both advertise the
-    # same stems, which is what lets one mode offer both.
+    # Two tiers since feature 026: the fake development model claims balanced
+    # (explicitly, since feature 032) and the Mel-Band RoFormer backs
+    # high_quality. Both advertise the same stems, which is what lets one mode
+    # offer both.
     assert [(option.id, option.model_id) for option in vocals.quality_options] == [
         ("balanced", "fake-vocals-001"),
         ("high_quality", "vocals-hq-001"),
@@ -517,6 +518,46 @@ def test_a_hidden_entry_still_collides_on_a_duplicate_tier(tmp_path: Path) -> No
     )
     with pytest.raises(ModelCatalogError, match="both claim quality tier 'fast'"):
         user_catalog(tmp_path)
+
+
+def test_a_hidden_untiered_entry_blocks_a_visible_untiered_one(tmp_path: Path) -> None:
+    """The trap feature 028 would otherwise walk into, pinned deliberately.
+
+    ``quality_tier`` defaults to ``balanced``, so two entries that both say
+    nothing collide — and since feature 032 the *blocking* one can be invisible
+    in every response, which makes a startup failure with no visible cause. The
+    behaviour is right (validation must see the file as written, or CI and a
+    user's machine would disagree about which catalogs load), so the fix is
+    discoverability: the error names both IDs, and every shipped fixture
+    declares its tier explicitly (see the test below).
+    """
+    write_catalog(
+        tmp_path,
+        [make_model("m-dev", development_only=True), make_model("m-real")],
+    )
+    with pytest.raises(ModelCatalogError, match="both claim quality tier 'balanced'") as excinfo:
+        user_catalog(tmp_path)
+    message = str(excinfo.value)
+    assert "m-dev" in message and "m-real" in message
+
+
+def test_the_shipped_fixtures_declare_an_explicit_tier() -> None:
+    """A fixture may not squat on the tier a manifest gets by saying nothing.
+
+    ``quality_tier`` is optional and defaults to ``balanced``, so an untiered
+    fixture silently claims the tier a real model gets by omission — which is
+    how ``fake-standard-001`` would have blocked feature 028's four-stem model
+    at startup for every user, including the ones who never see fixtures.
+    Requiring the declaration does not remove the collision (nothing can, while
+    validation reads the whole file — and it must), but it puts every fixture's
+    claim in plain sight beside the entry a contributor is adding.
+    """
+    undeclared = [
+        model_id
+        for model_id, entry in repository_manifest().items()
+        if entry.get("development_only", False) and "quality_tier" not in entry
+    ]
+    assert undeclared == []
 
 
 def test_a_hidden_entry_still_collides_on_a_duplicate_id(tmp_path: Path) -> None:

@@ -51,6 +51,7 @@ from straticate.schemas.jobs import (
 )
 from straticate.system import CPU_DEVICE_ID, CUDA_BACKEND, DeviceDetector
 from tests.audio_fixtures import write_tone_wav
+from tests.conftest import fake_quality_id
 from tests.roformer_fixtures import TINY_SAMPLE_RATE, tiny_catalog_block, write_tiny_weights
 
 JOBS_URL = "/api/v1/jobs"
@@ -260,11 +261,17 @@ def manager_of(app: FastAPI) -> JobManager:
 
 
 def configuration(audio_id: str, **overrides: Any) -> dict[str, Any]:
-    """A create-job request body."""
+    """A create-job request body.
+
+    ``quality_id`` follows ``mode_id`` unless the caller pins it: the shipped
+    fixtures back ``balanced`` in ``vocals`` and ``fast`` in ``standard_stems``
+    (see ``conftest.FAKE_QUALITY_TIERS``).
+    """
+    mode_id = cast(str, overrides.pop("mode_id", "vocals"))
     body: dict[str, Any] = {
         "audio_id": audio_id,
-        "mode_id": "vocals",
-        "quality_id": "balanced",
+        "mode_id": mode_id,
+        "quality_id": fake_quality_id(mode_id),
     }
     body.update(overrides)
     return body

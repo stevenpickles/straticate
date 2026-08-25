@@ -10,7 +10,10 @@
 - Git
 - Optional: NVIDIA GPU + CUDA drivers (never required for development or
   normal tests — the fake separator covers everything, and PyTorch installs as
-  its CPU build by default; see *PyTorch and CUDA* below)
+  its CPU build by default; see *PyTorch and CUDA* below). Since feature 032 the
+  fake separator is hidden from a normally started server; see
+  *Separating audio without downloading weights* below for the one-variable way
+  back.
 
 ## Backend setup
 
@@ -39,6 +42,27 @@ The two differ only in who owns the bind address and the log configuration.
 `--reload` needs); `python -m straticate` takes `STRATICATE_HOST`,
 `STRATICATE_PORT` and `STRATICATE_LOG_LEVEL` from
 `backend/src/straticate/config.py`, where every setting is documented.
+
+### Separating audio without downloading weights
+
+A backend started as above serves the **user-facing** catalog: development
+fixtures are hidden (feature 032), so the only separation mode is `vocals` at
+`high_quality`, backed by `vocals-hq-001` — a 913 MB download you must install
+first with `POST /api/v1/models/vocals-hq-001/install`. A job started before
+that is refused with `model_weights_missing` (409).
+
+To work on anything *other* than real inference, put the fake separator back:
+
+```bash
+cd backend
+STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1 uv run uvicorn straticate.main:app --reload --port 8000
+```
+
+That restores the pre-032 catalog — `vocals` gains a `balanced` tier and
+`standard_stems` reappears, both backed by `FakeSeparator` — so the whole
+upload → job → progress → telemetry → stems → export loop runs with no weights,
+no CUDA and no network. **This is how the backend test suite and the Playwright
+E2E tier run**, which is why neither needs a GPU or a download.
 
 Quality checks (all must pass before a PR):
 
