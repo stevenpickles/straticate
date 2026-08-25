@@ -341,12 +341,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(export.router, prefix=API_PREFIX)
     app.include_router(ws.router, prefix=API_PREFIX)
 
-    # **Last, and that is load-bearing.** The SPA fallback is the end of the
-    # routing table, so ``/docs``, ``/openapi.json`` and every route above are
-    # matched before it is reached. It also refuses ``/api/**`` at match time,
-    # so neither ordering alone nor the guard alone is trusted with the
-    # property that an unknown API path stays a JSON envelope; see
-    # ``straticate.frontend`` and ``tests/test_frontend_mount.py``.
+    # The frontend is installed as the router's ``default``, not as a route,
+    # which is what keeps it from shadowing anything: it is consulted only
+    # after every route, every 405-producing partial match and every
+    # ``redirect_slashes`` redirect, and it refuses ``/api/**`` (in any
+    # spelling), every non-GET method and every non-HTTP scope on top of that.
+    # See ``straticate.frontend`` and ``tests/test_frontend_mount.py``.
     app.state.frontend_dist_dir = settings.frontend_dist_dir
     app.state.frontend_index = mount_frontend(app, settings.frontend_dist_dir)
 
