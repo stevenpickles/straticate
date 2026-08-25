@@ -454,8 +454,10 @@ class ModelCatalog:
         A mode exists exactly when at least one of ``models`` serves it, so a
         mode all of whose models were filtered out simply does not appear —
         which is why no mode is ever served with an empty ``quality_options``
-        list, and why ``standard_stems`` (backed only by a fixture until feature
-        028) vanishes rather than degrading into an unusable choice.
+        list. Between features 032 and 028 ``standard_stems`` was the live
+        example: backed only by a fixture, it vanished rather than degrading
+        into an unusable choice. 028 gave it a real model, so both modes are
+        served again and the rule now only shows up in the tests.
         """
         grouped: dict[str, list[Model]] = {}
         for model in models:

@@ -328,9 +328,10 @@ says otherwise, such entries are filtered out where the catalog is *loaded*, so
 every consumer — `GET /models`, `GET /models/{id}`, `GET /separation-modes`, the
 installer, and a job's mode/quality resolution — is consistent without any of
 them knowing the rule exists. A separation mode left with no models is not
-derived at all, so no empty, unselectable mode is ever served; that is why
-`standard_stems` is absent from a default server until a real four-stem model
-lands. The marker is a manifest field rather than an inference from
+derived at all, so no empty, unselectable mode is ever served — which is why
+`standard_stems` was absent from a default server between features 032 and 028,
+and is served again now that 028 gave it a real model. The marker is a manifest
+field rather than an inference from
 `architecture`, because architecture is an open set application code outside
 `inference/` must not branch on (§1). The catalog is still *validated* as
 written, fixtures included, so hiding one can never change whether a malformed

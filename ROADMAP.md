@@ -171,7 +171,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 025 | Model download manager (SHA-256, atomic)     | MERGED  | 010        | `025-model-download-manager` | #30 |
 | 026 | Real separator: HQ vocals (Mel-Band RoFormer)| MERGED  | 014, 018, 025 | `026-roformer-separator` | #33 |
 | 027 | Real separator: fast vocals (MDX-family)     | BLOCKED | 026        | | licence — see docs/features/027 |
-| 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
+| 028 | 4-stem separation (Hybrid Transformer Demucs)| PR OPEN | 026        | `028-demucs-four-stem` | |
 | 029 | Skeleton hardening (deferred review finds)  | MERGED  | 004, 005   | `029-skeleton-hardening` | #29 |
 | 030 | Playwright E2E tier (fake separator)         | MERGED  | 024        | `030-playwright-e2e` | #35 |
 | 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |
