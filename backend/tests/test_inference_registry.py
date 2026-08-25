@@ -21,6 +21,7 @@ import pytest
 from straticate.config import Settings
 from straticate.errors import ApplicationError
 from straticate.inference import (
+    DEMUCS_ARCHITECTURE,
     FAKE_ARCHITECTURE,
     ROFORMER_ARCHITECTURE,
     FakeSeparator,
@@ -29,11 +30,15 @@ from straticate.inference import (
     fake_separator_builder,
     separator_info_from_model,
 )
-from straticate.inference.registry import roformer_separator_builder
+from straticate.inference.demucs import DemucsSeparator
+from straticate.inference.registry import demucs_separator_builder, roformer_separator_builder
 from straticate.inference.roformer import RoFormerSeparator
 from straticate.models import ModelCatalog
 from straticate.models.layout import weights_path
 from straticate.schemas import Model
+from tests.demucs_fixtures import TINY_STEMS as TINY_DEMUCS_STEMS
+from tests.demucs_fixtures import tiny_catalog_block as tiny_demucs_block
+from tests.demucs_fixtures import write_tiny_weights as write_tiny_demucs_weights
 from tests.roformer_fixtures import tiny_catalog_block, write_tiny_weights
 
 
@@ -173,7 +178,7 @@ def test_register_adds_an_architecture_after_construction() -> None:
 
 def test_the_default_registry_covers_the_architectures_this_build_implements() -> None:
     assert SeparatorRegistry().architectures == frozenset(
-        {FAKE_ARCHITECTURE, ROFORMER_ARCHITECTURE}
+        {FAKE_ARCHITECTURE, ROFORMER_ARCHITECTURE, DEMUCS_ARCHITECTURE}
     )
 
 
@@ -224,6 +229,47 @@ def test_the_roformer_builder_reports_missing_weights_as_a_409(tmp_path: Path) -
         models_dir=tmp_path / "models", inference_parameters=lambda _: tiny_catalog_block()
     )
     model = make_catalog_model("tiny-vocals-001", architecture=ROFORMER_ARCHITECTURE)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        builder(model)
+
+    assert excinfo.value.code == "model_weights_missing"
+    assert excinfo.value.status_code == 409
+
+
+def test_the_demucs_builder_configures_itself_from_the_catalog(tmp_path: Path) -> None:
+    """Adding a Hybrid Transformer Demucs model must be a data edit too."""
+    models_dir = tmp_path / "models"
+    write_tiny_demucs_weights(weights_path(models_dir, "tiny-standard-001"))
+    block = tiny_demucs_block()
+
+    builder = demucs_separator_builder(
+        models_dir=models_dir,
+        inference_parameters=lambda model_id: block if model_id == "tiny-standard-001" else None,
+        ffmpeg_timeout_seconds=13.0,
+    )
+    model = make_catalog_model(
+        "tiny-standard-001",
+        architecture=DEMUCS_ARCHITECTURE,
+        separation_mode="standard_stems",
+        stems=list(TINY_DEMUCS_STEMS),
+        sample_rate=block["model"]["samplerate"],
+    )
+
+    separator = builder(model)
+    assert isinstance(separator, DemucsSeparator)
+    assert separator.info == separator_info_from_model(model)
+    assert separator.parameters.sources == tuple(block["model"]["sources"])
+    assert separator.ffmpeg_timeout_seconds == 13.0
+    # The advertised order is not the network's, and the builder resolved it.
+    assert separator.stem_sources == (3, 0, 1, 2)
+
+
+def test_the_demucs_builder_reports_missing_weights_as_a_409(tmp_path: Path) -> None:
+    builder = demucs_separator_builder(
+        models_dir=tmp_path / "models", inference_parameters=lambda _: tiny_demucs_block()
+    )
+    model = make_catalog_model("tiny-standard-001", architecture=DEMUCS_ARCHITECTURE)
 
     with pytest.raises(ApplicationError) as excinfo:
         builder(model)

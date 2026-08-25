@@ -75,6 +75,7 @@ async def test_list_models_returns_the_catalog(client: httpx2.AsyncClient) -> No
         "fake-vocals-001",
         "fake-standard-001",
         "vocals-hq-001",
+        "standard-stems-001",
     ]
     assert set(body[0]) == MODEL_KEYS
 
@@ -196,8 +197,8 @@ async def test_models_omits_development_fixtures_by_default(
     response = await user_client.get(MODELS_URL)
     assert response.status_code == 200
     body: list[dict[str, Any]] = response.json()
-    assert [model["id"] for model in body] == ["vocals-hq-001"]
-    assert body[0]["development_only"] is False
+    assert [model["id"] for model in body] == ["vocals-hq-001", "standard-stems-001"]
+    assert [model["development_only"] for model in body] == [False, False]
 
 
 async def test_models_lists_the_fixtures_when_they_are_enabled(
@@ -206,8 +207,12 @@ async def test_models_lists_the_fixtures_when_they_are_enabled(
     response = await development_client.get(MODELS_URL)
     assert response.status_code == 200
     body: list[dict[str, Any]] = response.json()
-    assert [model["id"] for model in body] == [*FIXTURE_IDS, "vocals-hq-001"]
-    assert [model["development_only"] for model in body] == [True, True, False]
+    assert [model["id"] for model in body] == [
+        *FIXTURE_IDS,
+        "vocals-hq-001",
+        "standard-stems-001",
+    ]
+    assert [model["development_only"] for model in body] == [True, True, False, False]
 
 
 @pytest.mark.parametrize("model_id", FIXTURE_IDS)
@@ -261,20 +266,25 @@ async def test_separation_modes_offers_no_fixture_by_default(
     response = await user_client.get(MODES_URL)
     assert response.status_code == 200
     modes: list[dict[str, Any]] = response.json()
-    assert [mode["id"] for mode in modes] == ["vocals"]
-    assert [option["model_id"] for option in modes[0]["quality_options"]] == ["vocals-hq-001"]
+    assert [mode["id"] for mode in modes] == ["vocals", "standard_stems"]
+    served = {
+        mode["id"]: [option["model_id"] for option in mode["quality_options"]] for mode in modes
+    }
+    assert served == {"vocals": ["vocals-hq-001"], "standard_stems": ["standard-stems-001"]}
 
 
 async def test_no_mode_is_served_with_an_empty_option_list(
     user_client: httpx2.AsyncClient,
 ) -> None:
-    """``standard_stems`` is gone, not empty.
+    """Feature 032's rule, still enforced now that both modes are real.
 
-    There is no real four-stem model until feature 028, and an empty mode is a
-    choice the frontend would render and nobody could act on.
+    Before feature 028, ``standard_stems`` was backed only by a fixture and so
+    was dropped entirely rather than served with an empty option list. It is
+    served again because it has a real model, and the invariant — no mode with
+    nothing behind it — is what this asserts.
     """
     modes: list[dict[str, Any]] = (await user_client.get(MODES_URL)).json()
-    assert "standard_stems" not in {mode["id"] for mode in modes}
+    assert {mode["id"] for mode in modes} == {"vocals", "standard_stems"}
     assert modes
     for mode in modes:
         assert mode["quality_options"], mode["id"]
@@ -292,7 +302,8 @@ async def test_separation_modes_are_unchanged_when_fixtures_are_enabled(
         "vocals-hq-001",
     ]
     assert [option["model_id"] for option in by_id["standard_stems"]["quality_options"]] == [
-        "fake-standard-001"
+        "fake-standard-001",
+        "standard-stems-001",
     ]
     # The quality option itself is unchanged: no field was added to it, so a
     # frontend generated against the old contract still type-checks.
