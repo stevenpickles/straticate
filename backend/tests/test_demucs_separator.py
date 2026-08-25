@@ -1,7 +1,7 @@
-"""Tests for the real separator's plumbing, against a synthetic checkpoint.
+"""Tests for the four-stem separator's plumbing, against a synthetic checkpoint.
 
 Everything here runs with no GPU, no network and no model download: the network
-under test is the ~20 000-parameter stand-in from :mod:`tests.roformer_fixtures`,
+under test is the ~22 000-parameter stand-in from :mod:`tests.demucs_fixtures`,
 whose audio is meaningless and whose *behaviour under the ``Separator``
 contract* is identical to the real one's. What the real weights add is quality,
 not control flow.
@@ -13,40 +13,59 @@ sleeps for a duration as a way of synchronising.
 
 import asyncio
 import hashlib
+import io
+import pickle
 import sys
 import threading
 from array import array
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy
 import pytest
 import torch
 
 from straticate.errors import ApplicationError
 from straticate.inference.base import SeparationProgress
-from straticate.inference.pcm import PcmAudio, decode_to_pcm, interleave
-from straticate.inference.roformer import NvmlProbe, RoFormerParameters, RoFormerSeparator
-from straticate.inference.roformer import separator as separator_module
-from straticate.inference.roformer.separator import (
+from straticate.inference.demucs import (
+    DEMUCS_ARCHITECTURE,
+    DemucsParameters,
+    DemucsSeparator,
+    NvmlProbe,
+)
+from straticate.inference.demucs import separator as separator_module
+from straticate.inference.demucs.separator import (
+    CHECKPOINT_PICKLE_GLOBALS,
+    CheckpointArchitecture,
+    RestrictedUnpickler,
     device_stats,
+    load_checkpoint_package,
     pcm_to_tensor,
     reset_peak_memory,
+    stem_source_indices,
     tensor_to_pcm,
+    torch_pickle_globals,
 )
+from straticate.inference.pcm import PcmAudio, interleave
 from straticate.jobs.cancellation import CancellationToken, JobCancelled
 from straticate.schemas.jobs import JobState, SeparationConfiguration, SeparationResult
 from tests.audio_fixtures import peak_amplitude, read_wav, write_tone_wav
-from tests.roformer_fixtures import (
+from tests.demucs_fixtures import (
     TINY_CHUNK_SAMPLES,
     TINY_SAMPLE_RATE,
+    TINY_SOURCES,
+    TINY_STEMS,
     tiny_catalog_block,
     tiny_info,
+    tiny_package,
     tiny_parameters,
     write_tiny_weights,
 )
 
-JOB_ID = "01JOB00000000000000000026"
+JOB_ID = "01JOB00000000000000000028"
+MODEL_ID = "standard-stems-001"
 
 
 # --------------------------------------------------------------------------
@@ -77,12 +96,12 @@ class StageRecorder:
 
 
 def make_configuration(
-    mode_id: str = "vocals", device_id: str | None = None
+    mode_id: str = "standard_stems", device_id: str | None = None
 ) -> SeparationConfiguration:
     return SeparationConfiguration(
         audio_id="01AUDIO0000000000000000000",
         mode_id=mode_id,
-        quality_id="high_quality",
+        quality_id="balanced",
         device_id=device_id,
     )
 
@@ -90,23 +109,23 @@ def make_configuration(
 @pytest.fixture
 def weights(tmp_path: Path) -> Path:
     """A saved synthetic checkpoint, where the installer would have put one."""
-    return write_tiny_weights(tmp_path / "weights" / "tiny-vocals-001" / "weights.bin")
+    return write_tiny_weights(tmp_path / "weights" / "tiny-standard-001" / "weights.bin")
 
 
 @pytest.fixture
 def source(tmp_path: Path) -> Path:
-    """Two seconds of stereo tone — a handful of chunks at the tiny chunk size."""
+    """Two seconds of stereo tone — a handful of chunks at the tiny window."""
     return write_tone_wav(tmp_path / "source.wav", seconds=2.0, channels=2, sample_rate=22050)
 
 
-def make_separator(weights: Path, **overrides: Any) -> RoFormerSeparator:
+def make_separator(weights: Path, **overrides: Any) -> DemucsSeparator:
     info = overrides.pop("info", tiny_info())
     parameters = overrides.pop("parameters", tiny_parameters(**overrides.pop("tuning", {})))
-    return RoFormerSeparator(info, weights_file=weights, parameters=parameters, **overrides)
+    return DemucsSeparator(info, weights_file=weights, parameters=parameters, **overrides)
 
 
 async def run(
-    separator: RoFormerSeparator,
+    separator: DemucsSeparator,
     source: Path,
     output_dir: Path,
     *,
@@ -141,8 +160,13 @@ async def test_a_run_writes_one_playable_wav_per_advertised_stem(
     output = tmp_path / "stems"
     result = await run(make_separator(weights), source, output)
 
-    assert [stem.name for stem in result.stems] == ["vocals", "instrumental"]
-    assert sorted(path.name for path in output.iterdir()) == ["instrumental.wav", "vocals.wav"]
+    assert [stem.name for stem in result.stems] == list(TINY_STEMS)
+    assert sorted(path.name for path in output.iterdir()) == [
+        "bass.wav",
+        "drums.wav",
+        "other.wav",
+        "vocals.wav",
+    ]
     for stem in result.stems:
         channels, rate, frames, samples = read_wav(output / f"{stem.name}.wav")
         assert (channels, rate) == (2, TINY_SAMPLE_RATE)
@@ -158,7 +182,7 @@ async def test_the_result_carries_real_performance_metrics(
 ) -> None:
     result = await run(make_separator(weights), source, tmp_path / "stems")
     assert result.job_id == JOB_ID
-    assert result.model_id == "tiny-vocals-001"
+    assert result.model_id == "tiny-standard-001"
     assert result.metrics.processing_seconds > 0.0
     assert result.metrics.realtime_factor > 0.0
     # RTF is audio over processing, both measured in this run.
@@ -167,46 +191,22 @@ async def test_the_result_carries_real_performance_metrics(
     )
 
 
-async def test_stems_are_separated_output_not_copies_of_the_input(
+async def test_the_four_stems_are_four_different_signals(
     weights: Path, source: Path, tmp_path: Path
 ) -> None:
-    """Whatever the (random) network decides, the two stems are not the same file.
+    """Whatever the (random) network decides, no two stems are the same file.
 
-    With real weights this is the acceptance criterion "vocals audibly distinct
-    from the instrumental"; with synthetic weights it is the weaker but still
-    load-bearing claim that the mask is applied, the residual is computed, and
-    neither stem is the mixture handed back.
+    With real weights this is the acceptance criterion "genuinely separated";
+    with synthetic weights it is the weaker but still load-bearing claim that
+    four distinct masks were applied and none of them is the mixture handed
+    back.
     """
     output = tmp_path / "stems"
     await run(make_separator(weights), source, output)
 
-    vocals = digest(output / "vocals.wav")
-    instrumental = digest(output / "instrumental.wav")
-    assert vocals != instrumental
-    assert vocals != digest(source)
-    assert instrumental != digest(source)
-
-
-async def test_the_stems_reconstruct_the_mixture(
-    weights: Path, source: Path, tmp_path: Path
-) -> None:
-    """``vocals + instrumental`` is the decoded mixture, to within quantization.
-
-    That is what makes the second stem a *residual* rather than a second guess:
-    the subtraction happens in the float domain, before either stem is rounded
-    to 16 bits, so the two round-trips are the only error.
-    """
-    output = tmp_path / "stems"
-    await run(make_separator(weights), source, output)
-    _, _, _, vocals = read_wav(output / "vocals.wav")
-    _, _, _, instrumental = read_wav(output / "instrumental.wav")
-
-    mixture = interleave(
-        await decode_to_pcm(source, sample_rate=TINY_SAMPLE_RATE, timeout_seconds=60)
-    )
-    assert len(vocals) == len(instrumental) == len(mixture)
-    worst = max(abs(v + i - m) for v, i, m in zip(vocals, instrumental, mixture, strict=True))
-    assert worst <= 2, f"reconstruction error of {worst} LSB is more than rounding"
+    digests = {name: digest(output / f"{name}.wav") for name in TINY_STEMS}
+    assert len(set(digests.values())) == 4, f"stems are not distinct: {digests}"
+    assert digest(source) not in set(digests.values())
 
 
 async def test_a_mono_source_yields_mono_stems(weights: Path, tmp_path: Path) -> None:
@@ -220,6 +220,21 @@ async def test_a_mono_source_yields_mono_stems(weights: Path, tmp_path: Path) ->
         channels, _, _, samples = read_wav(output / f"{stem.name}.wav")
         assert channels == 1
         assert peak_amplitude(samples) > 0
+
+
+async def test_a_source_shorter_than_one_window_still_separates(
+    weights: Path, tmp_path: Path
+) -> None:
+    """One chunk, padded up to the training length and trimmed back."""
+    short = write_tone_wav(tmp_path / "short.wav", seconds=0.2, channels=2, sample_rate=16000)
+    progress = ProgressRecorder()
+    output = tmp_path / "stems"
+    result = await run(make_separator(weights), short, output, progress=progress)
+
+    assert progress.reports[-1].chunks_total == 1
+    for stem in result.stems:
+        _, _, frames, _ = read_wav(output / f"{stem.name}.wav")
+        assert frames == pytest.approx(0.2 * TINY_SAMPLE_RATE, rel=0.02)
 
 
 async def test_nothing_partial_is_left_behind(weights: Path, source: Path, tmp_path: Path) -> None:
@@ -278,10 +293,24 @@ async def test_the_chunk_count_follows_the_configured_chunk_size(
 ) -> None:
     """Progress granularity is the model's chunking, not a timer."""
     counts: list[int] = []
-    for chunk_samples in (TINY_CHUNK_SAMPLES, TINY_CHUNK_SAMPLES // 2):
+    for chunk_size in (TINY_CHUNK_SAMPLES, TINY_CHUNK_SAMPLES // 2):
         progress = ProgressRecorder()
-        separator = make_separator(weights, tuning={"chunk_samples": chunk_samples})
-        await run(separator, source, tmp_path / f"stems-{chunk_samples}", progress=progress)
+        separator = make_separator(weights, tuning={"chunk_size": chunk_size})
+        await run(separator, source, tmp_path / f"stems-{chunk_size}", progress=progress)
+        counts.append(progress.reports[-1].chunks_total)
+
+    assert counts[1] > counts[0]
+
+
+async def test_the_chunk_count_follows_the_configured_overlap(
+    weights: Path, source: Path, tmp_path: Path
+) -> None:
+    """More overlap is more forward passes over the same audio, and says so."""
+    counts: list[int] = []
+    for overlap in (0.25, 0.75):
+        progress = ProgressRecorder()
+        separator = make_separator(weights, tuning={"overlap": overlap})
+        await run(separator, source, tmp_path / f"stems-{overlap}", progress=progress)
         counts.append(progress.reports[-1].chunks_total)
 
     assert counts[1] > counts[0]
@@ -384,7 +413,7 @@ async def test_cancellation_before_the_first_chunk_writes_nothing(
 async def test_a_failure_removes_every_stem_it_had_already_written(
     weights: Path, source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The first stem is written before the second fails; neither may survive."""
+    """Three stems are written before the fourth fails; none may survive."""
     output = tmp_path / "stems"
     original = separator_module.write_wav
     written = 0
@@ -392,7 +421,7 @@ async def test_a_failure_removes_every_stem_it_had_already_written(
     def exploding_write(path: Path, audio: PcmAudio) -> None:
         nonlocal written
         written += 1
-        if written > 1:
+        if written > 3:
             raise OSError("disk full")
         original(path, audio)
 
@@ -401,7 +430,7 @@ async def test_a_failure_removes_every_stem_it_had_already_written(
     with pytest.raises(OSError, match="disk full"):
         await run(make_separator(weights), source, output)
 
-    assert written == 2, "the second stem must have been attempted"
+    assert written == 4, "the fourth stem must have been attempted"
     assert not output.exists() or not list(output.iterdir())
 
 
@@ -459,35 +488,46 @@ async def test_runtime_stats_track_the_stage_while_a_run_is_in_flight(
 
 async def test_absent_weights_are_a_409_not_a_crash(tmp_path: Path) -> None:
     with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(
+        DemucsSeparator(
             tiny_info(),
-            weights_file=tmp_path / "weights" / "tiny-vocals-001" / "weights.bin",
+            weights_file=tmp_path / "weights" / "tiny-standard-001" / "weights.bin",
             parameters=tiny_parameters(),
         )
     error = excinfo.value
     assert error.code == "model_weights_missing"
     assert error.status_code == 409
-    assert error.detail == {"model_id": "tiny-vocals-001"}
+    assert error.detail == {"model_id": "tiny-standard-001"}
 
 
 async def test_weights_that_do_not_match_the_architecture_are_rejected(tmp_path: Path) -> None:
     """``strict=True``: a partial load would produce plausible-sounding nonsense."""
-    other = write_tiny_weights(tmp_path / "other.bin", num_bands=16)
+    other = write_tiny_weights(tmp_path / "other.bin", channels=16)
     with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(tiny_info(), weights_file=other, parameters=tiny_parameters())
+        DemucsSeparator(tiny_info(), weights_file=other, parameters=tiny_parameters())
     error = excinfo.value
     assert error.code == "model_weights_invalid"
     assert error.status_code == 500
     assert error.detail is not None
-    assert error.detail["model_id"] == "tiny-vocals-001"
+    assert error.detail["model_id"] == "tiny-standard-001"
 
 
 async def test_an_unreadable_weights_file_is_reported_not_raised_raw(tmp_path: Path) -> None:
     corrupt = tmp_path / "corrupt.bin"
     corrupt.write_bytes(b"this is not a checkpoint")
     with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(tiny_info(), weights_file=corrupt, parameters=tiny_parameters())
+        DemucsSeparator(tiny_info(), weights_file=corrupt, parameters=tiny_parameters())
     assert excinfo.value.code == "model_weights_invalid"
+
+
+async def test_a_file_that_is_not_a_demucs_package_is_rejected(tmp_path: Path) -> None:
+    """A bare state dict is a readable pickle, and still not a checkpoint."""
+    bare = tmp_path / "bare.bin"
+    torch.save({"encoder.0.conv.weight": torch.zeros(1)}, bare)
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(tiny_info(), weights_file=bare, parameters=tiny_parameters())
+    assert excinfo.value.code == "model_weights_invalid"
+    assert excinfo.value.detail is not None
+    assert excinfo.value.detail["reason"] == "not_a_demucs_package"
 
 
 async def test_a_mode_it_does_not_serve_is_a_wiring_bug(
@@ -498,7 +538,7 @@ async def test_a_mode_it_does_not_serve_is_a_wiring_bug(
             make_separator(weights),
             source,
             tmp_path / "stems",
-            configuration=make_configuration(mode_id="standard_stems"),
+            configuration=make_configuration(mode_id="vocals"),
         )
     error = excinfo.value
     assert error.code == "separation_mode_mismatch"
@@ -517,7 +557,7 @@ async def test_undecodable_input_is_a_422(weights: Path, tmp_path: Path) -> None
 async def test_a_cuda_device_on_a_cpu_only_host_is_a_clear_409(
     weights: Path, source: Path, tmp_path: Path
 ) -> None:
-    if torch.cuda.is_available():  # pragma: no cover - CI and this host are CPU-only
+    if torch.cuda.is_available():  # pragma: no cover - depends on the host
         pytest.skip("this host has CUDA, so the unavailable path cannot be exercised")
     with pytest.raises(ApplicationError) as excinfo:
         await run(
@@ -545,18 +585,14 @@ async def test_one_separation_at_a_time(weights: Path, source: Path, tmp_path: P
 async def test_a_failed_device_move_does_not_wedge_the_cached_separator(
     weights: Path, source: Path, tmp_path: Path
 ) -> None:
-    """The same defect feature 028's review found in its copy of this method.
+    """A CUDA OOM part-way through ``.to()`` must not poison every later job.
 
-    ``nn.Module.to`` moves parameters one at a time, so a CUDA OOM part-way
-    leaves the network split across devices. Recording the intended device only
-    *after* the move succeeds means the next job — back on the device the network
-    used to be on — takes the "already there" early-out, skips the move, and
-    dies with "Expected all tensors to be on the same device". A separator is
-    cached per model, so that is for the life of the process.
-
-    The one-line fix (forget the device *before* moving) applies identically to
-    both backends and was made in both; see
-    ``docs/features/028-demucs-four-stem.md``.
+    ``nn.Module.to`` moves parameters one at a time, so a failure leaves the
+    network split across devices. Recording the intended device only *after* the
+    move succeeds looks like the safe order and is not: a separator is cached per
+    model for the life of the process, so the next job takes the "already there"
+    early-out, skips the move, and fails forever. Forgetting where the network is
+    *before* moving it is what makes the next run repair it.
     """
     separator = make_separator(weights)
     model: Any = separator._model  # pyright: ignore[reportPrivateUsage]
@@ -571,14 +607,42 @@ async def test_a_failed_device_move_does_not_wedge_the_cached_separator(
 
     model.to = flaky_to
 
+    # A job that resolves elsewhere fails part-way through the move, leaving the
+    # network split. (Called directly so the test needs no CUDA device.)
     with pytest.raises(RuntimeError, match="out of memory"):
         separator._place_on_device(torch.device("cuda:0"))  # pyright: ignore[reportPrivateUsage]
 
-    assert separator._loaded_device is None  # pyright: ignore[reportPrivateUsage]
+    assert separator._loaded_device is None, (  # pyright: ignore[reportPrivateUsage]
+        "after a partial move the separator must not claim to know where the network is"
+    )
 
+    # The next job resolves back to the device the network *used* to be on. It
+    # must still move it -- half of it is somewhere else -- rather than taking
+    # the "already there" early-out and failing on mismatched devices forever.
     result = await run(separator, source, tmp_path / "after")
     assert moves == ["cuda:0", "cpu"], "the repairing move was skipped"
-    assert [stem.name for stem in result.stems] == ["vocals", "instrumental"]
+    assert [stem.name for stem in result.stems] == list(TINY_STEMS)
+
+
+def test_the_decode_rate_and_the_network_rate_must_agree(weights: Path) -> None:
+    """Two catalog fields, two edits apart, that must never diverge.
+
+    ``sample_rate`` is what FFmpeg resamples the source to;
+    ``model.samplerate`` is what the network is built with and what sizes the
+    training window. Change one and the network is fed audio at the wrong rate
+    while its window is sized from the other — degraded output from a data edit,
+    with nothing reporting anything.
+    """
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(
+            tiny_info(sample_rate=TINY_SAMPLE_RATE * 2),
+            weights_file=weights,
+            parameters=tiny_parameters(),
+        )
+    error = excinfo.value
+    assert error.code == "model_parameters_invalid"
+    assert "must agree" in error.message
+    assert str(TINY_SAMPLE_RATE * 2) in error.message
 
 
 def test_it_refuses_a_nonsense_ffmpeg_timeout(weights: Path) -> None:
@@ -587,190 +651,462 @@ def test_it_refuses_a_nonsense_ffmpeg_timeout(weights: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# A checkpoint is data, not code
+# --------------------------------------------------------------------------
+
+
+def test_the_architecture_reference_in_a_checkpoint_is_never_imported(weights: Path) -> None:
+    """A real package pickles ``demucs.htdemucs.HTDemucs``; reading it must not import it.
+
+    The fixture writes exactly that reference (see
+    ``tests/demucs_fixtures.write_tiny_weights``). Reading the file has to
+    resolve it *without* the module existing — which is also the only way this
+    application can read an upstream checkpoint at all, because that module is
+    not installed here.
+    """
+    assert "demucs.htdemucs" not in sys.modules
+
+    package = load_checkpoint_package(weights, model_id="tiny-standard-001")
+
+    assert "demucs.htdemucs" not in sys.modules, "reading a checkpoint imported upstream's module"
+    assert package["klass"] is CheckpointArchitecture
+    assert list(package["kwargs"]["sources"]) == TINY_SOURCES
+
+
+def global_opcode_pickle(module: str, name: str, argument: str = "pwnd") -> bytes:
+    """A pickle that resolves ``module.name`` and **calls** it with one string.
+
+    Hand-assembled, because that is the whole point: a ``GLOBAL`` opcode is a
+    pair of raw strings and is not bound by any object's real ``__module__``.
+    ``pickle.dumps`` cannot produce ``c torch\nload\n`` — it would look up
+    ``torch.load.__module__``, find ``torch.serialization`` and write that — so a
+    reader that allowlists by *module* cannot be tested through it, which is how
+    the hole below survived the first round of tests.
+    """
+    encoded = argument.encode()
+    return (
+        b"\x80\x04"  # PROTO 4
+        + f"c{module}\n{name}\n".encode()  # GLOBAL module name
+        + b"X"
+        + len(encoded).to_bytes(4, "little")
+        + encoded  # BINUNICODE argument
+        + b"\x85"  # TUPLE1
+        + b"R"  # REDUCE  -- i.e. call it
+        + b"."  # STOP
+    )
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        # The one code review found: this resolved, and was *called*. It failed
+        # on its argument, not on the allowlist. ``torch.load`` on the
+        # ``torch>=4`` this project allows defaults to ``weights_only=False``,
+        # so a checkpoint could have had a second file of its choosing fully
+        # unpickled.
+        ("torch", "load"),
+        ("torch", "save"),
+        ("torch.serialization", "load"),
+        ("os", "system"),
+        ("builtins", "eval"),
+        ("builtins", "exec"),
+        ("subprocess", "Popen"),
+    ],
+)
+def test_the_reader_refuses_a_hand_written_global_opcode(module: str, name: str) -> None:
+    """No ``GLOBAL`` opcode may reach a callable, whatever module it claims.
+
+    The refusal has to happen in ``find_class``, before ``REDUCE`` runs — so the
+    assertion is on the exception *type*, not merely that something went wrong.
+    Resolving ``torch.load`` and then failing inside it on a missing file, which
+    is what the module-allowlisting version did, would satisfy a weaker test and
+    is exactly the defect.
+    """
+    with pytest.raises(pickle.UnpicklingError, match="may not reference"):
+        RestrictedUnpickler(io.BytesIO(global_opcode_pickle(module, name))).load()
+
+
+def test_the_allowlist_is_an_enumeration_not_a_namespace() -> None:
+    """The property that makes the test above hold, stated directly.
+
+    ``torch._weights_only_unpickler`` enumerates individual names — every
+    ``_rebuild_*`` helper, every storage and tensor type, the dtype singletons —
+    and no entry point among them. Trusting the ``torch`` *module* instead, which
+    is what the first version did, admits every one of them.
+    """
+    allowed = CHECKPOINT_PICKLE_GLOBALS | torch_pickle_globals()
+    assert len(allowed) > 100, "torch's allowlist was not reached; the fallback is much smaller"
+    assert "torch._utils._rebuild_tensor_v2" in allowed
+    assert "collections.OrderedDict" in allowed
+    assert "_codecs.encode" in allowed
+    for entry_point in ("torch.load", "torch.save", "torch.compile", "torch.hub"):
+        assert entry_point not in allowed
+
+
+def test_a_checkpoint_may_not_name_an_arbitrary_callable(tmp_path: Path) -> None:
+    """Feature 025 verifies a digest; a verified pickle is still a pickle.
+
+    ``torch.load`` over an unrestricted pickle — which is what upstream's own
+    loader does — executes whatever the file names. This one does not, and the
+    refusal surfaces as ``model_weights_invalid`` rather than as anything
+    happening.
+    """
+    for index, callable_ in enumerate((pickle.loads, torch.load)):
+        dangerous = tmp_path / f"dangerous-{index}.bin"
+        payload = tiny_package()
+        payload["klass"] = callable_  # perfectly ordinary, perfectly awful choices
+        torch.save(payload, dangerous)
+
+        with pytest.raises(ApplicationError) as excinfo:
+            load_checkpoint_package(dangerous, model_id="tiny-standard-001")
+        assert excinfo.value.code == "model_weights_invalid"
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["reason"] == "UnpicklingError"
+
+
+def test_half_precision_weights_are_loaded_into_a_float32_network(weights: Path) -> None:
+    """Upstream stores ``float16``; the network runs in ``float32``."""
+    package = load_checkpoint_package(weights, model_id="tiny-standard-001")
+    assert all(tensor.dtype == torch.float16 for tensor in package["state"].values())
+
+    separator = make_separator(weights)
+    module: Any = separator._model  # pyright: ignore[reportPrivateUsage]
+    assert all(parameter.dtype == torch.float32 for parameter in module.parameters())
+    assert not any(parameter.requires_grad for parameter in module.parameters())
+
+
+# --------------------------------------------------------------------------
+# Stems are matched by name, never by position
+# --------------------------------------------------------------------------
+
+
+def test_the_advertised_order_is_not_the_networks_order(weights: Path) -> None:
+    """The premise of every test below: these two lists genuinely differ."""
+    separator = make_separator(weights)
+    assert list(separator.info.stems) != TINY_SOURCES
+    assert sorted(separator.info.stems) == sorted(TINY_SOURCES)
+    # vocals is the network's *last* output and the catalog's *first* stem.
+    assert separator.stem_sources == (3, 0, 1, 2)
+
+
+async def test_a_reordered_stem_list_maps_correctly_rather_than_silently_swapping(
+    weights: Path, tmp_path: Path
+) -> None:
+    """A catalog that lists the stems in another order must not swap the audio.
+
+    The manifest schema imposes no order on ``stems``, and adding a checkpoint
+    is advertised as a pure data edit, so this ordering is a maintainer's free
+    choice. Feature 026 found the positional version of this bug in review; here
+    the orders differ *by default*, so a positional implementation would be
+    wrong on the shipped entry rather than only on a hypothetical one.
+
+    The check is content, not naming: the same audio is separated three times,
+    under three different advertised orders, and each named file must come out
+    byte-identical every time.
+    """
+    source = write_tone_wav(tmp_path / "source.wav", seconds=1.0, channels=2, sample_rate=16000)
+    orders = (
+        ("vocals", "drums", "bass", "other"),
+        ("drums", "bass", "other", "vocals"),
+        ("other", "vocals", "bass", "drums"),
+    )
+    digests: list[dict[str, str]] = []
+    for index, stems in enumerate(orders):
+        output = tmp_path / f"order-{index}"
+        await run(
+            DemucsSeparator(
+                tiny_info(stems=stems), weights_file=weights, parameters=tiny_parameters()
+            ),
+            source,
+            output,
+        )
+        digests.append({name: digest(output / f"{name}.wav") for name in stems})
+
+    assert digests[0] == digests[1] == digests[2]
+    assert len(set(digests[0].values())) == 4, "the four stems must be four different signals"
+
+
+def test_a_stem_the_network_does_not_produce_is_refused(weights: Path) -> None:
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(
+            tiny_info(stems=("vocals", "drums", "bass", "piano")),
+            weights_file=weights,
+            parameters=tiny_parameters(),
+        )
+    error = excinfo.value
+    assert error.code == "model_parameters_invalid"
+    assert "not produced: ['piano']" in error.message
+
+
+def test_a_source_the_catalog_does_not_advertise_is_refused(weights: Path) -> None:
+    """Every network output has to end up in a file somebody asked for."""
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(
+            tiny_info(stems=("vocals", "drums", "bass")),
+            weights_file=weights,
+            parameters=tiny_parameters(),
+        )
+    error = excinfo.value
+    assert error.code == "model_parameters_invalid"
+    assert "not advertised: ['other']" in error.message
+
+
+def test_the_set_check_alone_would_let_a_transposition_through(weights: Path) -> None:
+    """Why :func:`_check_sources` is mandatory, stated as a property of the other guard.
+
+    ``stem_source_indices`` compares the advertised stems and the catalog's
+    ``sources`` as *sets*, so a catalog that transposes two of the network's
+    sources satisfies it — and would then map each stem name onto the wrong
+    output index. Nothing downstream notices: the shapes, the counts and the
+    strict ``load_state_dict`` are all still right.
+    """
+    transposed = tiny_parameters(model={"sources": ["bass", "drums", "other", "vocals"]})
+    indices = stem_source_indices(tiny_info(), transposed)
+
+    # It succeeds, and it is wrong: `vocals` is still index 3, but `drums` now
+    # reads output 1, which the network fills with bass.
+    assert indices == (3, 1, 0, 2)
+    assert indices != (3, 0, 1, 2), "this is the mis-assignment the checkpoint check catches"
+
+    # The separator refuses it, because the checkpoint disagrees.
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(tiny_info(), weights_file=weights, parameters=transposed)
+    assert excinfo.value.code == "model_parameters_invalid"
+
+
+def test_a_checkpoint_that_records_no_sources_is_refused(tmp_path: Path) -> None:
+    """An order that cannot be verified is not an order to trust.
+
+    The original version of ``_check_sources`` returned quietly here, which
+    defeated the whole guard: a checkpoint saved without ``kwargs`` plus a
+    transposed catalog entry would have written the drums into ``bass.wav``,
+    passing every shape assertion and every other test in this file.
+    """
+    unusable: tuple[dict[str, Any] | None, ...] = (
+        None,
+        {},
+        {"sources": "vocals"},
+        {"sources": []},
+    )
+    for index, kwargs in enumerate(unusable):
+        path = tmp_path / f"no-sources-{index}.bin"
+        package = tiny_package()
+        if kwargs is None:
+            del package["kwargs"]
+        else:
+            package["kwargs"] = kwargs
+        torch.save(package, path)
+
+        with pytest.raises(ApplicationError) as excinfo:
+            DemucsSeparator(tiny_info(), weights_file=path, parameters=tiny_parameters())
+        assert excinfo.value.code == "model_weights_invalid", kwargs
+        assert excinfo.value.detail is not None
+        assert excinfo.value.detail["reason"] == "no_recorded_sources"
+
+
+def test_sources_recorded_as_a_numpy_array_are_still_checked(tmp_path: Path) -> None:
+    """A ``numpy.ndarray`` is not a ``Sequence``, and must not read as "absent".
+
+    Testing the recorded value with ``isinstance(..., Sequence)`` — the original
+    version — silently skipped the check for one of the container types a torch
+    checkpoint plausibly carries.
+    """
+    matching = tmp_path / "numpy-sources.bin"
+    package = tiny_package()
+    package["kwargs"] = dict(package["kwargs"], sources=numpy.array(TINY_SOURCES))
+    torch.save(package, matching)
+    # It matches, so it loads — the array was read, not ignored.
+    assert DemucsSeparator(
+        tiny_info(), weights_file=matching, parameters=tiny_parameters()
+    ).stem_sources == (3, 0, 1, 2)
+
+    swapped = tmp_path / "numpy-sources-swapped.bin"
+    package = tiny_package()
+    package["kwargs"] = dict(
+        package["kwargs"], sources=numpy.array(["bass", "drums", "other", "vocals"])
+    )
+    torch.save(package, swapped)
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(tiny_info(), weights_file=swapped, parameters=tiny_parameters())
+    assert excinfo.value.code == "model_parameters_invalid"
+    assert "installed checkpoint was trained to emit" in excinfo.value.message
+
+
+def test_a_catalog_that_transposes_the_networks_sources_is_refused(tmp_path: Path) -> None:
+    """The checkpoint is authoritative about what it emits, and it is consulted.
+
+    This is the edit that would otherwise swap two stems' *audio* while every
+    assertion about names, counts and shapes still passed: the catalog says the
+    network emits ``bass`` before ``drums``, the checkpoint was trained the
+    other way round, and both lists contain the same four names.
+    """
+    weights = write_tiny_weights(tmp_path / "weights.bin")
+    transposed = ["bass", "drums", "other", "vocals"]
+    with pytest.raises(ApplicationError) as excinfo:
+        DemucsSeparator(
+            tiny_info(),
+            weights_file=weights,
+            parameters=tiny_parameters(model={"sources": transposed}),
+        )
+    error = excinfo.value
+    assert error.code == "model_parameters_invalid"
+    assert "installed checkpoint was trained to emit" in error.message
+
+
+# --------------------------------------------------------------------------
 # Catalog parameters
 # --------------------------------------------------------------------------
 
 
 def test_parameters_come_from_the_catalog_block() -> None:
-    parameters = RoFormerParameters.from_catalog(tiny_catalog_block(), model_id="tiny-vocals-001")
-    assert parameters.chunk_samples == TINY_CHUNK_SAMPLES
-    assert parameters.num_overlap == 2
-    assert parameters.num_stems == 1
+    parameters = DemucsParameters.from_catalog(tiny_catalog_block(), model_id="tiny-standard-001")
+    assert parameters.sources == tuple(TINY_SOURCES)
     assert parameters.audio_channels == 2
-    assert parameters.model["num_bands"] == 8
+    assert parameters.sample_rate == TINY_SAMPLE_RATE
+    assert parameters.overlap == 0.25
+    assert parameters.transition_power == 1.0
 
 
-def test_json_arrays_become_the_tuples_the_architecture_demands() -> None:
-    block = tiny_catalog_block(model={"multi_stft_resolutions_window_sizes": [4096, 2048]})
-    parameters = RoFormerParameters.from_catalog(block, model_id="m-001")
-    assert parameters.model["multi_stft_resolutions_window_sizes"] == (4096, 2048)
+def test_a_rational_segment_survives_json() -> None:
+    """``[39, 5]`` reaches the architecture as a rational, not as a float.
 
-
-def test_chunking_defaults_apply_when_the_catalog_omits_them() -> None:
-    parameters = RoFormerParameters.from_catalog(
-        {"model": dict(tiny_catalog_block()["model"])}, model_id="m-001"
+    ``HTDemucs`` computes its training length as ``int(segment * samplerate)``,
+    which is exact for a ``Fraction`` and approximate for a float — and ``int``
+    truncates, so a float segment can come out one sample short of the length
+    the network was trained at. It happens not to for 39/5; it does for its
+    neighbours at the same rate, which is the point.
+    """
+    exact = DemucsParameters.from_catalog(
+        {"model": {"sources": TINY_SOURCES, "samplerate": 44100, "segment": [39, 5]}},
+        model_id="m",
     )
-    assert parameters.chunk_samples == 352800
-    assert parameters.num_overlap == 2
-    assert parameters.residual_stem is None
+    assert exact.model["segment"] == Fraction(39, 5)
+    assert exact.training_samples == 343980
+
+    # A plain number is still accepted, for a checkpoint whose segment is one.
+    plain = DemucsParameters.from_catalog(
+        {"model": {"sources": TINY_SOURCES, "samplerate": 44100, "segment": 10}},
+        model_id="m",
+    )
+    assert plain.training_samples == 441000
+
+
+@pytest.mark.parametrize(("numerator", "denominator"), [(7, 5), (41, 5), (46, 5)])
+def test_the_float_spelling_of_a_segment_really_can_lose_a_sample(
+    numerator: int, denominator: int
+) -> None:
+    """Evidence for the rule above, rather than an assertion that it is prudent.
+
+    Each of these is a fifths-of-a-second segment at 44.1 kHz — the same family
+    ``htdemucs``'s own 39/5 belongs to — where the exact product is an integer
+    and the float product falls just below it.
+    """
+    rational = DemucsParameters.from_catalog(
+        {
+            "model": {
+                "sources": TINY_SOURCES,
+                "samplerate": 44100,
+                "segment": [numerator, denominator],
+            }
+        },
+        model_id="m",
+    )
+    floating = DemucsParameters.from_catalog(
+        {
+            "model": {
+                "sources": TINY_SOURCES,
+                "samplerate": 44100,
+                "segment": numerator / denominator,
+            }
+        },
+        model_id="m",
+    )
+    assert rational.training_samples == floating.training_samples + 1
+
+
+def test_the_window_defaults_to_the_training_segment() -> None:
+    parameters = DemucsParameters.from_catalog(tiny_catalog_block(), model_id="m")
+    assert parameters.chunk_samples is None
+    assert parameters.window_samples == parameters.training_samples == TINY_CHUNK_SAMPLES
+    assert parameters.stride_samples == 3000
 
 
 @pytest.mark.parametrize(
     ("block", "fragment"),
     [
-        (None, "no default_inference_parameters"),
-        ({}, "no default_inference_parameters"),
-        ({"inference": {}}, "must be an object"),
+        (None, "no default_inference_parameters block"),
+        ({}, "no default_inference_parameters block"),
         ({"model": []}, "must be an object"),
-        ({"model": {"n_fft": 2048}}, "unknown architecture parameters: n_fft"),
-        ({"model": {}, "inference": {"chunk_size": 0}}, "positive integer"),
-        ({"model": {}, "inference": {"num_overlap": "two"}}, "positive integer"),
-        ({"model": {}, "output": {"residual_stem": 7}}, "must be a stem name"),
+        ({"model": {"sources": TINY_SOURCES, "nfft": 64, "nftt": 64}}, "unknown architecture"),
+        ({"model": {}}, "sources must be a list"),
+        ({"model": {"sources": "vocals"}}, "sources must be a list"),
+        ({"model": {"sources": ["a", "a"]}}, "duplicate name"),
+        ({"model": {"sources": ["a"]}, "inference": {"chunk_size": 0}}, "positive integer"),
+        ({"model": {"sources": ["a"]}, "inference": {"overlap": 1.0}}, "overlap must be"),
+        ({"model": {"sources": ["a"]}, "inference": {"overlap": -0.1}}, "overlap must be"),
+        (
+            {"model": {"sources": ["a"]}, "inference": {"transition_power": 0.5}},
+            "transition_power must be",
+        ),
+        ({"model": {"sources": ["a"], "segment": "long"}}, "segment must be a number"),
+        ({"model": {"sources": ["a"], "segment": [1, 0]}}, "segment must be a number"),
     ],
 )
 def test_an_unusable_catalog_entry_fails_loudly(block: Any, fragment: str) -> None:
     with pytest.raises(ApplicationError) as excinfo:
-        RoFormerParameters.from_catalog(block, model_id="m-001")
+        DemucsParameters.from_catalog(block, model_id="broken-001")
     error = excinfo.value
     assert error.code == "model_parameters_invalid"
     assert error.status_code == 500
     assert fragment in error.message
 
 
-def test_a_stem_list_the_network_cannot_produce_is_refused(weights: Path) -> None:
-    """Two advertised stems from a one-stem network is fine; four is not."""
+def test_a_window_longer_than_the_training_segment_is_refused() -> None:
+    """``use_train_segment`` means longer windows run off the training distribution."""
     with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(
-            tiny_info(stems=("vocals", "drums", "bass", "other"), separation_mode="standard_stems"),
-            weights_file=weights,
-            parameters=tiny_parameters(),
+        DemucsParameters.from_catalog(
+            tiny_catalog_block(chunk_size=TINY_CHUNK_SAMPLES * 2), model_id="m"
         )
-    assert excinfo.value.code == "model_parameters_invalid"
-    assert "produces 1" in excinfo.value.message
+    assert "longer than" in excinfo.value.message
 
 
-# --------------------------------------------------------------------------
-# The residual stem is named by the catalog, never inferred from position
-# --------------------------------------------------------------------------
+def test_the_repository_catalog_entry_is_runnable_as_written() -> None:
+    """The shipped entry must satisfy every rule this module enforces.
 
-
-async def test_a_reordered_stem_list_maps_correctly_rather_than_silently_swapping(
-    weights: Path, tmp_path: Path
-) -> None:
-    """``["instrumental", "vocals"]`` must not put the network's vocals in
-    ``instrumental.wav``.
-
-    The manifest schema imposes no order on ``stems``, and adding a checkpoint is
-    advertised as a pure data edit, so this ordering is a maintainer's free
-    choice. Before the residual was named, the residual was assumed to be the
-    *last* stem and this entry produced two files with each other's audio and no
-    error anywhere.
-
-    The check is content, not naming: the same audio is separated twice, once
-    with each stem order, and the file called ``vocals.wav`` must come out
-    byte-identical both times.
+    It cannot be *run* without the weights, but everything decided before the
+    tensors are read — the hyperparameters, the source list, the window and the
+    stem mapping — is checkable in normal CI, and is exactly what a hand edit to
+    ``models/catalog.json`` would get wrong.
     """
-    source = write_tone_wav(tmp_path / "source.wav", seconds=1.0, channels=2, sample_rate=16000)
-
-    forward = tmp_path / "forward"
-    await run(
-        RoFormerSeparator(
-            tiny_info(stems=("vocals", "instrumental")),
-            weights_file=weights,
-            parameters=tiny_parameters(residual_stem="instrumental"),
-        ),
-        source,
-        forward,
-    )
-
-    reversed_order = tmp_path / "reversed"
-    await run(
-        RoFormerSeparator(
-            tiny_info(stems=("instrumental", "vocals")),
-            weights_file=weights,
-            parameters=tiny_parameters(residual_stem="instrumental"),
-        ),
-        source,
-        reversed_order,
-    )
-
-    assert digest(forward / "vocals.wav") == digest(reversed_order / "vocals.wav")
-    assert digest(forward / "instrumental.wav") == digest(reversed_order / "instrumental.wav")
-    assert digest(forward / "vocals.wav") != digest(forward / "instrumental.wav")
-
-
-def test_a_residual_that_is_needed_but_not_named_is_refused(weights: Path) -> None:
-    with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(
-            tiny_info(),
-            weights_file=weights,
-            parameters=tiny_parameters(residual_stem=None),
-        )
-    error = excinfo.value
-    assert error.code == "model_parameters_invalid"
-    assert "output.residual_stem must name" in error.message
-    assert "vocals, instrumental" in error.message
-
-
-def test_a_residual_the_model_does_not_advertise_is_refused(weights: Path) -> None:
-    with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(
-            tiny_info(),
-            weights_file=weights,
-            parameters=tiny_parameters(residual_stem="drums"),
-        )
-    assert excinfo.value.code == "model_parameters_invalid"
-    assert "does not" in excinfo.value.message
-
-
-def test_a_residual_named_for_a_network_that_needs_none_is_refused(tmp_path: Path) -> None:
-    """Naming one when the network emits every stem is a contradiction, not a hint."""
-    weights = write_tiny_weights(tmp_path / "two-stem.bin", num_stems=2)
-    with pytest.raises(ApplicationError) as excinfo:
-        RoFormerSeparator(
-            tiny_info(),
-            weights_file=weights,
-            parameters=tiny_parameters(model={"num_stems": 2}, residual_stem="instrumental"),
-        )
-    assert excinfo.value.code == "model_parameters_invalid"
-    assert "none is a residual" in excinfo.value.message
-
-
-def test_the_repository_catalog_names_its_residual_stem() -> None:
-    """The shipped entry must satisfy the rule the code enforces."""
     from straticate.config import Settings
     from straticate.models import ModelCatalog
 
     catalog = ModelCatalog.from_directory(Settings().models_dir)
-    parameters = RoFormerParameters.from_catalog(
-        catalog.inference_parameters("vocals-hq-001"), model_id="vocals-hq-001"
+    model = catalog.get_model(MODEL_ID)
+    parameters = DemucsParameters.from_catalog(
+        catalog.inference_parameters(MODEL_ID), model_id=MODEL_ID
     )
-    model = catalog.get_model("vocals-hq-001")
-    assert parameters.residual_stem == "instrumental"
-    assert parameters.residual_stem in model.stems
-    assert parameters.num_stems == len(model.stems) - 1
 
+    assert model.architecture == DEMUCS_ARCHITECTURE
+    assert parameters.sources == ("drums", "bass", "other", "vocals")
+    assert sorted(parameters.sources) == sorted(model.stems)
+    assert parameters.sample_rate == model.sample_rate == 44100
+    # The pinned window is the training segment exactly, to the sample.
+    assert parameters.training_samples == 343980
+    assert parameters.window_samples == 343980
+    assert parameters.stride_samples == 257985
 
-async def test_a_network_that_emits_every_stem_needs_no_residual(tmp_path: Path) -> None:
-    """``num_stems == len(stems)`` maps one-to-one, with nothing subtracted."""
-    weights = write_tiny_weights(tmp_path / "two-stem.bin", num_stems=2)
-    separator = RoFormerSeparator(
-        tiny_info(),
-        weights_file=weights,
-        parameters=tiny_parameters(model={"num_stems": 2}, residual_stem=None),
-    )
-    source = write_tone_wav(tmp_path / "source.wav", seconds=1.0, channels=2, sample_rate=16000)
-    output = tmp_path / "stems"
-    result = await run(separator, source, output)
-    assert [stem.name for stem in result.stems] == ["vocals", "instrumental"]
-    assert digest(output / "vocals.wav") != digest(output / "instrumental.wav")
+    from straticate.inference.registry import separator_info_from_model
+
+    indices = stem_source_indices(separator_info_from_model(model), parameters)
+    assert indices == (3, 0, 1, 2)
 
 
 def test_the_separator_exposes_what_it_was_configured_with(weights: Path) -> None:
     separator = make_separator(weights, ffmpeg_timeout_seconds=12.5)
     assert separator.ffmpeg_timeout_seconds == 12.5
-    assert separator.parameters.chunk_samples == TINY_CHUNK_SAMPLES
-    assert separator.info.architecture == "mel_band_roformer"
+    assert separator.parameters.window_samples == TINY_CHUNK_SAMPLES
+    assert separator.info.architecture == "htdemucs"
 
 
 def test_planar_conversion_round_trips_through_the_pcm_module() -> None:
@@ -790,11 +1126,6 @@ def test_planar_conversion_round_trips_through_the_pcm_module() -> None:
 # --------------------------------------------------------------------------
 # The CUDA telemetry path, exercised on a CPU-only host through one seam
 # --------------------------------------------------------------------------
-#
-# Everything below replaces ``separator_module.cuda_namespace`` with a double.
-# It is the only way this code gets covered before it meets real hardware, and
-# feature 026 shipped it explicitly unrun — so the parts that are checkable
-# without a GPU are checked here rather than left to a reviewer's reading.
 
 
 class FakeProperties:

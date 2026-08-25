@@ -43,6 +43,7 @@ from fastapi import FastAPI
 from straticate.config import Settings
 from straticate.errors import ApplicationError
 from straticate.inference import (
+    DEMUCS_ARCHITECTURE,
     ROFORMER_ARCHITECTURE,
     SeparatorRegistry,
     default_separator_builders,
@@ -71,7 +72,20 @@ LAZY_EXPORTS: dict[str, tuple[str, ...]] = {
         "RoFormerParameters",
         "RoFormerSeparator",
     ),
-    "straticate.inference": ("RoFormerParameters", "RoFormerSeparator"),
+    "straticate.inference.demucs": (
+        "DEFAULT_OVERLAP",
+        "DEFAULT_TRANSITION_POWER",
+        "DemucsParameters",
+        "DemucsSeparator",
+        "NvmlProbe",
+        "load_checkpoint_package",
+    ),
+    "straticate.inference": (
+        "RoFormerParameters",
+        "RoFormerSeparator",
+        "DemucsParameters",
+        "DemucsSeparator",
+    ),
 }
 """What each package resolves lazily, and therefore memoises in its globals.
 
@@ -83,15 +97,21 @@ walks these lists and requires every one of them to raise.
 """
 
 BACKEND_MODULE = "straticate.inference.roformer.separator"
-"""The one Straticate module that imports torch at module scope."""
+"""The RoFormer implementation module — one of the two that import torch."""
 
-EVICTED_PREFIXES = ("torch", BACKEND_MODULE)
+DEMUCS_BACKEND_MODULE = "straticate.inference.demucs.separator"
+"""The Hybrid Transformer Demucs implementation module (feature 028)."""
+
+BACKEND_MODULES = (BACKEND_MODULE, DEMUCS_BACKEND_MODULE)
+"""Every Straticate module that imports torch at module scope."""
+
+EVICTED_PREFIXES = ("torch", *BACKEND_MODULES)
 """Modules that must be re-imported (and so re-blocked) inside the window.
 
-``torch`` itself, and the one Straticate module that imports it at module
-scope. ``roformer/vendor`` is reached only through that module, and
-``roformer/architecture.py`` is deliberately *not* here: it holds the
-architecture name, imports nothing, and is what lets the registry key its
+``torch`` itself, and the Straticate modules that import it at module scope.
+Each backend's ``vendor/`` package is reached only through its implementation
+module, and each ``architecture.py`` is deliberately *not* here: those hold the
+architecture names, import nothing, and are what let the registry key its
 builder map without torch.
 """
 
@@ -223,17 +243,26 @@ PYRIGHT_PROBE = """from straticate.inference import SeparatorInfo
 from straticate.inference import SeparaterInfo
 from straticate.inference.roformer import RoFormerSeparator
 from straticate.inference.roformer import RoFormerSeperator
+from straticate.inference.demucs import DemucsSeparator
+from straticate.inference.demucs import DemuxSeparator
 
-_ = (SeparatorInfo, SeparaterInfo, RoFormerSeparator, RoFormerSeperator)
+_ = (
+    SeparatorInfo,
+    SeparaterInfo,
+    RoFormerSeparator,
+    RoFormerSeperator,
+    DemucsSeparator,
+    DemuxSeparator,
+)
 """
-"""Two real exports and two misspellings of them, one per lazy package.
+"""One real export and one misspelling of it, per lazy package.
 
 A module-level ``__getattr__`` that pyright can see makes *every* attribute of
-its package resolve, so all four of these type-check and the misspellings ship.
+its package resolve, so all six of these type-check and the misspellings ship.
 """
 
-REAL_NAMES = ("SeparatorInfo", "RoFormerSeparator")
-TYPO_NAMES = ("SeparaterInfo", "RoFormerSeperator")
+REAL_NAMES = ("SeparatorInfo", "RoFormerSeparator", "DemucsSeparator")
+TYPO_NAMES = ("SeparaterInfo", "RoFormerSeperator", "DemuxSeparator")
 
 
 def pyright_executable() -> str | None:
@@ -338,12 +367,22 @@ def test_the_roformer_package_names_its_architecture_without_torch() -> None:
     assert result.returncode == 0, result.stderr or "the roformer package imported torch"
 
 
+def test_the_demucs_package_names_its_architecture_without_torch() -> None:
+    """Same property for feature 028's backend, and for the same reason."""
+    result = run_python(
+        "import sys; from straticate.inference.demucs import DEMUCS_ARCHITECTURE; "
+        "assert DEMUCS_ARCHITECTURE == 'htdemucs'; "
+        "sys.exit(1 if 'torch' in sys.modules else 0)"
+    )
+    assert result.returncode == 0, result.stderr or "the demucs package imported torch"
+
+
 def test_building_the_default_registry_imports_no_backend() -> None:
     """Registering a builder must not resolve it (that is what made torch mandatory)."""
     result = run_python(
         "import sys; from straticate.inference import SeparatorRegistry; "
         "registry = SeparatorRegistry(); "
-        "assert registry.architectures == frozenset({'fake', 'mel_band_roformer'}); "
+        "assert registry.architectures == frozenset({'fake', 'mel_band_roformer', 'htdemucs'}); "
         "sys.exit(1 if 'torch' in sys.modules else 0)"
     )
     assert result.returncode == 0, result.stderr or "building the registry imported torch"
@@ -625,7 +664,9 @@ def test_create_app_succeeds_without_torch(tmp_path: Path) -> None:
         app = build_app(tmp_path)
 
     assert isinstance(app.state.separator_registry, SeparatorRegistry)
-    assert app.state.separator_registry.architectures == frozenset({"fake", ROFORMER_ARCHITECTURE})
+    assert app.state.separator_registry.architectures == frozenset(
+        {"fake", ROFORMER_ARCHITECTURE, DEMUCS_ARCHITECTURE}
+    )
     assert isinstance(app.state.model_catalog, ModelCatalog)
 
 

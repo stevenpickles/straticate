@@ -109,13 +109,16 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 
 ### Next
 
-- **027** (MDX fast tier) — the CPU story: RoFormer is 3.5–5× slower than real
-  time, so a fast tier is a product requirement, not a nicety.
-- **028** (4-stem model + capability-driven modes). **Note:** `standard_stems`
-  already has `fast` claimed by the hidden development fixture; declare
-  `balanced` or `high_quality`, or omit the field. **027** has it worse —
-  `vocals` has no free tier left, so `fake-vocals-001` must be retiered or
-  dropped in that PR. See `docs/features/032-hide-development-models.md`.
+- **027** (MDX fast tier) — the CPU story, now narrowed to the `vocals` mode:
+  RoFormer is 3.5–5× slower than real time on CPU, while 028's four-stem model
+  measures **1.6× faster** than real time on the same host, so `standard_stems`
+  already has a usable CPU story and `vocals` does not.
+- **028** (4-stem separation) is **in review** — `standard_stems` has a real
+  model again, `standard-stems-001` (Hybrid Transformer Demucs), claiming
+  `balanced` and leaving `high_quality` free for a bagged checkpoint later.
+  **027** still has the tier problem this note was about: `vocals` has no free
+  tier left, so `fake-vocals-001` must be retiered or dropped in that PR. See
+  `docs/features/032-hide-development-models.md`.
 - **030** (Playwright E2E tier) — overdue since M1; it would have caught two
   M1 defects that unit tests did not.
 - Whether `quality_options` should hide tiers whose weights are not installed
@@ -131,11 +134,13 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
   "Downloading its weights…" / "Its last install failed"), from `GET /models`,
   so a mode with several uninstalled tiers no longer has to be clicked through.
   Reasoning in `docs/features/037-model-management-ui.md`.
-- **032 hides the development fixtures** from the user-facing catalog. A default
-  server therefore offers one separation mode (`vocals`) with one tier
-  (`high_quality`, `vocals-hq-001`) and requires an 870 MiB weights install
-  before it can separate anything; `standard_stems` is absent until 028 lands a
-  real four-stem model. `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` restores the
+- **032 hides the development fixtures** from the user-facing catalog. Between
+  032 and 028 a default server therefore offered a single separation mode
+  (`vocals`, tier `high_quality`, `vocals-hq-001`) and `standard_stems` was
+  absent entirely, having only a fixture behind it. Since 028 both modes are
+  served — `standard_stems` at `balanced` via `standard-stems-001` — and a fresh
+  checkout still requires a weights install (870 MiB or 80 MiB) before it can
+  separate anything. `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` restores the
   previous behaviour and is what CI, the backend suite and 030's Playwright tier
   set. A first-run install affordance is another thing waiting on the unclaimed
   model-management UI.
@@ -171,7 +176,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 025 | Model download manager (SHA-256, atomic)     | MERGED  | 010        | `025-model-download-manager` | #30 |
 | 026 | Real separator: HQ vocals (Mel-Band RoFormer)| MERGED  | 014, 018, 025 | `026-roformer-separator` | #33 |
 | 027 | Real separator: fast vocals (MDX-family)     | BLOCKED | 026        | | licence — see docs/features/027 |
-| 028 | 4-stem model + capability-driven modes       | PLANNED | 026        | | |
+| 028 | 4-stem separation (Hybrid Transformer Demucs)| PR OPEN | 026        | `028-demucs-four-stem` | #45 |
 | 029 | Skeleton hardening (deferred review finds)  | MERGED  | 004, 005   | `029-skeleton-hardening` | #29 |
 | 030 | Playwright E2E tier (fake separator)         | MERGED  | 024        | `030-playwright-e2e` | #35 |
 | 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |

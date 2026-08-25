@@ -163,12 +163,15 @@ catalog contains and `model_not_found` says precisely that; a distinct "hidden"
 code would be a second condition every client must handle and would advertise an
 entry the server chose not to serve.
 
-Today this means `standard_stems` is **not** a separation mode under default
-settings — its only model is a fixture, and there is no real four-stem model
-until feature 028. It disappears rather than being served with an empty
-`quality_options` list, because an empty mode is a choice the frontend would
-render and nobody could act on. No mode is ever served with an empty
-`quality_options`.
+Between features 032 and 028 this meant `standard_stems` was **not** a
+separation mode under default settings at all: its only model was a fixture, so
+the mode disappeared rather than being served with an empty `quality_options`
+list. Feature 028 gave it a real model (`standard-stems-001`), so a default
+server serves both modes again, each with the tiers its real models back —
+`vocals` with `high_quality` and `standard_stems` with `balanced`. The rule is
+unchanged and is the part that matters: **no mode is ever served with an empty
+`quality_options` list**, because an empty mode is a choice the frontend would
+render and nobody could act on.
 
 `development_only` appears on `Model` (never on `QualityOption`), so a client
 that has deliberately opted in can label what it is showing. On a default server
