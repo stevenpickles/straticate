@@ -52,7 +52,10 @@ Stages, all of them real work this separator actually performs:
 advancing by ``chunk_samples // num_overlap``, each faded in and out and summed
 into an accumulator that is finally divided by the accumulated window weight —
 the standard overlap-add demix used by upstream's ``demix_track``, with the same
-chunk size, overlap, fade shape and reflect-padded borders. Every window is one
+chunk size, overlap, fade shape and reflect-padded borders. Since feature 038
+that accumulator is on the **host** and only the window in flight is on the
+compute device, so peak VRAM is a function of ``chunk_size`` rather than of the
+length of the track. Every window is one
 forward pass through a 228-million-parameter network, so
 ``chunks_completed / chunks_total`` is a report of work genuinely done
 (AGENTS.md principle 3) and the gap between two windows is the natural place to
@@ -92,6 +95,7 @@ from straticate.inference.pcm import PcmAudio
 from straticate.inference.roformer.architecture import ROFORMER_ARCHITECTURE
 from straticate.inference.roformer.vendor import MelBandRoformer
 from straticate.inference.torch_audio import pcm_to_tensor, tensor_to_pcm, to_source_channels
+from straticate.inference.torch_overlap_add import HostOverlapAdd
 from straticate.inference.torch_separator import RunState, TorchSeparator
 from straticate.jobs.cancellation import CancellationToken
 
@@ -313,15 +317,31 @@ class RoFormerSeparator(TorchSeparator):
         cancellation_token: CancellationToken,
         device: torch.device,
     ) -> Tensor:
-        """The chunked overlap-add loop. Runs in a worker thread.
+        """The chunked overlap-add loop, streamed. Runs in a worker thread.
 
         Returns the per-network-stem estimates as a ``(num_stems, channels,
         samples)`` float tensor on the CPU, in the model's channel layout.
 
+        **Nothing whole-track is on the compute device** (feature 038). The
+        decoded mixture stays on the host and one window at a time is copied
+        across; the estimate comes straight back, and the sum and the weight it
+        is divided by live in a
+        :class:`~straticate.inference.torch_overlap_add.HostOverlapAdd`. Before
+        038 all three were device-resident for the length of the run, so peak
+        VRAM grew at ≈1.35 MiB per second of audio (feature 036 measured it) and
+        a 4 GiB card exhausted at roughly nine minutes. Now the only audio on the
+        device is ``chunk_samples`` wide, whatever the track is.
+
+        Two things are deliberately left on the device. The envelope is built
+        there and multiplied into the estimate there, so the values crossing to
+        the host are the values the previous implementation accumulated. And
+        this loop has no whole-track *reduction* — unlike Demucs' — so there is
+        nothing here that would change bits by moving; see
+        :mod:`straticate.inference.torch_overlap_add`.
+
         See
         :meth:`straticate.inference.torch_separator.TorchSeparator._run_chunks`
-        for the contract this keeps — and note that it is the method feature 038
-        will work inside.
+        for the contract this keeps.
         """
         parameters = self._parameters
         chunk = parameters.chunk_samples
@@ -329,7 +349,7 @@ class RoFormerSeparator(TorchSeparator):
         fade = max(chunk // FADE_FRACTION, 1)
         border = chunk - step
 
-        mixture = pcm_to_tensor(source, parameters.audio_channels).to(device)
+        mixture = pcm_to_tensor(source, parameters.audio_channels)
         frames = mixture.shape[-1]
         padded = mixture
         if border > 0 and frames > 2 * border:
@@ -346,9 +366,7 @@ class RoFormerSeparator(TorchSeparator):
 
         window = _fade_window(chunk, fade, device)
         stem_count = parameters.num_stems
-        shape = (stem_count, padded.shape[0], total)
-        accumulator = torch.zeros(shape, dtype=torch.float32, device=device)
-        weights = torch.zeros(shape, dtype=torch.float32, device=device)
+        accumulator = HostOverlapAdd((stem_count, padded.shape[0], total), total)
 
         offset = 0
         index = 0
@@ -360,7 +378,7 @@ class RoFormerSeparator(TorchSeparator):
             if length < chunk:
                 part = _pad_tail(part, chunk, length)
 
-            estimate = self._forward(part, device)
+            estimate = self._forward(part.to(device), device)
 
             chunk_window = window.clone()
             if offset == 0:
@@ -368,8 +386,7 @@ class RoFormerSeparator(TorchSeparator):
             if offset + chunk >= total:
                 chunk_window[-fade:] = 1.0
             scaled = chunk_window[:length]
-            accumulator[..., offset : offset + length] += estimate[..., :length] * scaled
-            weights[..., offset : offset + length] += scaled
+            accumulator.add(offset, estimate[..., :length] * scaled, scaled)
 
             offset += step
             index += 1
@@ -383,7 +400,7 @@ class RoFormerSeparator(TorchSeparator):
             run.audio_processed_seconds = min(max(covered, 0), frames) / source.sample_rate
             self._report(progress_callback, run)
 
-        estimates = torch.nan_to_num(accumulator / weights.clamp(min=1e-8), nan=0.0)
+        estimates = torch.nan_to_num(accumulator.resolve(minimum_weight=1e-8), nan=0.0)
         if border > 0:
             estimates = estimates[..., border : border + frames]
         return estimates.detach().to("cpu", dtype=torch.float32)
