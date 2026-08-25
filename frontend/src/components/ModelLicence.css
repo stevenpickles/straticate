@@ -1,0 +1,115 @@
+/* Feature 037: what a model's `licensing` block says, wherever it is shown. */
+
+.model-licence {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  background-color: rgb(0 0 0 / 18%);
+  text-align: left;
+  font-size: 0.85rem;
+}
+
+.model-licence-compact {
+  padding: 0.7rem 0.85rem;
+  gap: 0.45rem;
+}
+
+.model-licence-builtin {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.model-licence-badge {
+  align-self: flex-start;
+  margin: 0;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.model-licence-declared {
+  color: var(--color-text-muted);
+}
+
+.model-licence-attention {
+  color: var(--color-accent);
+}
+
+.model-licence-unknown,
+.model-licence-restricted {
+  color: var(--color-danger);
+}
+
+.model-licence-terms {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem 1rem;
+  margin: 0;
+}
+
+.model-licence-term {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.model-licence-label {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.model-licence-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.model-licence-aside {
+  color: var(--color-text-muted);
+}
+
+.model-licence-unstated {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.model-licence-refused {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.model-licence-attribution {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.model-licence-credit {
+  margin: 0;
+  padding-left: 0.6rem;
+  border-left: 2px solid var(--color-accent);
+  overflow-wrap: anywhere;
+}
+
+.model-licence-notice {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.35rem;
+  background-color: rgb(0 0 0 / 25%);
+  color: var(--color-text-muted);
+}
+
+.model-licence-notice-unknown,
+.model-licence-notice-restricted {
+  color: var(--color-danger);
+}

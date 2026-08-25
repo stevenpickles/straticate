@@ -20,6 +20,7 @@ vi.mock('../api/modes', () => ({
 // …and reads the selected tier's model to see whether its weights need
 // installing (feature 035). A model that needs no download renders nothing.
 vi.mock('../api/models', () => ({
+  listModels: vi.fn(() => Promise.resolve([sampleBuiltInModel])),
   getModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
   installModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
   removeModelWeights: vi.fn(() => Promise.resolve(sampleBuiltInModel)),

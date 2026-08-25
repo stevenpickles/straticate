@@ -1,7 +1,10 @@
+import { useRef, useState } from 'react'
 import { AppStateProvider } from './state/appState'
 import { JobStateProvider } from './state/jobState'
+import { ModelRevisionProvider } from './state/modelRevision'
 import { SessionGate } from './state/SessionGate'
 import { Header } from './components/Header'
+import { ModelLibrary } from './components/ModelLibrary'
 import { Workspace } from './components/Workspace'
 import { JobEventBridge } from './ws/JobEventBridge'
 
@@ -19,18 +22,72 @@ import { JobEventBridge } from './ws/JobEventBridge'
  * until it has, so a reload lands on the phase the user left rather than
  * flashing file selection on the way there. With nothing stored it settles
  * on its first render and the app starts exactly as it always did.
+ *
+ * {@link ModelLibrary} (feature 037) is the one thing here that is *not* a
+ * workflow phase — managing model weights is not a step of separating a file —
+ * so it is a view beside the workspace rather than inside it. Opening it
+ * **hides the workspace without unmounting it**: the stem player's Web Audio
+ * graph, a running job's progress and the uploaded file all survive a trip to
+ * the library and back, which they would not if the workspace were swapped
+ * out. Whether the library is open is deliberately local state and not part of
+ * {@link AppStateProvider}: it is not a phase, it is not persisted across a
+ * reload, and nothing in the workflow may branch on it.
+ *
+ * That "hidden, not unmounted" choice has one consequence this component owns:
+ * the workflow does not re-read anything on the way back, so a model installed
+ * or removed from a library card would leave the configure step describing the
+ * world as it was. Closing the library therefore bumps
+ * {@link ModelRevisionProvider}'s counter, which is the signal for a view to
+ * re-read model state **once** — a known event, not a timer.
  */
 export default function App() {
+  const [libraryOpen, setLibraryOpen] = useState(false)
+  const [modelRevision, setModelRevision] = useState(0)
+  const libraryToggleRef = useRef<HTMLButtonElement>(null)
+
+  const closeLibrary = () => {
+    setLibraryOpen(false)
+    // Models may have been installed or removed while it was open.
+    setModelRevision((revision) => revision + 1)
+  }
+
   return (
     <AppStateProvider>
       <JobStateProvider>
-        <JobEventBridge />
-        <div className="app">
-          <Header />
-          <SessionGate>
-            <Workspace />
-          </SessionGate>
-        </div>
+        <ModelRevisionProvider revision={modelRevision}>
+          <JobEventBridge />
+          <div className="app">
+            <Header
+              ref={libraryToggleRef}
+              libraryOpen={libraryOpen}
+              onToggleLibrary={() => {
+                if (libraryOpen) {
+                  closeLibrary()
+                } else {
+                  setLibraryOpen(true)
+                }
+              }}
+            />
+            <div className="app-workflow" hidden={libraryOpen}>
+              <SessionGate>
+                <Workspace />
+              </SessionGate>
+            </div>
+            {libraryOpen && (
+              <ModelLibrary
+                onClose={() => {
+                  // Focus first, while the button that asked to close is still
+                  // mounted: a keyboard user who pressed "Back to workflow"
+                  // has conceptually returned to the control they came in
+                  // through, and dropping focus on `<body>` would restart
+                  // their next Tab at the top of the document.
+                  libraryToggleRef.current?.focus()
+                  closeLibrary()
+                }}
+              />
+            )}
+          </div>
+        </ModelRevisionProvider>
       </JobStateProvider>
     </AppStateProvider>
   )

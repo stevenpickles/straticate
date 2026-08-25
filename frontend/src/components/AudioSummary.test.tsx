@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { Workspace } from './Workspace'
 import {
@@ -30,6 +30,7 @@ vi.mock('../api/modes', () => ({
 // …and reads the selected tier's model to see whether its weights need
 // installing (feature 035). A model that needs no download renders nothing.
 vi.mock('../api/models', () => ({
+  listModels: vi.fn(() => Promise.resolve([sampleBuiltInModel])),
   getModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
   installModel: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
   removeModelWeights: vi.fn(() => Promise.resolve(sampleBuiltInModel)),
@@ -37,20 +38,39 @@ vi.mock('../api/models', () => ({
 
 const deleteAudioMock = vi.mocked(deleteAudio)
 
-/** Render the workspace already in the configure phase with `file` uploaded. */
-function renderConfigured(file: AudioFile = sampleAudioFile) {
+/**
+ * Render the workspace already in the configure phase with `file` uploaded,
+ * and let the configure step settle.
+ *
+ * The configure phase mounts `SeparationOptions` alongside the summary, which
+ * reads the separation modes, the model catalog and the selected tier's model.
+ * All three are mocked here and resolve on the microtask queue — after a
+ * synchronous test body has returned but before its teardown runs, which is
+ * exactly the gap in which a state update is not wrapped in `act`. Settling
+ * them inside `act` at render time keeps this suite warning-free rather than
+ * merely green; nothing here waits for a duration.
+ */
+async function renderConfigured(file: AudioFile = sampleAudioFile) {
   const initialState: AppState = {
     phase: 'configure',
     upload: { status: 'uploaded', file },
     configure: initialConfigureState,
   }
-  return render(
+  const view = render(
     <AppStateProvider initialState={initialState}>
       <JobStateProvider>
         <Workspace />
       </JobStateProvider>
     </AppStateProvider>,
   )
+  await act(async () => {
+    // A read is `fetch` → `response.json()` → `setState`: several microtask
+    // hops, none of them a duration.
+    for (let hop = 0; hop < 5; hop += 1) {
+      await Promise.resolve()
+    }
+  })
+  return view
 }
 
 /** The `<dd>` value rendered for a metadata label, or `null` when absent. */
@@ -69,15 +89,15 @@ afterEach(() => {
 })
 
 describe('AudioSummary', () => {
-  it('shows the filename prominently', () => {
-    renderConfigured()
+  it('shows the filename prominently', async () => {
+    await renderConfigured()
     expect(
       screen.getByRole('heading', { name: 'Midnight Train.flac' }),
     ).toBeInTheDocument()
   })
 
-  it('renders every present metadata field with display formatting', () => {
-    renderConfigured()
+  it('renders every present metadata field with display formatting', async () => {
+    await renderConfigured()
 
     expect(fieldValue('Duration')).toBe('3:47')
     expect(fieldValue('Format')).toBe('FLAC')
@@ -88,7 +108,7 @@ describe('AudioSummary', () => {
     expect(fieldValue('Size')).toBe('42.7 MB')
   })
 
-  it('omits the bit-depth row for a lossy file and keeps the bit rate', () => {
+  it('omits the bit-depth row for a lossy file and keeps the bit rate', async () => {
     const lossy: AudioFile = {
       ...sampleAudioFile,
       filename: 'Midnight Train.mp3',
@@ -101,7 +121,7 @@ describe('AudioSummary', () => {
         bit_rate_bps: 320000,
       },
     }
-    renderConfigured(lossy)
+    await renderConfigured(lossy)
 
     expect(screen.queryByText('Bit Depth')).not.toBeInTheDocument()
     expect(fieldValue('Format')).toBe('MP3')
@@ -109,19 +129,19 @@ describe('AudioSummary', () => {
     expect(fieldValue('Size')).toBe('8.7 MB')
   })
 
-  it('omits the bit-rate row when the backend reported none', () => {
+  it('omits the bit-rate row when the backend reported none', async () => {
     const noBitRate: AudioFile = {
       ...sampleAudioFile,
       metadata: { ...sampleAudioFile.metadata, bit_rate_bps: null },
     }
-    renderConfigured(noBitRate)
+    await renderConfigured(noBitRate)
 
     expect(screen.queryByText('Bit Rate')).not.toBeInTheDocument()
     expect(fieldValue('Bit Depth')).toBe('24 bit')
   })
 
   it('choose a different file resets to select and deletes the upload', async () => {
-    renderConfigured()
+    await renderConfigured()
 
     await userEvent.click(
       screen.getByRole('button', { name: 'Choose a different file' }),
@@ -136,7 +156,7 @@ describe('AudioSummary', () => {
   it('resets the UI even when the backend delete fails', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     deleteAudioMock.mockRejectedValue(new Error('audio_not_found'))
-    renderConfigured()
+    await renderConfigured()
 
     await userEvent.click(
       screen.getByRole('button', { name: 'Choose a different file' }),

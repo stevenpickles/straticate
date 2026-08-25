@@ -19,13 +19,21 @@
  *
  * The loop is bounded on every side: it runs only while the model reports
  * `downloading`, stops on any terminal state, stops while the tab is hidden
- * (and re-reads immediately when it comes back), stops on a failed read, and is
- * cleared when the component unmounts or selects a different model.
+ * (and re-reads immediately when it comes back), stops on a failed read, stops
+ * while the weights are being thrown away, and is cleared when the component
+ * unmounts or selects a different model.
+ *
+ * **One model, any number of watchers.** The hook is keyed by model ID and
+ * holds no assumption that the ID came from a selected quality tier, so a list
+ * of models is a component per model, each calling this hook for its own row —
+ * which is how feature 037's model library reuses every rule above (the
+ * sequence-numbered responses, the per-model request guards, the poll's exit
+ * conditions) rather than growing a second copy of them that could drift.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
-import { getModel, installModel } from '../api/models'
+import { getModel, installModel, removeModelWeights } from '../api/models'
 import type { Model, ModelInstallation } from '../api/types'
 
 /**
@@ -54,8 +62,14 @@ const UNKNOWN_ERROR: InstallationError = {
   message: 'Something went wrong. Please try again.',
 }
 
-/** Envelope-shaped `{code, message}` for any rejection reason. */
-function errorInfo(reason: unknown): InstallationError {
+/**
+ * Envelope-shaped `{code, message}` for any rejection reason.
+ *
+ * Exported so every model request in the app — the reads and installs here,
+ * and the catalog read in `useModelCatalog` — reports a failure the same way,
+ * with the backend's own code and message where there is one.
+ */
+export function errorInfo(reason: unknown): InstallationError {
   return reason instanceof ApiError
     ? { code: reason.code, message: reason.message }
     : UNKNOWN_ERROR
@@ -81,6 +95,14 @@ export interface ModelInstallationHandle {
   /** Whether a `POST /install` for **this** model is in flight. */
   readonly installing: boolean
   /**
+   * Whether a `DELETE /weights` for **this** model is in flight — which is
+   * one request with two meanings: it cancels a running install, and it
+   * removes installed weights. Which of the two a caller is doing is decided
+   * by the state the model is in when it is called, and it is the caller's job
+   * to say so (see `ModelCard`).
+   */
+  readonly removing: boolean
+  /**
    * The message of a `model_weights_missing` answer to `POST /jobs` that no
    * read has superseded yet, or `null`.
    *
@@ -92,6 +114,17 @@ export interface ModelInstallationHandle {
   readonly weightsMissingMessage: string | null
   /** Start (or retry) the download. Ignored while a request for it is in flight. */
   readonly install: () => void
+  /**
+   * Throw this model's weights away (`DELETE /models/{id}/weights`).
+   *
+   * **The same request cancels a running install.** Feature 025 built it that
+   * way deliberately: the outcome of cancelling a download is exactly "this
+   * model has no weights", and with the network bound being per-operation
+   * rather than a total budget, it is the only escape from a transfer that
+   * will not finish. Ignored while a request for this model is already in
+   * flight.
+   */
+  readonly remove: () => void
   /** Re-read the model now — after a failed read, or after a failed job. */
   readonly refresh: () => void
   /**
@@ -119,6 +152,8 @@ interface HookState {
    * silently swallow a click on — a *different* tier's install.
    */
   readonly installingFor: string | null
+  /** The model a `DELETE .../weights` is in flight for, keyed for the same reason. */
+  readonly removingFor: string | null
   /** A `model_weights_missing` job refusal no read has superseded yet. */
   readonly weightsMissing: string | null
 }
@@ -128,6 +163,7 @@ const IDLE_STATE: HookState = {
   model: null,
   error: null,
   installingFor: null,
+  removingFor: null,
   weightsMissing: null,
 }
 
@@ -135,9 +171,9 @@ const IDLE_STATE: HookState = {
  * Fold a settled request for `modelId` into the state, dropping anything that
  * described a different model.
  *
- * `installingFor` is deliberately carried across a changed selection: it names
- * the model its request is about, so it stays true while that request is in
- * flight no matter what the user selects meanwhile.
+ * `installingFor` and `removingFor` are deliberately carried across a changed
+ * selection: each names the model its request is about, so it stays true while
+ * that request is in flight no matter what the user selects meanwhile.
  */
 function applyRead(
   previous: HookState,
@@ -150,9 +186,31 @@ function applyRead(
     model: same ? previous.model : null,
     error: same ? previous.error : null,
     installingFor: previous.installingFor,
+    removingFor: previous.removingFor,
     weightsMissing: same ? previous.weightsMissing : null,
     ...patch,
   }
+}
+
+/**
+ * Clear a per-model request guard when its request settles, whatever is
+ * selected by then.
+ *
+ * The `then`/`catch` handlers apply a *record*, so they are rightly gated on
+ * the model still being the selected one. A guard is not a record: it says
+ * "this model has a request in flight", and once that request has settled it
+ * says something false. Without this, an install (or a remove) that settles
+ * while the user is looking at a different tier leaves the flag set for ever,
+ * and coming back to that tier finds its button permanently disabled and
+ * `aria-busy` — the mirror image of the hang `installingFor` was keyed by
+ * model to prevent in the first place.
+ */
+function releaseGuard(
+  previous: HookState,
+  field: 'installingFor' | 'removingFor',
+  modelId: string,
+): HookState {
+  return previous[field] === modelId ? { ...previous, [field]: null } : previous
 }
 
 /**
@@ -284,6 +342,15 @@ export function useModelInstallation(
   // `SeparationOptions` uses for "Start separation"). Keyed by model so a
   // request that never settles cannot swallow a click on another tier.
   const installingForRef = useRef<string | null>(null)
+  // The same guard for `DELETE .../weights`. The two are checked together, so
+  // a model whose weights are being thrown away cannot also be told to fetch
+  // them — the pair would race over the same file on the server.
+  const removingForRef = useRef<string | null>(null)
+  const busyWith = useCallback(
+    (id: string) =>
+      installingForRef.current === id || removingForRef.current === id,
+    [],
+  )
 
   const refresh = useCallback(() => {
     setReadCount((count) => count + 1)
@@ -323,20 +390,27 @@ export function useModelInstallation(
   const current = state.modelId === modelId && modelId !== null ? state : null
   const model = current?.model ?? null
   const error = current?.error ?? null
+  const removing = state.removingFor !== null && state.removingFor === modelId
 
   // The poll. It re-runs on every *successful* read, because each one lands a
   // fresh record; a read that fails leaves the record — and so this effect —
   // untouched, which stops the loop rather than hammering a backend that is
   // not answering. The retry button starts it again.
+  //
+  // It also stops while a `DELETE .../weights` is in flight: that request
+  // *is* the cancellation, and its answer is the state the user asked for.
+  // Polling across it would land a `downloading` read the server issued before
+  // the cancel unwound, flicking a bar back to life for one interval after the
+  // user pressed the button that stopped it.
   useEffect(() => {
-    if (model?.installation?.state !== 'downloading' || hidden) {
+    if (model?.installation?.state !== 'downloading' || hidden || removing) {
       return
     }
     const timer = setTimeout(refresh, POLL_INTERVAL_MS)
     return () => {
       clearTimeout(timer)
     }
-  }, [model, hidden, refresh])
+  }, [model, hidden, removing, refresh])
 
   // A hidden tab is not watching a progress bar. Stop polling while it is
   // backgrounded and read once immediately when it returns, so the first thing
@@ -357,7 +431,7 @@ export function useModelInstallation(
 
   const install = useCallback(() => {
     const id = modelId
-    if (id === null || installingForRef.current === id) {
+    if (id === null || busyWith(id)) {
       return
     }
     installingForRef.current = id
@@ -390,8 +464,48 @@ export function useModelInstallation(
         if (installingForRef.current === id) {
           installingForRef.current = null
         }
+        setState((previous) => releaseGuard(previous, 'installingFor', id))
       })
-  }, [modelId, claim, isCurrent])
+  }, [modelId, claim, isCurrent, busyWith])
+
+  const remove = useCallback(() => {
+    const id = modelId
+    if (id === null || busyWith(id)) {
+      return
+    }
+    removingForRef.current = id
+    const sequence = claim()
+    setState((previous) =>
+      applyRead(previous, id, { removingFor: id, error: null }),
+    )
+    removeModelWeights(id)
+      .then((removed) => {
+        if (modelIdRef.current === id && isCurrent(sequence)) {
+          setState((previous) =>
+            applyRead(previous, id, {
+              ...landed(removed),
+              removingFor: null,
+            }),
+          )
+        }
+      })
+      .catch((reason: unknown) => {
+        if (modelIdRef.current === id && isCurrent(sequence)) {
+          setState((previous) =>
+            applyRead(previous, id, {
+              error: errorInfo(reason),
+              removingFor: null,
+            }),
+          )
+        }
+      })
+      .finally(() => {
+        if (removingForRef.current === id) {
+          removingForRef.current = null
+        }
+        setState((previous) => releaseGuard(previous, 'removingFor', id))
+      })
+  }, [modelId, claim, isCurrent, busyWith])
 
   const noteWeightsMissing = useCallback(
     (message: string) => {
@@ -422,8 +536,10 @@ export function useModelInstallation(
     status,
     error,
     installing: state.installingFor !== null && state.installingFor === modelId,
+    removing,
     weightsMissingMessage: current?.weightsMissing ?? null,
     install,
+    remove,
     refresh,
     noteWeightsMissing,
   }

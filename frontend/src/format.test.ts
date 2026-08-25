@@ -6,6 +6,7 @@ import {
   formatChannels,
   formatDuration,
   formatFileSize,
+  formatMemorySize,
   formatPercentage,
   formatRealtimeFactor,
   formatSampleRate,
@@ -177,5 +178,20 @@ describe('formatRealtimeFactor', () => {
     [Number.POSITIVE_INFINITY, '0×'],
   ])('formats %p as %p', (factor, expected) => {
     expect(formatRealtimeFactor(factor)).toBe(expected)
+  })
+})
+
+describe('formatMemorySize', () => {
+  it('reads a mebibyte requirement in the same units as a download size', () => {
+    // `requirements` is declared in MiB; a user comparing "6 GB of VRAM" with
+    // "870 MB to download" must be comparing like with like.
+    expect(formatMemorySize(6144)).toBe('6 GB')
+    expect(formatMemorySize(4096)).toBe('4 GB')
+    expect(formatMemorySize(512)).toBe('512 MB')
+    expect(formatMemorySize(8192)).toBe('8 GB')
+  })
+
+  it('agrees with formatFileSize on the same number of bytes', () => {
+    expect(formatMemorySize(1536)).toBe(formatFileSize(1536 * 1024 * 1024))
   })
 })
