@@ -29,6 +29,12 @@
       "description": "Implementation family, e.g. 'mel_band_roformer', 'mdx', 'mdxc', 'demucs', 'fake'. Open set — application code must not branch on it outside the inference package."
     },
     "version": { "type": "string", "minLength": 1 },
+    "development_only": {
+      "type": "boolean",
+      "default": false,
+      "description": "True for a development fixture: an entry that exists to exercise the application (CI, the test suite, the E2E tier) and does not perform real separation. Such an entry is excluded from the user-facing catalog unless STRATICATE_INCLUDE_DEVELOPMENT_MODELS is enabled. Omitted means false, so a normal model needs no such field. Marked here, on the manifest, rather than inferred from 'architecture' — that field is an open set application code must not branch on.",
+      "$comment": "Declared per entry rather than derived: 'fake' is one architecture today, and a future fixture of any architecture must be markable without a code change."
+    },
     "separation_mode": {
       "type": "string",
       "description": "Logical mode ID this model serves, e.g. 'vocals', 'standard_stems'."

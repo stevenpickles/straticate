@@ -158,7 +158,10 @@ class Model(BaseModel):
 
     ``architecture`` is an open set (e.g. ``mel_band_roformer``, ``mdx``,
     ``mdxc``, ``demucs``, ``fake``); application code never branches on it
-    outside the inference package.
+    outside the inference package. ``development_only`` exists precisely so
+    that it does not have to: "this is a fixture, not a separator" is a fact
+    about the *entry*, declared by the manifest, not something to be guessed
+    from an architecture name (feature 032).
 
     ``stems`` carries the constraints the separation engine has always
     enforced: each name matches
@@ -173,6 +176,16 @@ class Model(BaseModel):
     display_name: str = Field(description="Human-readable model name.")
     architecture: str = Field(description="Implementation family (open set).")
     version: str = Field(description="Model version string.")
+    development_only: bool = Field(
+        default=False,
+        description=(
+            "Whether this is a development fixture — an entry that exists to exercise the "
+            "application (CI, the test suite, the end-to-end tier) and does not perform real "
+            "separation. False for every model a user is normally offered: such entries are "
+            "excluded from the catalog unless the server enables them, so a client only ever "
+            "sees `true` here on a server that deliberately opted in."
+        ),
+    )
     separation_mode: str = Field(description='Logical mode ID this model serves, e.g. "vocals".')
     quality_tier: QualityTier | None = Field(
         default=None,
