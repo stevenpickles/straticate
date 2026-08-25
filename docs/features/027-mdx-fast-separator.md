@@ -1,7 +1,7 @@
 # [027] Real separator — fast vocals (MDX-family)
 
 Branch: —
-Status: **BLOCKED** — weights licence cannot be established
+Status: **WONTFIX** (closed 2026-08-25) — weights licence cannot be established
 Dependencies: 026
 PR: —
 
@@ -64,7 +64,27 @@ Feature 032 gave `fake-standard-001` the `fast` tier to vacate `balanced`, but
 else to go, since `high_quality` is 026's and `fast` is this feature's. **027
 must retier or drop `fake-vocals-001`**, or the catalog will fail to load.
 
-## Options
+## Closed, 2026-08-25
+
+**Decision: not doing this.** Feature 028 (Demucs, 4-stem) removed most of the
+need. It runs at **CPU RTF 1.63** against feature 026's **0.299** — roughly 5.5×
+faster, and the first model in the project faster than real time on CPU. A user
+without a GPU therefore has a usable option, which is what the fast tier existed
+to provide.
+
+**The gap that remains, so it is not lost:** the `vocals` separation mode still
+has only the high-quality tier (RoFormer, ~10 minutes per song on CPU).
+`standard_stems` is the mode that got fast. Anyone separating vocals on a
+GPU-less machine is still waiting. If that becomes a real complaint, the fix is
+a new numbered feature with a model whose terms **somebody with standing has
+stated** — restrictive is acceptable, silence is not. That distinction is the
+whole content of this document.
+
+The design work below is kept because it is still correct: the ONNX Runtime
+choice, the 285-byte synthetic ORT fixture, and the chunking shape would all
+apply to whatever model eventually fills that gap.
+
+## Options considered
 
 1. **Ask upstream.** #2341 is open; two people have already asked and the
    maintainers have been silent on licensing since 2022. Not a plan with a date.
