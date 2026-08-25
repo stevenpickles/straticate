@@ -76,8 +76,26 @@ testdata/   Small audio fixtures for tests
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Straticate itself is **MIT** — see [LICENSE](LICENSE).
 
-Note: pretrained model *weights* are downloaded separately and carry their own
-licenses, which are tracked per-model in the model catalog. A model's
-source-code license does not automatically apply to its weights.
+**Model weights are a separate question, and not all of them are permissive.**
+Weights are never bundled or redistributed here: the catalog pins a download URL
+and a SHA-256, and you install them yourself. A model's source-code license does
+not automatically apply to its weights, and in practice usually does not.
+
+What ships in the catalog today:
+
+| Model | Code | Weights | Commercial use |
+| --- | --- | --- | --- |
+| `vocals-hq-001` — Mel-Band RoFormer (Kim Vocal 2) | MIT | **MIT** | Permitted |
+| `standard-stems-001` — Demucs v4 (htdemucs) | MIT | **Research use only** — upstream states the weights are "not covered by the MIT license, and are provided only for scientific purposes"; no formal license was designated | **Not permitted** |
+
+Every model's terms — code license, weights license, commercial-use and
+redistribution permissions, and required attribution — are recorded in
+`models/catalog.json` and **shown in the app before you install anything**, which
+is the only moment they can still change your decision. Terms stated in prose
+rather than as a named license are rendered verbatim rather than summarised, so
+a paragraph of conditions is never presented as if it were an identifier.
+
+If you intend to use Straticate commercially, check each model's weights license
+before installing it. The application being MIT does not make the models so.

@@ -34,6 +34,18 @@ models/**/*.th
 # Agent worktrees (orchestration scratch; never part of the project)
 .claude/
 
+# Local audio dropped in the repo root for manual testing. Never commit
+# copyrighted or large audio (AGENTS.md, DEVELOPMENT.md); generated fixtures
+# live in testdata/ and are built at test time, not stored.
+/*.m4a
+/*.mp3
+/*.wav
+/*.flac
+/*.aac
+/*.ogg
+/*.aif
+/*.aiff
+
 # OS / editor
 .DS_Store
 Thumbs.db
