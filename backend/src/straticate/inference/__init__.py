@@ -16,6 +16,8 @@ lives here:
 - :class:`RoFormerSeparator` — the first real inference backend (feature 026):
   a Mel-Band RoFormer running vendored architecture code over weights feature
   025 installed, with real chunk-grained progress and real device telemetry.
+- :class:`DemucsSeparator` — the four-stem backend (feature 028): a Hybrid
+  Transformer Demucs, same seam, same contract, different architecture.
 - :class:`SeparatorRegistry` — the architecture-keyed seam that turns a catalog
   :class:`~straticate.schemas.Model` into a separator (feature 015 resolves a
   job's model through it; a real backend is built off the event loop through
@@ -28,7 +30,8 @@ does not import PyTorch either**. ``RoFormerParameters`` and
 ``RoFormerSeparator`` are resolved on first attribute access (see
 :func:`__getattr__`), so an installation without the ``torch`` extra imports the
 application, starts, serves and runs the fake engine, and only a job for a
-model of a torch-backed architecture meets ``separator_unavailable`` (501).
+model of a torch-backed architecture meets ``separator_unavailable`` (501). The
+same is true of ``DemucsParameters`` and ``DemucsSeparator``.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from straticate.inference.base import (
     SeparatorRuntimeStats,
     StageCallback,
 )
+from straticate.inference.demucs.architecture import DEMUCS_ARCHITECTURE
 from straticate.inference.executor import SeparatorJobExecutor
 from straticate.inference.fake import (
     FAKE_ARCHITECTURE,
@@ -65,6 +69,7 @@ from straticate.inference.registry import (
     SeparatorBuilder,
     SeparatorRegistry,
     default_separator_builders,
+    demucs_separator_builder,
     fake_separator_builder,
     roformer_separator_builder,
     separator_info_from_model,
@@ -72,10 +77,16 @@ from straticate.inference.registry import (
 from straticate.inference.roformer.architecture import ROFORMER_ARCHITECTURE
 
 if TYPE_CHECKING:  # pragma: no cover - import-time typing only
+    from straticate.inference.demucs import DemucsParameters, DemucsSeparator
     from straticate.inference.roformer import RoFormerParameters, RoFormerSeparator
 
-_LAZY_FROM_ROFORMER = frozenset({"RoFormerParameters", "RoFormerSeparator"})
-"""Names this package re-exports from the torch-importing RoFormer backend."""
+_LAZY_BACKEND_EXPORTS = {
+    "RoFormerParameters": "straticate.inference.roformer",
+    "RoFormerSeparator": "straticate.inference.roformer",
+    "DemucsParameters": "straticate.inference.demucs",
+    "DemucsSeparator": "straticate.inference.demucs",
+}
+"""Names this package re-exports from the torch-importing backends."""
 
 
 # ``if not TYPE_CHECKING`` is **load-bearing** — see the same guard in
@@ -98,14 +109,16 @@ if not TYPE_CHECKING:
             ImportError: PyTorch is not installed.
             AttributeError: No such export.
         """
-        if name in _LAZY_FROM_ROFORMER:
-            value = getattr(importlib.import_module("straticate.inference.roformer"), name)
+        module_name = _LAZY_BACKEND_EXPORTS.get(name)
+        if module_name is not None:
+            value = getattr(importlib.import_module(module_name), name)
             globals()[name] = value
             return value
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
+    "DEMUCS_ARCHITECTURE",
     "FAKE_ARCHITECTURE",
     "FAKE_SEPARATOR_INFOS",
     "FAKE_STANDARD_INFO",
@@ -113,6 +126,8 @@ __all__ = [
     "ROFORMER_ARCHITECTURE",
     "STEM_NAME_PATTERN",
     "AudioDecodeError",
+    "DemucsParameters",
+    "DemucsSeparator",
     "DeviceStats",
     "FakeDeviceProfile",
     "FakeSeparator",
@@ -132,6 +147,7 @@ __all__ = [
     "StageCallback",
     "decode_to_pcm",
     "default_separator_builders",
+    "demucs_separator_builder",
     "fake_separator_builder",
     "fake_separator_info",
     "fake_separator_info_for_mode",
