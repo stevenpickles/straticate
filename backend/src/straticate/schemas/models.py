@@ -37,10 +37,38 @@ class QualityTier(StrEnum):
 
 
 class ModelRequirements(BaseModel):
-    """Resource requirements advertised by a model manifest."""
+    """Resource requirements advertised by a model manifest.
+
+    Every figure here is **advisory**: nothing in the application compares them
+    against the host, and a job is never refused for failing one. They exist so
+    that a user can judge their hardware before committing to a download the
+    size of a model checkpoint.
+
+    The two VRAM figures say different things on purpose. ``minimum_vram_mb`` is
+    the floor — below it, do not attempt the model on that backend — while
+    ``recommended_vram_mb`` is the comfortable figure: a full-length track on a
+    card that is also driving a display. Both are measured **whole-device**
+    peaks, because the CUDA context and the caching allocator's reservation are
+    part of what a card must have free, not only the tensors. Both also depend
+    on the model's chunking and on how long the track is, so the feature
+    document that sets them records the parameters they were measured at.
+    """
 
     recommended_vram_mb: int | None = Field(
-        default=None, ge=0, description="Recommended GPU VRAM in MiB; null when not specified."
+        default=None,
+        ge=0,
+        description=(
+            "GPU VRAM in MiB recommended for comfortable use; null when not specified. "
+            "Advisory: nothing is refused for failing it."
+        ),
+    )
+    minimum_vram_mb: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "GPU VRAM in MiB below which this model should not be attempted; null when "
+            "not specified. Advisory: nothing is refused for failing it."
+        ),
     )
     minimum_ram_mb: int | None = Field(
         default=None, ge=0, description="Minimum system RAM in MiB; null when not specified."

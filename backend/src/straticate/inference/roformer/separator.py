@@ -950,6 +950,13 @@ class NvmlProbe:
     and every other number in the snapshot is unaffected. A failure to *load*
     is remembered, so an absent binding costs one failed import per process
     rather than one per sample.
+
+    The module imported here is ``pynvml``, but the package that supplies it is
+    **``nvidia-ml-py``** — NVIDIA's own binding. The PyPI package *named*
+    ``pynvml`` is a deprecated shim that installs an import hook raising
+    ``FutureWarning``, and since ``torch.cuda`` imports ``pynvml`` at torch
+    import time, installing it makes every test that imports torch fail under
+    ``-W error``. DEVELOPMENT.md, *Optional: NVML*, has the traceback.
     """
 
     __slots__ = ("_handles", "_module", "_unavailable")
