@@ -32,6 +32,22 @@ function modelPath(modelId: string, suffix = ''): string {
 }
 
 /**
+ * List every catalogued model, in catalog order (`GET /api/v1/models`).
+ *
+ * This is the whole inventory a management view needs: each {@link Model} is
+ * the manifest's own projection — display name, separation mode, quality tier,
+ * stems, `requirements`, `capabilities` and `licensing` — with the live
+ * `installation` block overlaid, so "offered" and "ready" are distinguishable
+ * without a second request per model.
+ *
+ * A server that hides development fixtures (feature 032, the default) does not
+ * list them here either, so what this returns *is* what the user is offered.
+ */
+export function listModels(): Promise<Model[]> {
+  return get<Model[]>(MODELS_PATH)
+}
+
+/**
  * Fetch one model, including its live installation state
  * (`GET /api/v1/models/{model_id}`).
  *

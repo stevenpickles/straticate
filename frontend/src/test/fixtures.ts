@@ -4,6 +4,7 @@ import type {
   Job,
   Model,
   ModelInstallation,
+  ModelLicensing,
   RuntimeMetricsEvent,
   SeparationConfiguration,
   SeparationMode,
@@ -261,4 +262,57 @@ export function modelInstalling(
       ...installation,
     },
   }
+}
+
+/**
+ * Terms as permissive as this project has ever shipped: the real
+ * `vocals-hq-001` entry, whose author relicensed the weights to MIT and asks
+ * only for the credit the catalog carries.
+ */
+export const samplePermissiveLicensing: ModelLicensing = {
+  code_license: 'MIT',
+  weights_license: 'MIT',
+  redistribution_permitted: true,
+  commercial_use_permitted: true,
+  attribution:
+    'Weights: Kim Vocal 2 (Mel-Band RoFormer) by Kimberley Jensen. Architecture: vendored from openmirlab/melband-roformer-infer.',
+}
+
+/**
+ * The shape feature 027 is blocked on: **MIT code, and nothing at all said
+ * about the weights.** A UI that folds these two into one licence line tells
+ * the user an 870 MB download is free to use on the strength of a fact about
+ * the source code.
+ */
+export const sampleSilentWeightsLicensing: ModelLicensing = {
+  code_license: 'MIT',
+  weights_license: null,
+  redistribution_permitted: null,
+  commercial_use_permitted: null,
+  attribution: null,
+}
+
+/**
+ * Weights that are **more restrictive than their code and stated in words** —
+ * the CC-BY-NC-ish case the project owner has cleared for personal use, plus
+ * an attribution that is a binding condition rather than a request.
+ */
+export const sampleRestrictiveLicensing: ModelLicensing = {
+  code_license: 'MIT',
+  weights_license:
+    'Research and personal use only; ask the authors before any commercial use.',
+  redistribution_permitted: false,
+  commercial_use_permitted: false,
+  attribution: 'Weights: Example Separator by the Example Lab.',
+}
+
+/**
+ * {@link sampleInstallableModel} with its `licensing` block overridden, so a
+ * test can state exactly the terms it is about.
+ */
+export function modelLicensed(
+  licensing: ModelLicensing | null,
+  model: Model = sampleInstallableModel,
+): Model {
+  return { ...model, licensing }
 }

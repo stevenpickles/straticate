@@ -1,0 +1,196 @@
+/* Feature 037: one catalogued model in the model library. */
+
+.model-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--color-border);
+  border-radius: 0.6rem;
+  background-color: var(--color-surface);
+  text-align: left;
+}
+
+.model-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.model-card-name {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.model-card-state {
+  margin: 0;
+  padding: 0.1rem 0.55rem;
+  border: 1px solid currentcolor;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.model-card-state-installed {
+  color: var(--color-accent);
+}
+
+.model-card-state-downloading {
+  color: var(--color-accent);
+}
+
+.model-card-state-failed {
+  color: var(--color-danger);
+}
+
+.model-card-id {
+  margin: 0;
+  font-family: ui-monospace, 'Cascadia Mono', 'Consolas', monospace;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+.model-card-fixture {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.35rem;
+  border-left: 2px solid var(--color-danger);
+  background-color: rgb(0 0 0 / 25%);
+  font-size: 0.82rem;
+}
+
+.model-card-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0.5rem 1rem;
+  margin: 0;
+}
+
+.model-card-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.model-card-fact-label {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.model-card-fact-value {
+  margin: 0;
+  font-size: 0.88rem;
+  overflow-wrap: anywhere;
+}
+
+.model-card-requirements {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.model-card-requirement-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.88rem;
+}
+
+.model-card-requirement {
+  margin: 0;
+}
+
+.model-card-muted {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+}
+
+.model-card-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.model-card-progress,
+.model-card-installed {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.model-card-error {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--color-danger);
+}
+
+.model-card-failure {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.model-card-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-danger);
+  border-radius: 0.4rem;
+}
+
+.model-card-confirm-question {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.model-card-confirm-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.model-card-primary,
+.model-card-secondary,
+.model-card-danger {
+  padding: 0.4rem 0.85rem;
+  border-radius: 0.35rem;
+  border: 1px solid var(--color-border);
+  font: inherit;
+  font-size: 0.88rem;
+  cursor: pointer;
+  background-color: transparent;
+  color: var(--color-text);
+}
+
+.model-card-primary {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.model-card-danger {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.model-card-primary:disabled,
+.model-card-secondary:disabled,
+.model-card-danger:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.model-card .progress-track {
+  width: 100%;
+}

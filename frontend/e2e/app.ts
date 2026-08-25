@@ -149,6 +149,86 @@ export async function separationModes(
   return (await response.json()) as SeparationMode[]
 }
 
+/** Installation state, as `Model.installation` carries it. */
+export interface InstallationRecord {
+  state: 'available' | 'downloading' | 'installed' | 'failed'
+  requires_download: boolean
+  total_bytes: number | null
+  downloaded_bytes: number | null
+  progress: number | null
+  error?: { code: string; message: string } | null
+}
+
+/** Licence terms, as `Model.licensing` carries them. */
+export interface LicensingRecord {
+  code_license?: string | null
+  weights_license?: string | null
+  redistribution_permitted?: boolean | null
+  commercial_use_permitted?: boolean | null
+  attribution?: string | null
+}
+
+/** A model as the backend serves it (only the fields the suite reads or writes). */
+export interface ModelRecord {
+  readonly id: string
+  readonly display_name: string
+  readonly development_only: boolean
+  licensing?: LicensingRecord | null
+  installation?: InstallationRecord
+}
+
+/** The model catalog, straight from the backend. */
+export async function listModels(
+  request: APIRequestContext,
+): Promise<ModelRecord[]> {
+  const response = await request.get('/api/v1/models')
+  expect(response.ok(), 'the backend serves its model catalog').toBe(true)
+  return (await response.json()) as ModelRecord[]
+}
+
+/** The model ID a request path names, or `null` for a non-model path. */
+export function modelIdOf(url: URL): string | null {
+  const match = /^\/api\/v1\/models\/([^/]+)/.exec(url.pathname)
+  return match?.[1] === undefined ? null : decodeURIComponent(match[1])
+}
+
+/**
+ * The separation modes a server with **default** settings would serve: the
+ * same catalog, with every development fixture's tier removed and any mode
+ * left without a tier dropped (feature 032).
+ *
+ * Derived from `GET /models`, never hardcoded: it is 032's own predicate
+ * applied to the same data, so a catalog change cannot make a spec assert
+ * something the app never sees.
+ */
+export async function defaultServerModes(
+  request: APIRequestContext,
+): Promise<SeparationMode[]> {
+  const models = await listModels(request)
+  const fixtures = new Set(
+    models.filter((model) => model.development_only).map((model) => model.id),
+  )
+  expect(
+    fixtures.size,
+    'the suite runs with the development fixtures enabled, so there are some to hide',
+  ).toBeGreaterThan(0)
+
+  const modes = (await separationModes(request))
+    .map((mode) => ({
+      ...mode,
+      quality_options: mode.quality_options.filter(
+        (option) => !fixtures.has(option.model_id),
+      ),
+    }))
+    .filter((mode) => mode.quality_options.length > 0)
+
+  expect(
+    modes.length,
+    'a default server still offers at least one real separation mode',
+  ).toBeGreaterThan(0)
+  return modes
+}
+
 /**
  * The catalog's four-stem mode — the one M1's workflow asks for — resolved
  * from what the backend actually serves rather than from a literal mode ID.
