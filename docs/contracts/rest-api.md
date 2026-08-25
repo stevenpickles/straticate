@@ -35,6 +35,7 @@ and stem streaming (audio bytes). IDs are ULIDs.
 | GET | `/health` | `{ "status": "ok" }` |
 | GET | `/version` | `{ "version": "0.1.0" }` |
 | GET | `/system/devices` | `ComputeDevice[]` |
+| GET | `/system/storage` | `StorageReport` |
 
 `ComputeDevice`:
 
@@ -48,6 +49,56 @@ and stem streaming (audio bytes). IDs are ULIDs.
 ```
 
 `backend` is an open enum: `cuda`, `cpu` initially; later `mps`, `directml`, …
+
+### Free disk space (feature 040)
+
+`GET /system/storage` reports the room available for model weights on the
+filesystem holding `Settings.models_dir` — the directory an install writes into
+(`{models_dir}/weights/{model_id}/weights.bin`).
+
+`StorageReport`:
+
+```json
+{
+  "free_bytes": 2147483648,
+  "total_bytes": 512110190592
+}
+```
+
+- Read **fresh on every request**, never cached: free space changes constantly
+  and the underlying call is one syscall. (`/system/devices`, by contrast, is
+  probed once at startup because devices cannot change during a run.) The read
+  is a *blocking* filesystem call — it can hang for as long as an unresponsive
+  network mount does — so the route runs it in a worker thread and the event
+  loop keeps serving everything else meanwhile.
+- **`null` means unknown, and it is a documented state rather than an error.**
+  A host that cannot answer — a models directory whose entire path is missing,
+  a permissions failure, a filesystem the platform has no answer for — still
+  responds `200`, with both fields `null`. Clients render that as "unknown" and
+  treat it as the *cautious* case; they must not treat it as "fine", and must
+  not substitute `0`.
+- **`free_bytes: 0` is not unknown.** It is a full disk — the case worth
+  warning loudest about. (This is why unknown is spelled `null` here while an
+  unknown `ComputeDevice.memory_total_bytes` is spelled `0`: a machine with
+  zero bytes of RAM is impossible, so `0` is unambiguous there.)
+- When `models_dir` does not exist yet — the normal state of a fresh checkout,
+  since the first install creates it — the figures describe its **nearest
+  existing ancestor**, which is the filesystem those directories will be
+  created on. No error, and no separate state.
+- No filesystem path is returned. The client has no use for one, and it would
+  put the server's directory layout (and its user's home directory) on the wire
+  for no benefit.
+
+This is a figure the browser genuinely cannot obtain: weights are written by
+the backend, on the machine running Straticate, and
+`navigator.storage.estimate()` describes the page origin's quota inside the
+*browser's* profile directory — a different number about a different disk.
+
+Nothing refuses an install on the strength of this report; see
+`docs/features/040-free-disk-space-endpoint.md` for why it warns rather than
+blocks. `POST /models/{id}/install` is unchanged, and an install that runs out
+of disk still fails the way it always did (`download_failed` with
+`detail.reason: "filesystem_error"`), leaving nothing behind.
 
 ## Audio
 

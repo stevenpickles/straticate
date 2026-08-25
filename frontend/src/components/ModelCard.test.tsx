@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ModelCard } from './ModelCard'
+import { DiskSpaceProvider } from '../state/diskSpace'
 import {
   modelInstalling,
   modelLicensed,
@@ -42,12 +43,21 @@ function stubModel(options: {
   model: Model
   install?: (current: Model) => Response
   remove?: (current: Model) => Response
+  /** What `GET /system/storage` answers, for a card rendered in a provider. */
+  storage?: { free_bytes: number | null; total_bytes: number | null }
 }): { requests: Recorded[]; set: (model: Model) => void } {
   let current = options.model
   const requests: Recorded[] = []
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     requests.push({ method, url })
+    if (url.endsWith('/system/storage')) {
+      return Promise.resolve(
+        jsonResponse(
+          options.storage ?? { free_bytes: null, total_bytes: null },
+        ),
+      )
+    }
     if (method === 'DELETE') {
       const response = options.remove?.(current)
       if (response !== undefined) {
@@ -85,6 +95,16 @@ function stubModel(options: {
 /** Render one card and return its region. */
 function renderCard(model: Model): HTMLElement {
   render(<ModelCard model={model} />)
+  return screen.getByRole('article', { name: model.display_name })
+}
+
+/** The same card, in a page that holds the machine's free-space reading. */
+function renderCardInLibrary(model: Model): HTMLElement {
+  render(
+    <DiskSpaceProvider>
+      <ModelCard model={model} />
+    </DiskSpaceProvider>,
+  )
   return screen.getByRole('article', { name: model.display_name })
 }
 
@@ -500,5 +520,51 @@ describe('ModelCard confirmation lifetime', () => {
     expect(
       within(card).getByRole('group', { name: 'Confirm removal' }),
     ).toBeInTheDocument()
+  })
+})
+
+describe('ModelCard and the machine’s free space', () => {
+  it('prices the download against the room the backend reports', async () => {
+    stubModel({
+      model: sampleInstallableModel,
+      storage: { free_bytes: 4 * 1024 ** 3, total_bytes: 512 * 1024 ** 3 },
+    })
+    const card = renderCardInLibrary(sampleInstallableModel)
+
+    const notice = card.querySelector('.disk-cost')
+    await waitFor(() => {
+      expect(notice).toHaveTextContent('4 GB is free there.')
+    })
+    expect(notice).toHaveTextContent('870 MB will be written')
+    expect(notice).not.toHaveTextContent(/cannot check/i)
+  })
+
+  it('says a download will not fit without taking the button away', async () => {
+    stubModel({
+      model: sampleInstallableModel,
+      storage: { free_bytes: 100 * 1024 * 1024, total_bytes: 512 * 1024 ** 3 },
+    })
+    const card = renderCardInLibrary(sampleInstallableModel)
+
+    await waitFor(() => {
+      expect(card.querySelector('.disk-cost')).toHaveTextContent(
+        /will not fit/i,
+      )
+    })
+    expect(within(card).getByRole('button', { name: 'Install' })).toBeEnabled()
+  })
+
+  it('falls back to the honest wording when the host cannot answer', async () => {
+    stubModel({
+      model: sampleInstallableModel,
+      storage: { free_bytes: null, total_bytes: null },
+    })
+    const card = renderCardInLibrary(sampleInstallableModel)
+
+    await waitFor(() => {
+      expect(card.querySelector('.disk-cost')).toHaveTextContent(
+        /cannot check/i,
+      )
+    })
   })
 })

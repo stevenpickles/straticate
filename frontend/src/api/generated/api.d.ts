@@ -70,6 +70,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/storage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Storage
+         * @description Report free and total bytes for the filesystem holding the models directory.
+         *
+         *     This is the figure a client needs before offering an install: the weights
+         *     are written by **this** process, to ``Settings.models_dir``, on **this**
+         *     machine — a disk the browser cannot see (``navigator.storage.estimate()``
+         *     describes the page origin's quota inside the browser profile, which is a
+         *     different number about a different disk).
+         *
+         *     Read fresh on every request rather than cached: free space changes
+         *     constantly, and the underlying call is one syscall. Unlike
+         *     ``/system/devices`` there is nothing here that could be probed once at
+         *     startup and still be true.
+         *
+         *     **It runs in a worker thread.** ``stat`` and ``shutil.disk_usage`` are
+         *     filesystem calls, and on an unresponsive network mount — exactly the case
+         *     this feature's warn-rather-than-refuse reasoning anticipates — they block
+         *     for as long as the mount does. On the event loop that would stall *every*
+         *     REST request, the feature 013 WebSocket hub and job progress delivery
+         *     behind one `stat`, which is what AGENTS.md principle 4 and ARCHITECTURE.md
+         *     §14 forbid; features 022 and 025 offload their blocking work for the same
+         *     reason. Caching would also have hidden it, and caching is the wrong answer
+         *     here (see above), so the read is offloaded instead.
+         *
+         *     :func:`asyncio.to_thread` is not cancellable, which costs nothing here:
+         *     this is a pure read that writes no state, so a client that disconnects
+         *     mid-request simply leaves a worker thread to finish a ``stat`` and discard
+         *     the answer. (025's export path has to *shield* its offloaded work because
+         *     that work publishes an artifact; nothing here does.)
+         *
+         *     **Both fields are ``null`` when the host cannot answer** — a models
+         *     directory whose whole path is missing, a permissions failure, a filesystem
+         *     the platform has no answer for. That is a documented state, not an error:
+         *     the response is still ``200``, and a client renders "unknown" rather than a
+         *     failure (see :mod:`straticate.system.storage`). ``free_bytes: 0`` says
+         *     something quite different — a full disk — which is why unknown is not
+         *     spelled ``0`` here the way an unknown device memory total is.
+         */
+        get: operations["read_storage_api_v1_system_storage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audio": {
         parameters: {
             query?: never;
@@ -1071,6 +1126,40 @@ export interface components {
              */
             channels: number;
         };
+        /**
+         * StorageReport
+         * @description How much room the machine running Straticate has for model weights.
+         *
+         *     The figures describe the filesystem holding
+         *     :attr:`straticate.config.Settings.models_dir` — the directory an install
+         *     writes into — as read at the moment of the request. They are **not**
+         *     cached: free space changes constantly, and a stale figure is worse than a
+         *     fresh syscall.
+         *
+         *     **``null`` means unknown, and unknown is a first-class answer.** A platform
+         *     that cannot answer (a path that does not exist yet, a permissions failure,
+         *     an exotic filesystem) gets a documented ``null`` rather than an error
+         *     response, exactly as feature 018's device report degrades instead of
+         *     raising. Unlike that report, the unknown value is ``null`` rather than
+         *     ``0``: a machine with zero bytes of RAM is impossible, so ``0`` is
+         *     unambiguous there — whereas a disk with zero bytes free is both possible
+         *     and the single most important case to distinguish, so it must never double
+         *     as "we could not tell".
+         *
+         *     Both fields are unknown together: they come from one call.
+         */
+        StorageReport: {
+            /**
+             * Free Bytes
+             * @description Bytes available to the server on the filesystem holding the models directory, or null when the host cannot report it.
+             */
+            free_bytes?: number | null;
+            /**
+             * Total Bytes
+             * @description Total size in bytes of that filesystem, or null when the host cannot report it.
+             */
+            total_bytes?: number | null;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -1471,6 +1560,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ComputeDevice"][];
+                };
+            };
+        };
+    };
+    read_storage_api_v1_system_storage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageReport"];
                 };
             };
         };

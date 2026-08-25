@@ -43,6 +43,7 @@ from straticate.schemas.models import (
     SeparationMode,
 )
 from straticate.schemas.stems import STEM_NAME_PATTERN, STEM_NAME_REGEX, StemName
+from straticate.schemas.storage import StorageReport
 
 __all__ = [
     "STEM_NAME_PATTERN",
@@ -79,6 +80,7 @@ __all__ = [
     "SeparationResultMetrics",
     "Stem",
     "StemName",
+    "StorageReport",
     "VersionInfo",
     "WebSocketEvent",
 ]
