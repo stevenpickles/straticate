@@ -38,7 +38,6 @@ if TYPE_CHECKING:  # pragma: no cover - import-time typing only
     from straticate.inference.roformer.separator import (
         DEFAULT_CHUNK_SAMPLES,
         DEFAULT_NUM_OVERLAP,
-        NvmlProbe,
         RoFormerParameters,
         RoFormerSeparator,
     )
@@ -47,7 +46,6 @@ _LAZY_FROM_SEPARATOR = frozenset(
     {
         "DEFAULT_CHUNK_SAMPLES",
         "DEFAULT_NUM_OVERLAP",
-        "NvmlProbe",
         "RoFormerParameters",
         "RoFormerSeparator",
     }
@@ -94,7 +92,6 @@ __all__ = [
     "DEFAULT_CHUNK_SAMPLES",
     "DEFAULT_NUM_OVERLAP",
     "ROFORMER_ARCHITECTURE",
-    "NvmlProbe",
     "RoFormerParameters",
     "RoFormerSeparator",
 ]

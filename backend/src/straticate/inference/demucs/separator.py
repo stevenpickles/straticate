@@ -11,6 +11,22 @@ the transformer's hyperparameters, the architecture's *name* — none of it
 appears in :mod:`straticate.inference.base`, in the job manager, in the API or
 in the frontend (ARCHITECTURE.md §1).
 
+What is *not* here
+------------------
+
+Since feature 039, the run lifecycle is not. The comment this module used to
+carry above its device helpers — "duplicated rather than shared … extracting one
+``inference/torch_device.py`` for both backends is the obvious follow-up" — is
+now spent: stages, decode plumbing, device placement, CUDA/NVML telemetry, the
+PCM bridge, encoding, cleanup and RTF live in
+:mod:`straticate.inference.torch_separator`,
+:mod:`straticate.inference.torch_device` and
+:mod:`straticate.inference.torch_audio`. What remains here is the Hybrid
+Transformer Demucs *difference*: the catalog parameters, the checkpoint reader,
+the stem mapping, and the two methods
+:class:`~straticate.inference.torch_separator.TorchSeparator` leaves open —
+:meth:`DemucsSeparator._run_chunks` and :meth:`DemucsSeparator._finish_stems`.
+
 How a run is shaped
 -------------------
 
@@ -56,53 +72,37 @@ at load time; see :func:`stem_source_indices` and :func:`_check_sources`.
 
 from __future__ import annotations
 
-import asyncio
-import atexit
-import importlib
 import inspect
 import logging
 import math
 import pickle
 import time
 import types
-from array import array
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import cache
 from pathlib import Path
-from typing import Any, Final, Protocol, Self, cast
+from typing import Any, Final, Self, cast
 
 import torch
 from torch import Tensor
 
-from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS, FFmpegTimeout
+from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
 from straticate.errors import ApplicationError
-from straticate.inference.base import (
-    DeviceStats,
-    ProcessingStats,
-    ProgressCallback,
-    SeparationProgress,
-    SeparatorInfo,
-    SeparatorRuntimeStats,
-    StageCallback,
-)
+from straticate.inference.base import ProgressCallback, SeparatorInfo
 from straticate.inference.demucs.architecture import DEMUCS_ARCHITECTURE
 from straticate.inference.demucs.vendor import HTDemucs
-from straticate.inference.pcm import (
-    AudioDecodeError,
-    PcmAudio,
-    decode_to_pcm,
-    write_wav,
+from straticate.inference.model_errors import (
+    parameters_invalid,
+    positive_int,
+    require_installed_weights,
+    weights_not_loadable,
 )
+from straticate.inference.pcm import PcmAudio
+from straticate.inference.torch_audio import pcm_to_tensor, tensor_to_pcm, to_source_channels
+from straticate.inference.torch_separator import RunState, TorchSeparator
 from straticate.jobs.cancellation import CancellationToken
-from straticate.schemas.jobs import (
-    JobState,
-    SeparationConfiguration,
-    SeparationResult,
-    SeparationResultMetrics,
-    Stem,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +119,6 @@ DEFAULT_TRANSITION_POWER: Final = 1.0
 
 NORMALIZATION_EPSILON: Final = 1e-8
 """Guard on the mixture's standard deviation, matching upstream's ``demucs.api``."""
-
-INT16_SCALE: Final = 32767.0
-"""Full-scale multiplier for the float → 16-bit PCM conversion."""
 
 _FRACTION_PARAMETER_NAMES: Final = frozenset({"segment"})
 """Model parameters a catalog entry states as ``[numerator, denominator]``.
@@ -241,16 +238,16 @@ class DemucsParameters:
                 network.
         """
         if not raw:
-            raise _parameters_invalid(model_id, "no default_inference_parameters block")
+            raise parameters_invalid(model_id, "no default_inference_parameters block")
         model_block = raw.get("model")
         if not isinstance(model_block, Mapping):
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 model_id, "default_inference_parameters.model must be an object"
             )
         declared = cast("Mapping[str, Any]", model_block)
         unknown = sorted(set(declared) - _architecture_parameter_names())
         if unknown:
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 model_id, f"unknown architecture parameters: {', '.join(unknown)}"
             )
         normalized: dict[str, Any] = {
@@ -265,7 +262,7 @@ class DemucsParameters:
             inference_block if isinstance(inference_block, Mapping) else {},
         )
         chunk_size = inference.get("chunk_size")
-        chunk_samples = None if chunk_size is None else _positive_int(chunk_size, model_id)
+        chunk_samples = None if chunk_size is None else positive_int(chunk_size, model_id)
         overlap = _fraction_in_unit_interval(
             inference.get("overlap", DEFAULT_OVERLAP), "overlap", model_id
         )
@@ -281,7 +278,7 @@ class DemucsParameters:
             transition_power=transition_power,
         )
         if parameters.window_samples > parameters.training_samples:
-            raise _parameters_invalid(
+            raise parameters_invalid(
                 model_id,
                 (
                     f"inference.chunk_size is {parameters.window_samples} samples, longer than "
@@ -292,25 +289,14 @@ class DemucsParameters:
         return parameters
 
 
-@dataclass(slots=True)
-class _RunState:
-    """Mutable bookkeeping for the separation currently in flight."""
-
-    job_id: str
-    stage: JobState
-    device: torch.device
-    chunks_total: int
-    audio_total_seconds: float
-    started_monotonic: float
-    chunks_completed: int = 0
-    audio_processed_seconds: float = 0.0
-    chunk_seconds_total: float = 0.0
-    last_chunk_seconds: float | None = None
-    finished_seconds: float | None = None
-
-
-class DemucsSeparator:
+class DemucsSeparator(TorchSeparator):
     """A :class:`~straticate.inference.base.Separator` running Hybrid Transformer Demucs.
+
+    The run lifecycle is
+    :class:`~straticate.inference.torch_separator.TorchSeparator`'s; what this
+    class adds is the two architecture-specific holes — the overlap-add chunk
+    loop and the name-based stem mapping — plus the catalog parameters and the
+    checkpoint reader.
 
     Construction is the expensive half: it reads the checkpoint off disk and
     builds a 42-million-parameter network. That is why
@@ -345,27 +331,16 @@ class DemucsSeparator:
         parameters: DemucsParameters,
         ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
     ) -> None:
-        if ffmpeg_timeout_seconds <= 0:
-            raise ValueError("ffmpeg_timeout_seconds must be positive")
-        self._info = info
+        super().__init__(info, ffmpeg_timeout_seconds=ffmpeg_timeout_seconds)
         self._parameters = parameters
-        self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         # Weights first, deliberately. "Install this model" (409) is the answer a
         # user can act on, and every other check here is about a catalog entry a
         # user did not write; reporting a manifest fault instead of a missing
         # download would send them somewhere they cannot go.
-        _require_installed_weights(info, weights_file)
+        require_installed_weights(info, weights_file)
         _check_sample_rate(info, parameters)
         self._stem_sources = stem_source_indices(info, parameters)
         self._model = _load_model(info, weights_file, parameters)
-        self._loaded_device: torch.device | None = torch.device("cpu")
-        self._active = False
-        self._run: _RunState | None = None
-
-    @property
-    def ffmpeg_timeout_seconds(self) -> float:
-        """The bound this separator applies to its decode subprocesses."""
-        return self._ffmpeg_timeout_seconds
 
     @property
     def parameters(self) -> DemucsParameters:
@@ -377,223 +352,12 @@ class DemucsSeparator:
         """For each advertised stem, the network output index it comes from."""
         return self._stem_sources
 
-    # -- Separator protocol -------------------------------------------------
-
-    @property
-    def info(self) -> SeparatorInfo:
-        """The model descriptor this separator advertises."""
-        return self._info
-
-    def runtime_stats(self) -> SeparatorRuntimeStats | None:
-        """Snapshot of the current (or most recent) run; ``None`` before the first.
-
-        Every number here is measured, and reading them is cheap: on CUDA the
-        memory figures are three allocator queries and a cached device-property
-        lookup, and ``utilization``/``temperature_celsius`` are two NVML queries
-        against a handle initialised once per process (see :class:`NvmlProbe`).
-        :mod:`straticate.inference.base` requires that — the telemetry sampler
-        calls this **directly on the event loop**, ~1 Hz, for the length of a
-        job. On CPU there is no device block at all; the contract renders that
-        as ``gpu: null``.
-        """
-        run = self._run
-        if run is None:
-            return None
-        elapsed = (
-            run.finished_seconds
-            if run.finished_seconds is not None
-            else time.monotonic() - run.started_monotonic
-        )
-        elapsed = max(elapsed, 0.0)
-        mean = run.chunk_seconds_total / run.chunks_completed if run.chunks_completed else None
-        return SeparatorRuntimeStats(
-            job_id=run.job_id,
-            model=self._info,
-            device=device_stats(run.device),
-            processing=ProcessingStats(
-                stage=run.stage,
-                chunks_completed=run.chunks_completed,
-                chunks_total=run.chunks_total,
-                elapsed_seconds=elapsed,
-                audio_processed_seconds=run.audio_processed_seconds,
-                audio_total_seconds=run.audio_total_seconds,
-                realtime_factor=_realtime_factor(run.audio_processed_seconds, elapsed),
-                last_chunk_seconds=run.last_chunk_seconds,
-                mean_chunk_seconds=mean,
-            ),
-        )
-
-    async def separate(
-        self,
-        input_path: Path,
-        configuration: SeparationConfiguration,
-        progress_callback: ProgressCallback,
-        cancellation_token: CancellationToken,
-        *,
-        job_id: str,
-        output_dir: Path,
-        stage_callback: StageCallback | None = None,
-    ) -> SeparationResult:
-        """Separate ``input_path`` into real stems. See :class:`DemucsSeparator`.
-
-        Raises:
-            RuntimeError: A separation is already running on this instance.
-            JobCancelled: Cancellation was observed at a chunk boundary.
-            ApplicationError: ``audio_decode_failed`` (422),
-                ``audio_decode_timed_out`` (504),
-                ``separation_mode_mismatch`` (400) or
-                ``compute_device_unavailable`` (409).
-        """
-        if self._active:
-            raise RuntimeError("DemucsSeparator supports one separation at a time")
-        self._active = True
-        try:
-            return await self._separate(
-                input_path,
-                configuration,
-                progress_callback,
-                cancellation_token,
-                job_id=job_id,
-                output_dir=output_dir,
-                stage_callback=stage_callback,
-            )
-        finally:
-            self._active = False
-
-    # -- implementation -----------------------------------------------------
-
-    async def _separate(
-        self,
-        input_path: Path,
-        configuration: SeparationConfiguration,
-        progress_callback: ProgressCallback,
-        cancellation_token: CancellationToken,
-        *,
-        job_id: str,
-        output_dir: Path,
-        stage_callback: StageCallback | None,
-    ) -> SeparationResult:
-        self._check_mode(configuration)
-        device = _resolve_torch_device(configuration.device_id)
-        started = time.monotonic()
-        run = _RunState(
-            job_id=job_id,
-            stage=JobState.DECODING,
-            device=device,
-            chunks_total=0,
-            audio_total_seconds=0.0,
-            started_monotonic=started,
-        )
-        self._run = run
-        try:
-            _announce(stage_callback, JobState.DECODING)
-            source = await self._decode(input_path)
-            cancellation_token.raise_if_cancelled()
-
-            _announce(stage_callback, JobState.LOADING_MODEL)
-            run.stage = JobState.LOADING_MODEL
-            await asyncio.to_thread(self._place_on_device, device)
-            cancellation_token.raise_if_cancelled()
-
-            _announce(stage_callback, JobState.SEPARATING)
-            run.stage = JobState.SEPARATING
-            # Per **run**, not per device placement: ``max_memory_allocated`` is
-            # a per-device high-water mark that nothing else resets, so without
-            # this a ten-second track following a six-minute one would report
-            # the six-minute track's peak as its own. It resets to the *current*
-            # allocation, so the resident model still counts.
-            reset_peak_memory(device)
-            estimates = await asyncio.to_thread(
-                self._run_chunks, source, run, progress_callback, cancellation_token, device
-            )
-
-            _announce(stage_callback, JobState.POST_PROCESSING)
-            run.stage = JobState.POST_PROCESSING
-            stems = await asyncio.to_thread(self._finish_stems, estimates, source)
-            cancellation_token.raise_if_cancelled()
-
-            _announce(stage_callback, JobState.ENCODING)
-            run.stage = JobState.ENCODING
-            written = await self._encode(stems, output_dir, cancellation_token)
-        except BaseException:
-            # Cancellation (or any failure) must never leave a stem behind —
-            # complete or partial — that a later reader would take for output.
-            _discard_outputs(output_dir, self._info.stems)
-            raise
-
-        run.finished_seconds = time.monotonic() - started
-        return SeparationResult(
-            job_id=job_id,
-            model_id=self._info.model_id,
-            stems=written,
-            metrics=SeparationResultMetrics(
-                processing_seconds=run.finished_seconds,
-                realtime_factor=_realtime_factor(source.duration_seconds, run.finished_seconds),
-            ),
-        )
-
-    def _check_mode(self, configuration: SeparationConfiguration) -> None:
-        """Reject a configuration this separator does not serve (a wiring bug)."""
-        if configuration.mode_id and configuration.mode_id != self._info.separation_mode:
-            raise ApplicationError(
-                "separation_mode_mismatch",
-                (
-                    f"Model {self._info.model_id!r} serves separation mode "
-                    f"{self._info.separation_mode!r}, not {configuration.mode_id!r}."
-                ),
-                status_code=400,
-                detail={
-                    "requested_mode_id": configuration.mode_id,
-                    "model_separation_mode": self._info.separation_mode,
-                },
-            )
-
-    async def _decode(self, input_path: Path) -> PcmAudio:
-        """Decode the source to the model's native sample rate."""
-        try:
-            return await decode_to_pcm(
-                input_path,
-                sample_rate=self._info.sample_rate,
-                timeout_seconds=self._ffmpeg_timeout_seconds,
-            )
-        except AudioDecodeError as exc:
-            raise ApplicationError(
-                "audio_decode_failed",
-                f"The input audio could not be decoded: {exc}",
-                status_code=422,
-            ) from exc
-        except FFmpegTimeout as exc:
-            raise ApplicationError(
-                "audio_decode_timed_out",
-                "Decoding the input audio timed out.",
-                status_code=504,
-                detail={"timeout_seconds": exc.timeout_seconds},
-            ) from exc
-
-    def _place_on_device(self, device: torch.device) -> None:
-        """Move the network onto ``device`` (a no-op when it is already there).
-
-        The network's location is forgotten *before* the move, not after it.
-        ``nn.Module.to`` walks the parameters and moves them one at a time, so a
-        failure part-way — a CUDA OOM is the realistic one — leaves the network
-        split across two devices. A separator is cached per model for the life of
-        the process, so recording the *intended* device only on success is not
-        the safe order it looks like: it is the order in which the next job, on
-        any device, takes the early-out above, skips the move, and dies with
-        "Expected all tensors to be on the same device" forever. ``None`` matches
-        no device, so the next run always re-places the network, which is the one
-        thing that can put it back together.
-        """
-        if self._loaded_device == device:
-            return
-        self._loaded_device = None
-        self._model.to(device)
-        self._loaded_device = device
+    # -- the architecture-specific halves -----------------------------------
 
     def _run_chunks(
         self,
         source: PcmAudio,
-        run: _RunState,
+        run: RunState,
         progress_callback: ProgressCallback,
         cancellation_token: CancellationToken,
         device: torch.device,
@@ -624,6 +388,11 @@ class DemucsSeparator:
         the slope by more than a factor of three, which decides whether a 4 GiB
         card finishes a ten-minute file. The figures are in
         ``docs/features/028-demucs-four-stem.md``.
+
+        See
+        :meth:`straticate.inference.torch_separator.TorchSeparator._run_chunks`
+        for the contract this keeps — and note that it is the method feature 038
+        will work inside.
         """
         parameters = self._parameters
         window = parameters.window_samples
@@ -697,47 +466,14 @@ class DemucsSeparator:
         are reconciled — by name, through :attr:`_stem_sources`, never by
         position. The list returned lines up with
         :attr:`SeparatorInfo.stems` index for index, which is what
-        :meth:`_encode` relies on when it zips the two together.
+        :meth:`~straticate.inference.torch_separator.TorchSeparator._encode`
+        relies on when it zips the two together.
         """
         channels = source.channel_count
         return [
-            tensor_to_pcm(_to_source_channels(estimates[index], channels), source.sample_rate)
+            tensor_to_pcm(to_source_channels(estimates[index], channels), source.sample_rate)
             for index in self._stem_sources
         ]
-
-    async def _encode(
-        self,
-        stems: Sequence[PcmAudio],
-        output_dir: Path,
-        cancellation_token: CancellationToken,
-    ) -> list[Stem]:
-        """Write one WAV per stem and describe them for the result record."""
-        written: list[Stem] = []
-        for name, audio in zip(self._info.stems, stems, strict=True):
-            cancellation_token.raise_if_cancelled()
-            target = output_dir / f"{name}.wav"
-            temporary = target.with_name(f"{target.name}.part")
-            await asyncio.to_thread(write_wav, temporary, audio)
-            temporary.replace(target)
-            written.append(
-                Stem(
-                    name=name,
-                    duration_seconds=audio.duration_seconds,
-                    sample_rate_hz=audio.sample_rate,
-                    channels=audio.channel_count,
-                )
-            )
-        return written
-
-    def _report(self, progress_callback: ProgressCallback, run: _RunState) -> None:
-        progress_callback(
-            SeparationProgress(
-                chunks_completed=run.chunks_completed,
-                chunks_total=run.chunks_total,
-                audio_processed_seconds=run.audio_processed_seconds,
-                audio_total_seconds=run.audio_total_seconds,
-            )
-        )
 
 
 # --------------------------------------------------------------------------
@@ -993,7 +729,8 @@ def _check_sample_rate(info: SeparatorInfo, parameters: DemucsParameters) -> Non
 
     The manifest states the rate twice, and both are load-bearing in different
     places: the entry's top-level ``sample_rate`` is what FFmpeg resamples the
-    source to (:meth:`DemucsSeparator._decode`, via
+    source to
+    (:meth:`straticate.inference.torch_separator.TorchSeparator._decode`, via
     :attr:`SeparatorInfo.sample_rate`), while
     ``default_inference_parameters.model.samplerate`` is what the architecture is
     built with and what sizes the training window. They are two edits apart, and
@@ -1008,30 +745,13 @@ def _check_sample_rate(info: SeparatorInfo, parameters: DemucsParameters) -> Non
         ApplicationError: ``model_parameters_invalid`` (500).
     """
     if info.sample_rate != parameters.sample_rate:
-        raise _parameters_invalid(
+        raise parameters_invalid(
             info.model_id,
             (
                 f"the catalog entry decodes audio at {info.sample_rate} Hz (its sample_rate) "
                 f"but builds the network at {parameters.sample_rate} Hz "
                 f"(default_inference_parameters.model.samplerate); the two must agree"
             ),
-        )
-
-
-def _require_installed_weights(info: SeparatorInfo, weights_file: Path) -> None:
-    """Fail with ``model_weights_missing`` (409) when nothing is installed yet.
-
-    Called before anything else a separator checks: this is the one failure a
-    *user* can fix, and feature 025's installer is where they fix it. Because
-    :meth:`straticate.inference.registry.SeparatorRegistry.aget` is awaited
-    inside ``POST /jobs``, this is the status that request answers with.
-    """
-    if not weights_file.is_file():
-        raise ApplicationError(
-            "model_weights_missing",
-            f"Model {info.model_id!r} is catalogued but its weights are not installed.",
-            status_code=409,
-            detail={"model_id": info.model_id},
         )
 
 
@@ -1044,28 +764,20 @@ def _load_model(info: SeparatorInfo, weights_file: Path, parameters: DemucsParam
     stored in ``float16``; ``load_state_dict`` casts them into the network's
     ``float32`` parameters, which is what upstream does too.
     """
-    _require_installed_weights(info, weights_file)
+    require_installed_weights(info, weights_file)
     package = load_checkpoint_package(weights_file, model_id=info.model_id)
     _check_sources(package, parameters, model_id=info.model_id)
     try:
         model = HTDemucs(**parameters.model)
     except (TypeError, ValueError, AssertionError) as exc:
-        raise _parameters_invalid(info.model_id, str(exc)) from exc
+        raise parameters_invalid(info.model_id, str(exc)) from exc
     try:
         model.load_state_dict(package["state"], strict=True)
     except ApplicationError:
         raise
     except Exception as exc:
         logger.exception("Loading weights for model %s failed", info.model_id)
-        raise ApplicationError(
-            "model_weights_invalid",
-            (
-                f"The installed weights for model {info.model_id!r} could not be loaded "
-                f"into its architecture."
-            ),
-            status_code=500,
-            detail={"model_id": info.model_id, "reason": type(exc).__name__},
-        ) from exc
+        raise weights_not_loadable(info.model_id, type(exc).__name__) from exc
     model.eval()
     for parameter in cast("Iterable[Tensor]", model.parameters()):
         parameter.requires_grad_(False)
@@ -1124,7 +836,7 @@ def _check_sources(
             detail={"model_id": model_id, "reason": "no_recorded_sources"},
         )
     if actual != parameters.sources:
-        raise _parameters_invalid(
+        raise parameters_invalid(
             model_id,
             (
                 f"the catalog says the network emits {list(parameters.sources)} but the "
@@ -1187,7 +899,7 @@ def stem_source_indices(info: SeparatorInfo, parameters: DemucsParameters) -> tu
     if sorted(sources) != sorted(advertised):
         missing = sorted(set(advertised) - set(sources))
         extra = sorted(set(sources) - set(advertised))
-        raise _parameters_invalid(
+        raise parameters_invalid(
             info.model_id,
             (
                 f"the catalog advertises stems {list(advertised)} but the network emits "
@@ -1202,26 +914,16 @@ def stem_source_indices(info: SeparatorInfo, parameters: DemucsParameters) -> tu
 def _validate_sources(value: Any, model_id: str) -> None:
     """The one model parameter this backend cannot run without."""
     if not isinstance(value, Sequence) or isinstance(value, str | bytes):
-        raise _parameters_invalid(
+        raise parameters_invalid(
             model_id, "default_inference_parameters.model.sources must be a list of stem names"
         )
     names = cast("Sequence[Any]", value)
     if not names or not all(isinstance(name, str) for name in names):
-        raise _parameters_invalid(
+        raise parameters_invalid(
             model_id, "default_inference_parameters.model.sources must be a list of stem names"
         )
     if len(set(cast("Sequence[str]", names))) != len(names):
-        raise _parameters_invalid(model_id, "model.sources contains a duplicate name")
-
-
-def _parameters_invalid(model_id: str, reason: str) -> ApplicationError:
-    """The one error for "this catalog entry cannot be run as configured"."""
-    return ApplicationError(
-        "model_parameters_invalid",
-        f"Model {model_id!r} has unusable inference parameters: {reason}.",
-        status_code=500,
-        detail={"model_id": model_id, "reason": reason},
-    )
+        raise parameters_invalid(model_id, "model.sources contains a duplicate name")
 
 
 def _as_fraction(value: Any, key: str, model_id: str) -> Any:
@@ -1237,23 +939,16 @@ def _as_fraction(value: Any, key: str, model_id: str) -> Any:
             numerator, denominator = cast("list[int]", pair)
             if denominator > 0:
                 return Fraction(numerator, denominator)
-    raise _parameters_invalid(
+    raise parameters_invalid(
         model_id,
         f"model.{key} must be a number or a [numerator, denominator] pair, got {value!r}",
     )
 
 
-def _positive_int(value: Any, model_id: str) -> int:
-    """Coerce a catalog number to a positive int, or fail loudly."""
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise _parameters_invalid(model_id, f"expected a positive integer, got {value!r}")
-    return value
-
-
 def _fraction_in_unit_interval(value: Any, key: str, model_id: str) -> float:
     """Coerce a catalog number to a fraction in ``[0, 1)``, or fail loudly."""
     if isinstance(value, bool) or not isinstance(value, int | float) or not 0.0 <= value < 1.0:
-        raise _parameters_invalid(
+        raise parameters_invalid(
             model_id, f"inference.{key} must be a number in [0, 1), got {value!r}"
         )
     return float(value)
@@ -1262,191 +957,8 @@ def _fraction_in_unit_interval(value: Any, key: str, model_id: str) -> float:
 def _at_least_one(value: Any, key: str, model_id: str) -> float:
     """Coerce a catalog number to a float ``>= 1``, or fail loudly."""
     if isinstance(value, bool) or not isinstance(value, int | float) or value < 1.0:
-        raise _parameters_invalid(model_id, f"inference.{key} must be a number >= 1, got {value!r}")
+        raise parameters_invalid(model_id, f"inference.{key} must be a number >= 1, got {value!r}")
     return float(value)
-
-
-# --------------------------------------------------------------------------
-# Devices
-#
-# The five definitions below are, deliberately, the same shape as feature 026's
-# in ``inference/roformer/separator.py``: a logical device ID maps onto a torch
-# device in exactly one small function, CUDA memory is read through a single
-# ``cuda_namespace()`` seam a test can double, the peak is reset once per run,
-# and NVML stays optional and initialised at most once. They are duplicated
-# rather than shared because 026's tests exercise its CUDA path by patching
-# *that module's* globals, so folding the two together would change a seam this
-# feature has no business changing. Extracting one ``inference/torch_device.py``
-# for both backends is the obvious follow-up and is recorded as such in
-# ``docs/features/028-demucs-four-stem.md``.
-# --------------------------------------------------------------------------
-
-
-def _resolve_torch_device(device_id: str | None) -> torch.device:
-    """Map a *logical* device ID (feature 018) onto a torch device.
-
-    ARCHITECTURE.md §10 says raw torch device objects never leak through
-    application-level APIs, so they are constructed here from the ID the job
-    already resolved and recorded.
-
-    Raises:
-        ApplicationError: ``compute_device_unavailable`` (409) when the job
-            names a device this process cannot use.
-    """
-    if device_id is None or device_id == "cpu":
-        return torch.device("cpu")
-    try:
-        device = torch.device(device_id)
-    except (RuntimeError, ValueError) as exc:
-        raise _device_unavailable(device_id, "not a device this build understands") from exc
-    if device.type == "cpu":
-        return device
-    if device.type != "cuda" or not torch.cuda.is_available():
-        raise _device_unavailable(device_id, "no such compute backend is available")
-    if (device.index or 0) >= torch.cuda.device_count():
-        raise _device_unavailable(device_id, "no such device index")
-    return device
-
-
-def _device_unavailable(device_id: str, reason: str) -> ApplicationError:
-    return ApplicationError(
-        "compute_device_unavailable",
-        f"Compute device {device_id!r} is not available: {reason}.",
-        status_code=409,
-        detail={"device_id": device_id, "reason": reason},
-    )
-
-
-class _CudaDevicePropertiesLike(Protocol):
-    """The subset of ``torch.cuda.get_device_properties()`` this module reads."""
-
-    name: str
-    total_memory: int
-
-
-def cuda_namespace() -> Any:
-    """The ``torch.cuda`` namespace, as ``Any``.
-
-    Where torch's unannotated CUDA members are reached (strict mode reports them
-    as partially unknown), and the single seam a test replaces to exercise the
-    CUDA telemetry path on a host with no GPU.
-    """
-    return torch.cuda
-
-
-def reset_peak_memory(device: torch.device) -> None:
-    """Start a fresh peak-memory measurement for ``device``; a no-op off CUDA.
-
-    ``torch.cuda.max_memory_allocated`` is a **per-device high-water mark that
-    only an explicit reset clears**, so this belongs once per separation. It
-    resets the peak to the currently allocated figure rather than to zero, so
-    the resident network still counts towards the run's peak.
-    """
-    if device.type != "cuda":
-        return
-    cuda_namespace().reset_peak_memory_stats(device)
-
-
-def device_stats(device: torch.device) -> DeviceStats | None:
-    """Real device telemetry, or ``None`` on CPU (the contract's ``gpu: null``).
-
-    ARCHITECTURE.md §12 lists utilization and temperature as NVML-sourced and
-    **optional**; they stay ``None`` unless an NVML binding happens to be
-    importable, so nothing here can make basic operation depend on it.
-    """
-    cuda = cuda_namespace()
-    if device.type != "cuda" or not cuda.is_available():
-        return None
-    index = device.index or 0
-    properties = cast("_CudaDevicePropertiesLike", cuda.get_device_properties(index))
-    utilization, temperature = _NVML.sample(index)
-    return DeviceStats(
-        device_id=f"cuda:{index}",
-        name=str(properties.name),
-        backend="cuda",
-        memory_allocated_bytes=int(cuda.memory_allocated(index)),
-        memory_peak_bytes=int(cuda.max_memory_allocated(index)),
-        memory_total_bytes=int(properties.total_memory),
-        utilization=utilization,
-        temperature_celsius=temperature,
-    )
-
-
-class NvmlProbe:
-    """Optional NVML utilization/temperature, initialised **at most once**.
-
-    NVML is not a dependency and never becomes one (ARCHITECTURE.md §12). But it
-    is sampled from :meth:`DemucsSeparator.runtime_stats`, which
-    :class:`straticate.telemetry.TelemetrySampler` calls **directly on the event
-    loop** — deliberately, because :mod:`straticate.inference.base` promises that
-    ``runtime_stats()`` "must be a cheap, non-blocking snapshot". An
-    ``nvmlInit()``/``nvmlShutdown()`` pair per sample is not that, so the binding
-    is loaded and initialised lazily on the first sample, the device handles are
-    cached, and shutdown is left to :mod:`atexit`. What remains per sample is two
-    driver queries.
-
-    The module imported here is ``pynvml``, but the package that supplies it is
-    **``nvidia-ml-py``** — NVIDIA's own binding. The PyPI package *named*
-    ``pynvml`` is a deprecated shim whose import hook raises ``FutureWarning``
-    from inside ``torch/cuda/__init__.py``, which breaks the whole suite under
-    ``-W error``. DEVELOPMENT.md, *Optional: NVML*, has the traceback.
-    """
-
-    __slots__ = ("_handles", "_module", "_unavailable")
-
-    def __init__(self) -> None:
-        self._module: Any | None = None
-        self._handles: dict[int, Any] = {}
-        self._unavailable = False
-
-    def sample(self, index: int) -> tuple[float | None, float | None]:
-        """Utilization (0..1) and temperature in °C, or ``(None, None)``."""
-        module = self._load()
-        if module is None:
-            return None, None
-        try:  # pragma: no cover - needs a real NVML binding and driver
-            handle = self._handles.get(index)
-            if handle is None:
-                handle = module.nvmlDeviceGetHandleByIndex(index)
-                self._handles[index] = handle
-            rates = module.nvmlDeviceGetUtilizationRates(handle)
-            celsius = module.nvmlDeviceGetTemperature(handle, module.NVML_TEMPERATURE_GPU)
-            return round(float(rates.gpu) / 100.0, 3), float(celsius)
-        except Exception:
-            self._handles.pop(index, None)
-            return None, None
-
-    def _load(self) -> Any | None:
-        """Import and initialise NVML once, or remember that it is unusable."""
-        if self._module is not None:
-            return self._module
-        if self._unavailable:
-            return None
-        try:
-            module: Any = importlib.import_module("pynvml")
-            module.nvmlInit()
-        except Exception:
-            logger.debug("NVML is unavailable; GPU utilization and temperature stay empty.")
-            self._unavailable = True
-            return None
-        atexit.register(self._shutdown)
-        self._module = module
-        return module
-
-    def _shutdown(self) -> None:
-        """Release NVML at interpreter exit. Never raises."""
-        module, self._module = self._module, None
-        self._handles.clear()
-        if module is None:
-            return
-        try:  # pragma: no cover - only runs at interpreter exit on an NVML host
-            module.nvmlShutdown()
-        except Exception:
-            logger.debug("NVML shutdown failed; ignoring at teardown.")
-
-
-_NVML = NvmlProbe()
-"""Process-wide NVML probe. Replaced wholesale in tests; never re-created here."""
 
 
 # --------------------------------------------------------------------------
@@ -1497,84 +1009,6 @@ def _center_trim(tensor: Tensor, length: int) -> Tensor:
     return tensor[..., delta // 2 : -(delta - delta // 2)]
 
 
-# --------------------------------------------------------------------------
-# Audio conversion
-# --------------------------------------------------------------------------
-
-
-def pcm_to_tensor(source: PcmAudio, wanted_channels: int) -> Tensor:
-    """Decoded 16-bit PCM → a ``(channels, samples)`` float tensor in ``[-1, 1]``.
-
-    A mono source fed to a stereo network is duplicated across both channels
-    (and folded back down afterwards by :func:`_to_source_channels`), so the
-    application never has to care that this particular checkpoint is stereo-only.
-    """
-    frames = source.frame_count
-    planes = [_plane_to_tensor(plane, frames) for plane in source.channels]
-    stacked = torch.stack(planes)
-    if stacked.shape[0] == wanted_channels:
-        return stacked
-    if stacked.shape[0] == 1:
-        return stacked.expand(wanted_channels, -1).contiguous()
-    return stacked.mean(dim=0, keepdim=True).expand(wanted_channels, -1).contiguous()
-
-
-def _plane_to_tensor(plane: array[int], frames: int) -> Tensor:
-    """One ``array("h")`` channel → a float tensor scaled to ``[-1, 1]``."""
-    buffer = memoryview(plane)[:frames]
-    return torch.frombuffer(bytearray(buffer), dtype=torch.int16).to(torch.float32) / INT16_SCALE
-
-
-def _to_source_channels(plane: Tensor, channels: int) -> Tensor:
-    """Return a ``(channels, samples)`` view of a model-layout stem."""
-    if plane.shape[0] == channels:
-        return plane
-    if channels == 1:
-        return plane.mean(dim=0, keepdim=True)
-    return plane[:1].expand(channels, -1).contiguous()
-
-
-def tensor_to_pcm(plane: Tensor, sample_rate: int) -> PcmAudio:
-    """Float ``(channels, samples)`` in ``[-1, 1]`` → 16-bit planar PCM."""
-    quantized = (plane.clamp(-1.0, 1.0) * INT16_SCALE).round().to(torch.int16).contiguous()
-    channels = tuple(_tensor_to_plane(quantized[index]) for index in range(quantized.shape[0]))
-    return PcmAudio(sample_rate=sample_rate, channels=channels)
-
-
-def _tensor_to_plane(row: Tensor) -> array[int]:
-    """One int16 row → the ``array("h")`` :mod:`straticate.inference.pcm` speaks."""
-    plane: array[int] = array("h")
-    plane.frombytes(row.contiguous().numpy().tobytes())
-    return plane
-
-
-# --------------------------------------------------------------------------
-# Small shared helpers
-# --------------------------------------------------------------------------
-
-
-def _announce(stage_callback: StageCallback | None, stage: JobState) -> None:
-    if stage_callback is not None:
-        stage_callback(stage)
-
-
-def _realtime_factor(audio_seconds: float, processing_seconds: float) -> float:
-    """RTF = audio duration / processing duration (``0.0`` when not meaningful)."""
-    if processing_seconds <= 0.0 or audio_seconds <= 0.0:
-        return 0.0
-    return audio_seconds / processing_seconds
-
-
-def _discard_outputs(output_dir: Path, stems: tuple[str, ...]) -> None:
-    """Remove any stem file this separator may have written under ``output_dir``."""
-    for name in stems:
-        for candidate in (output_dir / f"{name}.wav", output_dir / f"{name}.wav.part"):
-            try:
-                candidate.unlink(missing_ok=True)
-            except OSError:  # pragma: no cover - best-effort cleanup
-                logger.warning("Could not remove partial output %s", candidate)
-
-
 __all__ = [
     "CHECKPOINT_PICKLE_GLOBALS",
     "DEFAULT_OVERLAP",
@@ -1583,7 +1017,6 @@ __all__ = [
     "CheckpointArchitecture",
     "DemucsParameters",
     "DemucsSeparator",
-    "NvmlProbe",
     "RestrictedUnpickler",
     "load_checkpoint_package",
     "stem_source_indices",
