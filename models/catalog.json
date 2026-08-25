@@ -43,7 +43,11 @@
       "quality_tier": "high_quality",
       "stems": ["vocals", "instrumental"],
       "sample_rate": 44100,
-      "requirements": { "recommended_vram_mb": 8192, "minimum_ram_mb": 8192 },
+      "requirements": {
+        "recommended_vram_mb": 6144,
+        "minimum_vram_mb": 4096,
+        "minimum_ram_mb": 8192
+      },
       "capabilities": { "cuda": true, "cpu": true },
       "artifact": {
         "download_url": "https://huggingface.co/KimberleyJSN/melbandroformer/resolve/94a0e5de2622a4160198b158e6f8141296da887e/MelBandRoformer.ckpt",

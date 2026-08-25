@@ -53,9 +53,19 @@
     "sample_rate": { "type": "integer", "minimum": 8000 },
     "requirements": {
       "type": "object",
+      "description": "Advisory resource figures, surfaced on the public Model resource. Nothing enforces them; they exist so a user can tell whether their hardware is suitable before a 900 MB download.",
       "additionalProperties": false,
       "properties": {
-        "recommended_vram_mb": { "type": "integer", "minimum": 0 },
+        "recommended_vram_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "GPU VRAM in MiB for comfortable use: a full-length track, on a card that is also driving a display. A **measured** whole-device peak plus headroom, not a bound the code enforces — record how it was measured, and at which default_inference_parameters, in the feature document that set it (peak scales with inference.chunk_size and with track length)."
+        },
+        "minimum_vram_mb": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "GPU VRAM in MiB below which this model should not be attempted on that backend at all — the floor, where recommended_vram_mb is the comfortable figure. Measured the same way. Omit when no meaningful floor is known; a model with no CUDA capability has no use for either field."
+        },
         "minimum_ram_mb": { "type": "integer", "minimum": 0 }
       }
     },
