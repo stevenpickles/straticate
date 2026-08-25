@@ -35,6 +35,19 @@ Without an entry the ID is humanized (``standard_stems`` → ``Standard Stems``)
 Tier labels are humanized the same way (``high_quality`` → ``High Quality``),
 which is why no label table exists anywhere in this package.
 
+*Development fixtures* are dropped before any of that (feature 032). A manifest
+entry may declare ``development_only``, meaning it exists to exercise the
+application rather than to separate audio, and such an entry is not part of the
+catalog unless :class:`ModelCatalog` is built with ``include_development=True``
+(from :attr:`straticate.config.Settings.include_development_models`). The marker
+is on the *manifest*, deliberately: "fixture" is a fact the catalog author
+states, not something inferred from ``architecture`` — an open set nothing
+outside :mod:`straticate.inference` may branch on (ARCHITECTURE.md §1). Because
+the filter runs here, at the single point the catalog is constructed, every
+consumer — the model routes, the installer, ``POST /jobs``'s mode/quality
+resolution — is consistent by construction, and a mode left with no models
+disappears instead of being served empty.
+
 Architecture-specific manifest fields (``default_inference_parameters``) are
 absent from :class:`~straticate.schemas.Model`, so they can never reach the API:
 users choose modes and quality tiers, never inference parameters. They are not
@@ -261,6 +274,23 @@ class ModelCatalog:
     process runs — :class:`straticate.models.installer.ModelInstaller` overlays
     the live state, and the model routes serve *that*.
 
+    **Development fixtures are filtered out here, once** (feature 032). An entry
+    whose manifest declares ``development_only`` is not a separator — today it
+    is the comb filter of ARCHITECTURE.md §8 — and unless ``include_development``
+    says otherwise it is absent from :meth:`list_models`, :meth:`list_entries`,
+    :meth:`get_entry` and every derived mode. Filtering at the single place the
+    catalog is built, rather than at each route, is what makes "a user cannot
+    select or run a fixture" a property of the object every surface already
+    shares: the model routes, the installer, and ``POST /jobs``'s mode/quality
+    resolution all read *this*, so none of them needs to know the rule exists.
+    A mode whose every model is filtered out is not derived at all, so no empty,
+    unselectable mode is ever served.
+
+    The catalog is nonetheless **validated as written**, hidden entries
+    included: whether a fixture is served must never decide whether a malformed
+    catalog is detected, or CI (fixtures on) and a user's machine (fixtures off)
+    would disagree about which files are valid.
+
     Args:
         models: The catalog's entries, in presentation order. A bare
             :class:`~straticate.schemas.Model` is taken to have no artifact,
@@ -269,6 +299,11 @@ class ModelCatalog:
             fall back to a humanized ID.
         source: Human-readable origin used in error messages (a file path when
             loaded from disk).
+        include_development: Whether entries marked ``development_only`` are
+            part of the catalog. Defaults to ``False`` — the user-facing
+            behaviour; :attr:`straticate.config.Settings.include_development_models`
+            (``STRATICATE_INCLUDE_DEVELOPMENT_MODELS``) is what turns it on for
+            the test suite, CI and the end-to-end tier.
 
     Raises:
         ModelCatalogError: On an unusable or duplicate model ID, models of one
@@ -282,25 +317,41 @@ class ModelCatalog:
         *,
         mode_display_names: Mapping[str, str] | None = None,
         source: str = "<memory>",
+        include_development: bool = False,
     ) -> None:
         self._source = source
-        self._entries: list[CatalogEntry] = [_as_entry(item, source) for item in models]
-        self._models: list[Model] = [entry.model for entry in self._entries]
-        self._by_id: dict[str, CatalogEntry] = {}
-        for entry in self._entries:
-            if entry.model.id in self._by_id:
+        declared = [_as_entry(item, source) for item in models]
+        seen: set[str] = set()
+        for entry in declared:
+            if entry.model.id in seen:
                 raise ModelCatalogError(f"{source}: duplicate model ID {entry.model.id!r}.")
-            self._by_id[entry.model.id] = entry
-        self._modes: list[SeparationMode] = self._derive_modes(mode_display_names or {})
+            seen.add(entry.model.id)
+        labels = dict(mode_display_names or {})
+        # Derive over *every* declared entry first and throw the result away:
+        # this is the consistency check (stems agreement, tier uniqueness), and
+        # it has to see the file as written so a broken fixture cannot hide
+        # behind being filtered out. See the class docstring.
+        self._derive_modes([entry.model for entry in declared], labels)
+        self._entries: list[CatalogEntry] = [
+            entry for entry in declared if include_development or not entry.model.development_only
+        ]
+        self._models: list[Model] = [entry.model for entry in self._entries]
+        self._by_id: dict[str, CatalogEntry] = {entry.model.id: entry for entry in self._entries}
+        self._modes: list[SeparationMode] = self._derive_modes(self._models, labels)
 
     @classmethod
-    def from_directory(cls, models_dir: Path) -> Self:
-        """Load the catalog from ``{models_dir}/catalog.json``."""
-        return cls.from_file(models_dir / CATALOG_FILENAME)
+    def from_directory(cls, models_dir: Path, *, include_development: bool = False) -> Self:
+        """Load the catalog from ``{models_dir}/catalog.json``.
+
+        ``include_development`` is forwarded verbatim; see the class docstring.
+        """
+        return cls.from_file(models_dir / CATALOG_FILENAME, include_development=include_development)
 
     @classmethod
-    def from_file(cls, path: Path) -> Self:
+    def from_file(cls, path: Path, *, include_development: bool = False) -> Self:
         """Load and validate a catalog file.
+
+        ``include_development`` is forwarded verbatim; see the class docstring.
 
         Raises:
             ModelCatalogError: If the file cannot be read, is not JSON, does not
@@ -328,10 +379,15 @@ class ModelCatalog:
                 mode_id: label.display_name for mode_id, label in catalog.separation_modes.items()
             },
             source=source,
+            include_development=include_development,
         )
 
     def list_models(self) -> list[Model]:
         """Every model in the catalog, in catalog order.
+
+        "Every" means every *catalogued* model: development fixtures are absent
+        unless the catalog was built with ``include_development`` (see the class
+        docstring).
 
         The models carry the *baseline* installation state (see the class
         docstring); the model routes serve
@@ -390,10 +446,19 @@ class ModelCatalog:
         """
         return list(self._modes)
 
-    def _derive_modes(self, labels: Mapping[str, str]) -> list[SeparationMode]:
-        """Group models into modes and build each mode's stems and tiers."""
+    def _derive_modes(
+        self, models: Sequence[Model], labels: Mapping[str, str]
+    ) -> list[SeparationMode]:
+        """Group ``models`` into modes and build each mode's stems and tiers.
+
+        A mode exists exactly when at least one of ``models`` serves it, so a
+        mode all of whose models were filtered out simply does not appear —
+        which is why no mode is ever served with an empty ``quality_options``
+        list, and why ``standard_stems`` (backed only by a fixture until feature
+        028) vanishes rather than degrading into an unusable choice.
+        """
         grouped: dict[str, list[Model]] = {}
-        for model in self._models:
+        for model in models:
             grouped.setdefault(model.separation_mode, []).append(model)
         return [
             SeparationMode(

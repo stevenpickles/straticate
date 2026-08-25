@@ -51,6 +51,7 @@ from straticate.schemas.jobs import (
 )
 from straticate.system import CPU_DEVICE_ID, CUDA_BACKEND, DeviceDetector
 from tests.audio_fixtures import write_tone_wav
+from tests.conftest import fake_quality_id
 from tests.roformer_fixtures import TINY_SAMPLE_RATE, tiny_catalog_block, write_tiny_weights
 
 JOBS_URL = "/api/v1/jobs"
@@ -260,11 +261,17 @@ def manager_of(app: FastAPI) -> JobManager:
 
 
 def configuration(audio_id: str, **overrides: Any) -> dict[str, Any]:
-    """A create-job request body."""
+    """A create-job request body.
+
+    ``quality_id`` follows ``mode_id`` unless the caller pins it: the shipped
+    fixtures back ``balanced`` in ``vocals`` and ``fast`` in ``standard_stems``
+    (see ``conftest.FAKE_QUALITY_TIERS``).
+    """
+    mode_id = cast(str, overrides.pop("mode_id", "vocals"))
     body: dict[str, Any] = {
         "audio_id": audio_id,
-        "mode_id": "vocals",
-        "quality_id": "balanced",
+        "mode_id": mode_id,
+        "quality_id": fake_quality_id(mode_id),
     }
     body.update(overrides)
     return body
@@ -864,3 +871,55 @@ async def test_weights_that_do_not_match_the_architecture_are_a_500_from_create(
 
     error = assert_envelope(await post_job(app, audio), "model_weights_invalid", 500)
     assert error["detail"]["model_id"] == "tiny-vocals-001"
+
+
+# -- development fixtures (feature 032) --------------------------------------
+
+
+def development_app(tmp_path: Path, *, development: bool) -> FastAPI:
+    """The repository catalog, with its development fixtures on or off.
+
+    ``build_app`` inherits the session's environment, which enables fixtures so
+    that most of this module can separate audio at all. These tests are about
+    what each state actually accepts, so the setting is passed explicitly.
+    """
+    app = create_app(Settings(data_dir=tmp_path / "data", include_development_models=development))
+    app.state.device_detector = DeviceDetector(probes=[StaticProbe()])
+    app.state.separator_registry = fast_registry()
+    return app
+
+
+async def test_a_job_cannot_select_a_hidden_fixture(tmp_path: Path) -> None:
+    """The tier the fake model backed is simply not offered any more.
+
+    ``vocals``/``balanced`` was ``fake-vocals-001`` — and the first option of
+    its mode, which feature 011's UI preselects. With fixtures hidden the mode
+    still exists (the RoFormer backs ``high_quality``) but the tier does not, so
+    the request is refused with the code that already means that.
+    """
+    app = development_app(tmp_path, development=False)
+    audio = register_audio(app)
+
+    response = await post_job(app, audio, mode_id="vocals", quality_id="balanced")
+    error = assert_envelope(response, "quality_option_not_found", 404)
+    assert error["detail"] == {"mode_id": "vocals", "quality_id": "balanced"}
+
+
+async def test_a_job_cannot_select_a_mode_only_a_fixture_backed(tmp_path: Path) -> None:
+    """``standard_stems`` is not a mode on a default server, so it 404s as one."""
+    app = development_app(tmp_path, development=False)
+    audio = register_audio(app)
+
+    response = await post_job(app, audio, mode_id="standard_stems", quality_id="balanced")
+    error = assert_envelope(response, "separation_mode_not_found", 404)
+    assert error["detail"] == {"mode_id": "standard_stems"}
+
+
+async def test_the_same_request_succeeds_when_fixtures_are_enabled(tmp_path: Path) -> None:
+    """The refusals above are the setting, not a broken job pipeline."""
+    app = development_app(tmp_path, development=True)
+    audio = register_audio(app)
+
+    response = await post_job(app, audio, mode_id="vocals", quality_id="balanced")
+    assert response.status_code == 201, response.text
+    assert cast(dict[str, Any], response.json())["model_id"] == VOCALS_MODEL_ID
