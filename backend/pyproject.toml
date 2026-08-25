@@ -42,6 +42,14 @@ torch = [
     # remaining three are what the vendored Mel-Band RoFormer architecture
     # imports (see ``src/straticate/inference/roformer/vendor/README.md``): all
     # pure-Python, all tiny, none of them a model registry or a downloader.
+    #
+    # Feature 028 (Hybrid Transformer Demucs) added **no** dependency at all:
+    # its vendored architecture imports only ``torch``, ``einops`` and
+    # ``numpy``, every one of which is already here. Depending on the ``demucs``
+    # package instead would have added eight — including ``huggingface-hub``
+    # (a second model registry and downloader), ``lameenc`` and ``sphn`` (a
+    # second audio I/O layer) and ``tqdm``. See
+    # ``src/straticate/inference/demucs/vendor/README.md``.
     "torch>=2.4",
     # torch warns at *import* time when NumPy is absent ("Failed to initialize
     # NumPy"), which the suite would see as a finding under ``-W error``
@@ -96,8 +104,11 @@ line-length = 100
 src = ["src", "tests"]
 # Vendored third-party code is pinned, not maintained: it must stay diffable
 # against the upstream commit it was copied from, so it is neither formatted nor
-# linted here. See src/straticate/inference/roformer/vendor/README.md.
-extend-exclude = ["src/straticate/inference/roformer/vendor"]
+# linted here. See each directory's README.md.
+extend-exclude = [
+    "src/straticate/inference/roformer/vendor",
+    "src/straticate/inference/demucs/vendor",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
@@ -114,10 +125,26 @@ include = ["src", "tests"]
 exclude = [
     "src/straticate/inference/roformer/vendor/attend.py",
     "src/straticate/inference/roformer/vendor/mel_band_roformer.py",
+    "src/straticate/inference/demucs/vendor/demucs.py",
+    "src/straticate/inference/demucs/vendor/hdemucs.py",
+    "src/straticate/inference/demucs/vendor/htdemucs.py",
+    "src/straticate/inference/demucs/vendor/spec.py",
+    "src/straticate/inference/demucs/vendor/states.py",
+    "src/straticate/inference/demucs/vendor/transformer.py",
+    "src/straticate/inference/demucs/vendor/utils.py",
+    "src/straticate/inference/demucs/vendor/wiener.py",
 ]
 ignore = [
     "src/straticate/inference/roformer/vendor/attend.py",
     "src/straticate/inference/roformer/vendor/mel_band_roformer.py",
+    "src/straticate/inference/demucs/vendor/demucs.py",
+    "src/straticate/inference/demucs/vendor/hdemucs.py",
+    "src/straticate/inference/demucs/vendor/htdemucs.py",
+    "src/straticate/inference/demucs/vendor/spec.py",
+    "src/straticate/inference/demucs/vendor/states.py",
+    "src/straticate/inference/demucs/vendor/transformer.py",
+    "src/straticate/inference/demucs/vendor/utils.py",
+    "src/straticate/inference/demucs/vendor/wiener.py",
 ]
 typeCheckingMode = "strict"
 pythonVersion = "3.12"

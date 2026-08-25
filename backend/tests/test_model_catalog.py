@@ -70,7 +70,12 @@ def test_default_models_dir_holds_the_repository_catalog() -> None:
 
 def test_real_catalog_loads(real_catalog: ModelCatalog) -> None:
     ids = [model.id for model in real_catalog.list_models()]
-    assert ids == ["fake-vocals-001", "fake-standard-001", "vocals-hq-001"]
+    assert ids == [
+        "fake-vocals-001",
+        "fake-standard-001",
+        "vocals-hq-001",
+        "standard-stems-001",
+    ]
 
 
 def test_missing_catalog_file_fails_loudly(tmp_path: Path) -> None:
@@ -211,7 +216,12 @@ def test_modes_derived_from_the_repository_catalog(real_catalog: ModelCatalog) -
     standard = modes["standard_stems"]
     assert standard.display_name == "Standard Stems"
     assert standard.stems == ["vocals", "drums", "bass", "other"]
-    assert [option.model_id for option in standard.quality_options] == ["fake-standard-001"]
+    # Two tiers since feature 028: the fixture claims ``fast`` and the Hybrid
+    # Transformer Demucs backs ``balanced``.
+    assert [(option.id, option.model_id) for option in standard.quality_options] == [
+        ("fast", "fake-standard-001"),
+        ("balanced", "standard-stems-001"),
+    ]
 
 
 def test_the_real_model_keeps_its_inference_parameters_off_the_public_model(
@@ -366,6 +376,7 @@ def test_the_shipped_fixtures_are_marked_development_only() -> None:
     assert entries["fake-standard-001"]["development_only"] is True
     # Nothing real may be marked, or a user's catalog would silently lose it.
     assert entries["vocals-hq-001"].get("development_only", False) is False
+    assert entries["standard-stems-001"].get("development_only", False) is False
 
 
 def test_every_entry_the_fake_engine_serves_is_marked() -> None:
@@ -387,20 +398,24 @@ def test_every_entry_the_fake_engine_serves_is_marked() -> None:
 
 def test_the_repository_catalog_offers_a_user_no_fixture() -> None:
     catalog = user_catalog(Settings().models_dir)
-    assert [model.id for model in catalog.list_models()] == ["vocals-hq-001"]
-    assert [entry.model.id for entry in catalog.list_entries()] == ["vocals-hq-001"]
+    real = ["vocals-hq-001", "standard-stems-001"]
+    assert [model.id for model in catalog.list_models()] == real
+    assert [entry.model.id for entry in catalog.list_entries()] == real
 
 
-def test_the_repository_catalog_loses_the_mode_only_a_fixture_backed() -> None:
-    """``standard_stems`` disappears rather than being served empty.
+def test_every_mode_a_user_is_offered_is_backed_by_a_real_model() -> None:
+    """Feature 032's rule, now that both modes have a real model behind them.
 
-    There is no real four-stem model until feature 028. An empty mode would be a
-    choice the UI could render and nobody could use, so the mode is simply not
-    derived (see ``ModelCatalog._derive_modes``).
+    Until feature 028, ``standard_stems`` was backed only by a fixture and so
+    disappeared from a default server rather than being served empty. It is back,
+    with one tier — the Demucs entry — and the fixture's ``fast`` tier is still
+    filtered out.
     """
     modes = user_catalog(Settings().models_dir).list_separation_modes()
-    assert [mode.id for mode in modes] == ["vocals"]
+    assert [mode.id for mode in modes] == ["vocals", "standard_stems"]
     assert [option.model_id for option in modes[0].quality_options] == ["vocals-hq-001"]
+    assert [option.model_id for option in modes[1].quality_options] == ["standard-stems-001"]
+    assert modes[1].stems == ["vocals", "drums", "bass", "other"]
 
 
 @pytest.mark.parametrize("include_development", [False, True])
@@ -418,12 +433,17 @@ def test_including_development_serves_the_catalog_as_written(real_catalog: Model
         "fake-vocals-001",
         "fake-standard-001",
         "vocals-hq-001",
+        "standard-stems-001",
     ]
     modes = {mode.id: mode for mode in real_catalog.list_separation_modes()}
     assert set(modes) == {"vocals", "standard_stems"}
     assert [option.model_id for option in modes["vocals"].quality_options] == [
         "fake-vocals-001",
         "vocals-hq-001",
+    ]
+    assert [option.model_id for option in modes["standard_stems"].quality_options] == [
+        "fake-standard-001",
+        "standard-stems-001",
     ]
 
 

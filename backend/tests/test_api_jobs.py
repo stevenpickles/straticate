@@ -905,14 +905,20 @@ async def test_a_job_cannot_select_a_hidden_fixture(tmp_path: Path) -> None:
     assert error["detail"] == {"mode_id": "vocals", "quality_id": "balanced"}
 
 
-async def test_a_job_cannot_select_a_mode_only_a_fixture_backed(tmp_path: Path) -> None:
-    """``standard_stems`` is not a mode on a default server, so it 404s as one."""
+async def test_a_job_cannot_select_a_tier_only_a_fixture_backs(tmp_path: Path) -> None:
+    """The fixture's ``fast`` tier is not a tier a default server offers.
+
+    Until feature 028 the whole ``standard_stems`` mode vanished on a default
+    server and this was a ``separation_mode_not_found``. The mode is back — the
+    Demucs entry backs its ``balanced`` tier — so what is refused now is the one
+    tier that is still only a fixture, and it is refused as an unknown quality.
+    """
     app = development_app(tmp_path, development=False)
     audio = register_audio(app)
 
-    response = await post_job(app, audio, mode_id="standard_stems", quality_id="balanced")
-    error = assert_envelope(response, "separation_mode_not_found", 404)
-    assert error["detail"] == {"mode_id": "standard_stems"}
+    response = await post_job(app, audio, mode_id="standard_stems", quality_id="fast")
+    error = assert_envelope(response, "quality_option_not_found", 404)
+    assert error["detail"] == {"mode_id": "standard_stems", "quality_id": "fast"}
 
 
 async def test_the_same_request_succeeds_when_fixtures_are_enabled(tmp_path: Path) -> None:

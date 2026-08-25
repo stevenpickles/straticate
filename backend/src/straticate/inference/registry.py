@@ -65,6 +65,7 @@ from typing import Any
 from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS
 from straticate.errors import ApplicationError
 from straticate.inference.base import Separator, SeparatorInfo
+from straticate.inference.demucs.architecture import DEMUCS_ARCHITECTURE
 from straticate.inference.fake import (
     DEFAULT_CHUNK_DELAY_SECONDS,
     DEFAULT_CHUNK_SECONDS,
@@ -320,6 +321,68 @@ def roformer_separator_builder(
     return build
 
 
+def demucs_separator_builder(
+    *,
+    models_dir: Path | None,
+    inference_parameters: InferenceParameterSource | None = None,
+    ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
+) -> SeparatorBuilder:
+    """Build the :data:`SeparatorBuilder` for the Hybrid Transformer Demucs architecture.
+
+    The same shape as :func:`roformer_separator_builder`, for the same reasons —
+    read that docstring for the rationale, which applies here verbatim: the
+    descriptor comes from the public :class:`~straticate.schemas.Model`, the
+    hyperparameters and chunking from the entry's
+    ``default_inference_parameters``, the weights are *located* rather than
+    fetched at ``{models_dir}/weights/{model_id}/…``, and the implementation is
+    imported **inside** :func:`build` so that a build without the ``torch``
+    extra answers ``separator_unavailable`` (501) instead of failing to import
+    the application (feature 034).
+
+    What differs is only which package is imported. Adding a second Hybrid
+    Transformer Demucs checkpoint — ``htdemucs_6s``, say — is therefore a pure
+    data edit, as long as it is the same class; upstream's ``hdemucs_mmi`` and
+    ``mdx*`` bags are *not*, which is why the architecture ID names the class
+    family (see
+    :mod:`straticate.inference.demucs.architecture`).
+
+    Args:
+        models_dir: ``Settings.models_dir``. ``None`` means this process was not
+            told where weights live, which is a wiring error and is reported as
+            ``separator_unavailable`` rather than guessed at.
+        inference_parameters: Lookup for the model's
+            ``default_inference_parameters``.
+        ffmpeg_timeout_seconds: Bound for the separator's decode subprocesses.
+    """
+
+    def build(model: Model) -> Separator:
+        if models_dir is None or inference_parameters is None:
+            raise ApplicationError(
+                "separator_unavailable",
+                (
+                    f"Model {model.id!r} needs installed weights, but this application "
+                    f"was built without a models directory."
+                ),
+                status_code=501,
+                detail={"model_id": model.id, "architecture": model.architecture},
+            )
+        try:
+            from straticate.inference.demucs import DemucsParameters, DemucsSeparator
+        except ImportError as exc:
+            _log_backend_import_failure(model, exc)
+            raise _separator_unavailable(model) from exc
+        return DemucsSeparator(
+            separator_info_from_model(model),
+            weights_file=weights_path(models_dir, model.id),
+            parameters=DemucsParameters.from_catalog(
+                inference_parameters(model.id), model_id=model.id
+            ),
+            ffmpeg_timeout_seconds=ffmpeg_timeout_seconds,
+        )
+
+    return build
+
+
 def default_separator_builders(
     *,
     ffmpeg_timeout_seconds: float = DEFAULT_FFMPEG_TIMEOUT_SECONDS,
@@ -328,8 +391,9 @@ def default_separator_builders(
 ) -> Mapping[str, SeparatorBuilder]:
     """The builders a :class:`SeparatorRegistry` starts with.
 
-    Two architectures: the fake engine (feature 014) and Mel-Band RoFormer
-    (feature 026). Both are always registered — **registering a builder imports
+    Three architectures: the fake engine (feature 014), Mel-Band RoFormer
+    (feature 026) and Hybrid Transformer Demucs (feature 028). All are always
+    registered — **registering a builder imports
     nothing** (feature 034), so this map is the same map whether or not the
     ``torch`` extra is installed, and a catalog naming anything else still gets
     ``separator_unavailable`` (501). :attr:`SeparatorRegistry.architectures` is
@@ -355,6 +419,11 @@ def default_separator_builders(
                 ffmpeg_timeout_seconds=ffmpeg_timeout_seconds
             ),
             ROFORMER_ARCHITECTURE: roformer_separator_builder(
+                models_dir=models_dir,
+                inference_parameters=inference_parameters,
+                ffmpeg_timeout_seconds=ffmpeg_timeout_seconds,
+            ),
+            DEMUCS_ARCHITECTURE: demucs_separator_builder(
                 models_dir=models_dir,
                 inference_parameters=inference_parameters,
                 ffmpeg_timeout_seconds=ffmpeg_timeout_seconds,
@@ -493,6 +562,7 @@ __all__ = [
     "SeparatorBuilder",
     "SeparatorRegistry",
     "default_separator_builders",
+    "demucs_separator_builder",
     "fake_separator_builder",
     "roformer_separator_builder",
     "separator_info_from_model",
