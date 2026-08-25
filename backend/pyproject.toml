@@ -14,19 +14,43 @@ dependencies = [
     # Already the test suite's HTTP client (see DEVELOPMENT.md); promoted to a
     # runtime dependency rather than adding a second client library.
     "httpx2>=2.12",
-    # Real inference (feature 026). ``torch`` is resolved from the CPU wheel
-    # index below so a plain ``uv sync`` — and CI — never pulls the bundled
-    # multi-gigabyte CUDA runtime; DEVELOPMENT.md documents installing the CUDA
-    # build for GPU use. The remaining three are what the vendored Mel-Band
-    # RoFormer architecture imports (see
-    # ``src/straticate/inference/roformer/vendor/README.md``): all pure-Python,
-    # all tiny, none of them a model registry or a downloader.
+]
+
+# Real inference (feature 026), made **optional** again by feature 034. The
+# application imports, starts, serves and runs the fake separator (and its whole
+# end-to-end workflow) without any of this: nothing outside
+# ``src/straticate/inference/roformer/`` imports torch, and the registry imports
+# that package only when a job actually asks for a model of its architecture.
+# A build without the extra answers such a job with ``separator_unavailable``
+# (501) — the same envelope a catalogued-but-unimplemented architecture has
+# always produced.
+#
+# So this is what a *user* who wants real separation installs, and what the
+# ``backend`` CI job installs to run the real separator's unit tests; the ``e2e``
+# job, which drives the fake engine exclusively, does not — that is ~183 MiB it
+# never executed (``docs/features/030-playwright-e2e.md``, finding 2).
+#
+#     uv sync --extra torch
+#
+# Feature 018's design is the one being restored here: torch is an optional
+# runtime probe, and its *absence* is a normal, first-class, tested path.
+[project.optional-dependencies]
+torch = [
+    # ``torch`` is resolved from the CPU wheel index below so ``--extra torch``
+    # — and CI — never pulls the bundled multi-gigabyte CUDA runtime;
+    # DEVELOPMENT.md documents installing the CUDA build for GPU use. The
+    # remaining three are what the vendored Mel-Band RoFormer architecture
+    # imports (see ``src/straticate/inference/roformer/vendor/README.md``): all
+    # pure-Python, all tiny, none of them a model registry or a downloader.
     "torch>=2.4",
     # torch warns at *import* time when NumPy is absent ("Failed to initialize
     # NumPy"), which the suite would see as a finding under ``-W error``
     # (DEVELOPMENT.md). Declaring it is the fix rather than the filter: torch
     # treats NumPy as present in several conversion paths, and the wheel is a
-    # few tens of megabytes next to torch's own hundreds.
+    # few tens of megabytes next to torch's own hundreds. It belongs *here*
+    # rather than with the base dependencies because the only Straticate code
+    # that imports it is ``roformer/vendor/mel_filters.py``, which is reached
+    # solely through the vendored architecture.
     "numpy>=1.26",
     "einops>=0.7",
     "rotary-embedding-torch>=0.6",
@@ -48,7 +72,9 @@ dev = [
 # development on a CPU-only host, and for macOS/Windows where the PyPI wheel is
 # CPU-only anyway. ``explicit = true`` keeps every *other* package resolving
 # from PyPI. Installing the CUDA build is one documented command — see
-# DEVELOPMENT.md, "PyTorch and CUDA".
+# DEVELOPMENT.md, "PyTorch and CUDA". Feature 034 moved ``torch`` into an
+# optional extra; this pinning is unchanged and still governs it, because
+# ``tool.uv.sources`` applies to a requirement wherever it is declared.
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"

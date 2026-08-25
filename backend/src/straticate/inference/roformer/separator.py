@@ -86,6 +86,7 @@ from straticate.inference.pcm import (
     decode_to_pcm,
     write_wav,
 )
+from straticate.inference.roformer.architecture import ROFORMER_ARCHITECTURE
 from straticate.inference.roformer.vendor import MelBandRoformer
 from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.jobs import (
@@ -98,13 +99,11 @@ from straticate.schemas.jobs import (
 
 logger = logging.getLogger(__name__)
 
-ROFORMER_ARCHITECTURE: Final = "mel_band_roformer"
-"""``architecture`` value this separator is registered under (§9's open set).
-
-Nothing outside :mod:`straticate.inference` compares against this string; the
-registry keys its builder map by it so that adding *another* Mel-Band RoFormer
-checkpoint to ``models/catalog.json`` is a pure data edit.
-"""
+# ``ROFORMER_ARCHITECTURE`` is imported from
+# :mod:`straticate.inference.roformer.architecture` and re-exported here (see
+# ``__all__``), because the registry needs the *name* at import time and must
+# not pull torch in to get it (feature 034). Every existing import of it from
+# this module keeps working.
 
 DEFAULT_CHUNK_SAMPLES: Final = 352800
 """Samples per forward pass when the catalog entry names no ``chunk_size``.

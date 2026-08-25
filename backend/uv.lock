@@ -699,19 +699,23 @@ name = "straticate"
 version = "0.1.0.dev0"
 source = { editable = "." }
 dependencies = [
-    { name = "beartype" },
-    { name = "einops" },
     { name = "fastapi" },
     { name = "httpx2" },
-    { name = "numpy" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "python-multipart" },
     { name = "python-ulid" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+torch = [
+    { name = "beartype" },
+    { name = "einops" },
+    { name = "numpy" },
     { name = "rotary-embedding-torch" },
     { name = "torch", version = "2.13.0", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-    { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.dev-dependencies]
@@ -724,19 +728,20 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "beartype", specifier = ">=0.18" },
-    { name = "einops", specifier = ">=0.7" },
+    { name = "beartype", marker = "extra == 'torch'", specifier = ">=0.18" },
+    { name = "einops", marker = "extra == 'torch'", specifier = ">=0.7" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx2", specifier = ">=2.12" },
-    { name = "numpy", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'torch'", specifier = ">=1.26" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "python-ulid", specifier = ">=4.0.1" },
-    { name = "rotary-embedding-torch", specifier = ">=0.6" },
-    { name = "torch", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "rotary-embedding-torch", marker = "extra == 'torch'", specifier = ">=0.6" },
+    { name = "torch", marker = "extra == 'torch'", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cpu" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
+provides-extras = ["torch"]
 
 [package.metadata.requires-dev]
 dev = [
