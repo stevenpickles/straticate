@@ -79,8 +79,9 @@ automatically.
 | gpu telemetry block | `null` (correct CPU shape) | measured |
 
 **~15× faster than CPU, and faster than real time** — a 3-minute track separates
-in about 40 s instead of 10 minutes. Measured VRAM: 1,082 MiB allocated,
-**1,634 MiB peak** of 8,188 MiB. With `nvidia-ml-py` present the optional NVML
+in about 40 s instead of 10 minutes. Measured VRAM on that run: 1,082 MiB
+allocated, **1,634 MiB peak** of 8,188 MiB — a short-clip figure; see 036 for
+how it scales. With `nvidia-ml-py` present the optional NVML
 fields report too (utilization 1.0, 59–62 °C); without it they are `null`, which
 the contract permits.
 
@@ -90,8 +91,14 @@ The full integration tier passes (4/4), including the previously-never-executed
 carrying genuine GPU figures over the WebSocket.
 
 Four defects that only a GPU could reveal are recorded as feature **036** —
-notably the catalog's `recommended_vram_mb: 8192`, which measurement shows is
-wrong by more than 5×.
+notably the catalog's `recommended_vram_mb: 8192`, which was never measured.
+**036 re-measured it and the "wrong by more than 5×" reading above did not
+survive**: peak allocation is not bounded by chunking (it grows ~1.35 MiB per
+second of audio, reaching 2,343 MiB on a 10-minute track), and what a card must
+have free is roughly twice the allocated figure once the CUDA context and the
+allocator's reservation are counted — 4,213 MiB for that track. The corrected
+entry is `recommended_vram_mb: 6144` with a new `minimum_vram_mb: 4096` floor;
+036's document carries the method and the full sweeps.
 
 
 ### M1 — fake-separator end-to-end
