@@ -245,6 +245,73 @@ describe('JobEventBridge', () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/jobs/${sampleJobId}`)
   })
 
+  it('resyncs as soon as a job becomes tracked while the socket is open', async () => {
+    // A job restored after a page reload (feature 033) is tracked *after*
+    // the socket opened, so the open-time resync had nothing to fetch. Left
+    // there, a terminal event that landed while nothing was tracked would
+    // be dropped with no further event ever coming.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(jobIn('separating')))
+    vi.stubGlobal('fetch', fetchMock)
+    renderBridge()
+
+    await open()
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByRole('button', { name: 'track' }))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+    })
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(`/api/v1/jobs/${sampleJobId}`)
+    expect(screen.getByTestId('tracked-state')).toHaveTextContent('separating')
+  })
+
+  it('does not refetch when an event updates the job it already tracks', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(sampleJob))
+    vi.stubGlobal('fetch', fetchMock)
+    renderBridge({ job: sampleJob })
+
+    await open()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // Progress arrives several times a second; a fetch per event would turn
+    // the resync into the polling loop the architecture forbids.
+    act(() => {
+      sockets.last.emitMessage(
+        JSON.stringify({
+          type: 'job_stage_changed',
+          job_id: sampleJobId,
+          stage: 'separating',
+          previous_stage: 'loading_model',
+        }),
+      )
+    })
+    expect(screen.getByTestId('tracked-state')).toHaveTextContent('separating')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('ignores a resync answer that is not about the tracked job', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ ...sampleJob, id: '01OTHERJOBULID000000000000' }),
+        ),
+    )
+    renderBridge({ job: jobIn('separating') })
+
+    await open()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection')).toHaveTextContent('open')
+    })
+    expect(screen.getByTestId('tracked-job')).toHaveTextContent(sampleJobId)
+    expect(screen.getByTestId('tracked-state')).toHaveTextContent('separating')
+  })
+
   it('does not let a stale resync snapshot revert a completed job', async () => {
     // The socket is already open when `onOpen` fires, so events keep
     // streaming in while `getJob` is in flight and its snapshot predates
