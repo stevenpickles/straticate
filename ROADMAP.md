@@ -168,10 +168,12 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 030 | Playwright E2E tier (fake separator)         | MERGED  | 024        | `030-playwright-e2e` | #35 |
 | 031 | Post-029 review findings                     | MERGED  | 029        | `031-post-029-findings` | #32 |
 | 032 | Keep development models out of user catalog  | MERGED  | 010, 026   | `032-hide-development-models` | #36 |
-| 033 | Session survives a page reload               | PR OPEN | 016, 017   | `033-session-survives-reload` | #39 |
-| 034 | Lazy separator builders (torch optional again)| PR OPEN | 026        | `034-lazy-separator-builders` | #40 |
-| 035 | First-run model install affordance (UI)      | PR OPEN | 025, 032   | `035-install-affordance` | #41 |
-| 036 | GPU validation follow-ups                    | PR OPEN | 026, 029   | `036-gpu-validation-followups` | #42 |
+| 033 | Session survives a page reload               | MERGED  | 016, 017   | `033-session-survives-reload` | #39 |
+| 034 | Lazy separator builders (torch optional again)| MERGED  | 026        | `034-lazy-separator-builders` | #40 |
+| 035 | First-run model install affordance (UI)      | MERGED  | 025, 032   | `035-install-affordance` | #41 |
+| 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
+| 037 | Model management UI (install/remove/browse)  | PLANNED | 025, 035   | | |
+| 038 | Streaming overlap-add (bounded VRAM)         | PLANNED | 026        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
