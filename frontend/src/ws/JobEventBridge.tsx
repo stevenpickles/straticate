@@ -25,13 +25,28 @@ export interface JobEventBridgeProps {
 
 /**
  * Renderless component that connects the job event socket and resyncs the
- * tracked job over REST whenever the socket (re)opens.
+ * tracked job over REST whenever the socket (re)opens **and** whenever a
+ * different job becomes the tracked one while the socket is already open.
  *
  * REST is the source of truth on connect: the hub never replays missed
  * events, and a client that falls behind is disconnected with `1013` and
- * expected to resync (`docs/contracts/websocket-events.md`). So on every
- * `open` — the first one included — the tracked job is refetched and
- * re-tracked, and events are applied on top of that authoritative record.
+ * expected to resync (`docs/contracts/websocket-events.md`). The invariant
+ * this component maintains is therefore: *while a job is tracked and the
+ * socket is open, that job's record has been fetched at least once since
+ * the socket opened.* Events are then applied on top of that authoritative
+ * record.
+ *
+ * The second half of the invariant is what feature 033 needed. A job
+ * restored after a page reload is tracked some time after the socket
+ * opened, so the open-time resync ran with nothing to fetch. Without a
+ * fetch on the change, a job that reached a terminal state in the window
+ * between the backend serving the restore's `GET /jobs/{id}` and the store
+ * applying it would have had its terminal event dropped (events are
+ * filtered by the tracked job id, and nothing was tracked yet) with no
+ * further event ever coming — the stranded-UI failure of features 017 and
+ * 031, reached by a different road. The extra fetch closes that window; it
+ * is also harmless for a job this client just created, whose `POST /jobs`
+ * record is by definition current.
  *
  * Does nothing when no job is tracked, which is the whole `select` and
  * `configure` part of the workflow.
@@ -39,38 +54,55 @@ export interface JobEventBridgeProps {
  * Must be rendered under a `JobStateProvider`.
  */
 export function JobEventBridge({ client }: JobEventBridgeProps = {}) {
-  const { job } = useJobState()
+  const { job, connection } = useJobState()
   const dispatch = useJobDispatch()
+  const jobId = job?.id ?? null
 
   // The socket subscription must not be torn down and rebuilt every time
-  // the tracked job changes, so `onOpen` reads the current job id from a
+  // the tracked job changes, so the resync reads the current job id from a
   // ref rather than closing over it.
+  // Declared before the resync effect so it is already up to date when that
+  // one runs (effects fire in declaration order).
   const trackedJobIdRef = useRef<string | null>(null)
   useEffect(() => {
-    trackedJobIdRef.current = job?.id ?? null
-  }, [job])
+    trackedJobIdRef.current = jobId
+  }, [jobId])
 
-  const resync = useCallback(() => {
-    const jobId = trackedJobIdRef.current
-    if (jobId === null) {
+  const resync = useCallback(
+    (id: string) => {
+      getJob(id)
+        .then((fetched) => {
+          // A different job may have been started, or restored, while the
+          // request was in flight; re-tracking the old one would rewind the
+          // store. The record's own id is what is compared, so an answer
+          // that is not about the tracked job cannot be applied whatever it
+          // was requested for.
+          if (trackedJobIdRef.current === fetched.id) {
+            dispatch({ type: 'job/track', job: fetched })
+          }
+        })
+        .catch(() => {
+          // A failed resync is not worth a UI of its own: the connection
+          // status is already rendered, events keep arriving, and the next
+          // reconnect tries again.
+        })
+    },
+    [dispatch],
+  )
+
+  // Driven by the store's connection status rather than by a socket
+  // callback, so that "the socket opened" and "the tracked job changed" are
+  // the same trigger: either dependency changing re-establishes the
+  // invariant above. A `job` object that changed without changing id (every
+  // progress event) is not a change here, so events do not cause fetches.
+  useEffect(() => {
+    if (connection !== 'open' || jobId === null) {
       return
     }
-    getJob(jobId)
-      .then((fetched) => {
-        // A different job may have been started while the request was in
-        // flight; re-tracking the old one would rewind the store.
-        if (trackedJobIdRef.current === jobId) {
-          dispatch({ type: 'job/track', job: fetched })
-        }
-      })
-      .catch(() => {
-        // A failed resync is not worth a UI of its own: the connection
-        // status is already rendered, events keep arriving, and the next
-        // reconnect tries again.
-      })
-  }, [dispatch])
+    resync(jobId)
+  }, [connection, jobId, resync])
 
-  useJobEvents({ client, onOpen: resync })
+  useJobEvents({ client })
 
   return null
 }

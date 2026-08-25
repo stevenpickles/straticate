@@ -33,17 +33,76 @@ import type {
 import type { ConnectionStatus } from '../ws/client'
 
 /** Job lifecycle states from which no further transition happens. */
-export const TERMINAL_JOB_STATES: readonly JobLifecycleState[] = [
+export const TERMINAL_JOB_STATES = [
   'completed',
   'cancelled',
   'failed',
-]
+] as const satisfies readonly JobLifecycleState[]
+
+/** A lifecycle state from which no further transition happens. */
+export type TerminalJobState = (typeof TERMINAL_JOB_STATES)[number]
+
+/** A lifecycle state a job can still move on from. */
+export type ProcessingJobStage = Exclude<JobLifecycleState, TerminalJobState>
 
 const terminalJobStates = new Set<JobLifecycleState>(TERMINAL_JOB_STATES)
 
 /** Whether a job lifecycle state is terminal (`completed`/`cancelled`/`failed`). */
-export function isTerminalJobState(state: JobLifecycleState): boolean {
+export function isTerminalJobState(
+  state: JobLifecycleState,
+): state is TerminalJobState {
   return terminalJobStates.has(state)
+}
+
+/**
+ * Position of each non-terminal stage in the linear processing order
+ * (ARCHITECTURE.md §6), mirroring the backend's `_PROCESSING_ORDER` in
+ * `backend/src/straticate/jobs/state.py`. `cancelled` and `failed` have no
+ * position: a job reaches them from *any* non-terminal stage, so they are not
+ * points on a forward ordering and are handled as terminal instead.
+ *
+ * The `Record<ProcessingJobStage, number>` annotation is doing real work: it
+ * is the exhaustiveness check. A stage added to (or removed from) the
+ * backend's `JobState` enum changes the generated union, and this object then
+ * has the wrong shape and fails to compile — right here, which is where the
+ * new stage's position in the order has to be decided. There is deliberately
+ * no fallback for an unknown stage, because silently ranking one at `-1`
+ * would turn a contract change into a subtly wrong UI.
+ */
+const JOB_STAGE_RANK: Readonly<Record<ProcessingJobStage, number>> = {
+  queued: 0,
+  preparing: 1,
+  decoding: 2,
+  loading_model: 3,
+  separating: 4,
+  post_processing: 5,
+  encoding: 6,
+}
+
+/**
+ * Whether moving a job from `tracked` to `incoming` would move it
+ * **backwards** through its lifecycle.
+ *
+ * - A terminal job may only be replaced by another terminal record. It has
+ *   genuinely stopped, so no further event will ever arrive to correct a
+ *   demotion.
+ * - A non-terminal job may always move to a terminal one: that is the job
+ *   finishing, cancelling or failing.
+ * - Between two non-terminal stages, the processing order decides. Equal
+ *   stages are not backwards — a later record of the same stage is still
+ *   newer information.
+ */
+export function isBackwardJobTransition(
+  tracked: JobLifecycleState,
+  incoming: JobLifecycleState,
+): boolean {
+  if (isTerminalJobState(tracked)) {
+    return !isTerminalJobState(incoming)
+  }
+  if (isTerminalJobState(incoming)) {
+    return false
+  }
+  return JOB_STAGE_RANK[incoming] < JOB_STAGE_RANK[tracked]
 }
 
 /**
@@ -171,17 +230,38 @@ export const initialJobState: JobStateValue = {
 
 function trackJob(state: JobStateValue, job: Job): JobStateValue {
   if (state.job !== null && state.job.id === job.id) {
-    // A REST record is a point-in-time snapshot and races the event stream:
-    // `getJob` on reconnect and `cancelJob` both return a job as it was when
-    // the handler ran, which may be older than an event already applied.
+    // **A REST snapshot may never move the tracked job backwards.**
+    //
+    // A REST record is a point-in-time snapshot and races the event stream.
+    // `getJob` (on reconnect, when a restored job is adopted, and right after
+    // `POST /jobs`) and `cancelJob` all answer with the job as it was when the
+    // handler ran, and HTTP and the WebSocket are separate connections whose
+    // relative arrival order is not guaranteed. So an answer prepared before
+    // an event this store has already applied can land after it.
+    //
     // Events are authoritative for forward progress; REST is authoritative
     // only for resyncing a job the events have not already carried further.
-    // So a snapshot must never walk a job back out of a terminal state —
-    // the job has genuinely stopped, no further event will arrive to correct
-    // the mistake, and the UI would be stranded mid-run forever. The rule
-    // lives here so every present and future `job/track` producer inherits
-    // it rather than having to remember the race.
-    if (isTerminalJobState(state.job.state) && !isTerminalJobState(job.state)) {
+    //
+    // The rule was originally drawn around terminal states only, because that
+    // is where it is *permanent*: the job has stopped, no further event will
+    // arrive to correct the demotion, and the UI is stranded mid-run forever
+    // (features 017 and 031). But the same race rewinds non-terminal stages
+    // too — `POST /jobs` answers `queued`, the socket delivers `separating`,
+    // and a `GET` served in between writes `queued` back, at which point the
+    // panel says "waiting in the queue" and hides the progress bar until the
+    // next event lands. Visibly wrong, just not permanently so. Both are the
+    // same mistake, so both are refused here.
+    //
+    // It lives in the reducer, not in the callers, so every present and future
+    // `job/track` producer inherits it rather than having to rediscover the
+    // race.
+    if (isBackwardJobTransition(state.job.state, job.state)) {
+      return state
+    }
+    // Same stage, older progress: the same staleness one level finer. Chunk
+    // counts only ever climb, so a lower figure is a snapshot the events have
+    // already overtaken, and applying it would walk the progress bar back.
+    if (job.state === state.job.state && job.progress < state.job.progress) {
       return state
     }
     return { ...state, job }
