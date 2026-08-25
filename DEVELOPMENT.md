@@ -313,14 +313,16 @@ The E2E tier is its **own job** rather than extra steps on `frontend`, because
 it needs the backend installed as well as the frontend: bolting it onto the
 lint/unit job would slow the pipeline's fastest feedback for every PR, while a
 separate job runs alongside the other two and costs wall-clock only if it is
-the slowest. It costs roughly **3–4 minutes**: about a minute of apt and
-`uv sync` (PyTorch's CPU wheel is ~183 MiB, cached by `setup-uv` between runs),
-`npm ci`, a Chromium restored from `actions/cache` (~110 MB, keyed on
-`package-lock.json`, so it downloads only when `@playwright/test` moves), and
-under a minute of actual tests. Only Chromium is installed — the tier tests
-correctness, not browser compatibility. It needs **no GPU, no weights and no
-download**: every job it runs goes to the fake separator. On failure it uploads
-the HTML report and the traces.
+the slowest — and it is not. Measured on its first run (`ubuntu-latest`, cold
+Playwright cache): **1 min 36 s** total — 24 s of apt FFmpeg, 6 s of `uv sync`
+(PyTorch's CPU wheel is ~183 MiB, but `setup-uv`'s cache is keyed on
+`backend/uv.lock` and shared with the backend job), 9 s of Node and `npm ci`,
+17 s installing Chromium and its system libraries, and **34 s of tests**. The
+browser is cached by `actions/cache` (~110 MB, keyed on `package-lock.json`),
+so it is downloaded again only when `@playwright/test` moves. Only Chromium is
+installed — the tier tests correctness, not browser compatibility. It needs
+**no GPU, no weights and no download**: every job it runs goes to the fake
+separator. On failure it uploads the HTML report and the traces.
 
 One avoidable cost is left on the table: the e2e job installs the whole backend
 including `torch`, which it never uses, because `straticate.main` imports the

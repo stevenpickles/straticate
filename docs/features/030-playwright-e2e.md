@@ -165,6 +165,15 @@ triggers the REST resync the tests are aiming at.
 Neither is a correctness bug in shipped behaviour, and nothing in the
 application was changed to make a test pass.
 
+### What it costs
+
+Locally: **~35 s** for 13 tests, about 7 s of which is starting the two
+servers. In CI (`ubuntu-latest`, first run, cold Playwright cache): the `e2e`
+job took **1 min 36 s** — apt FFmpeg 24 s, `uv sync` 6 s, Node + `npm ci` 9 s,
+Chromium + system libraries 17 s, tests 34 s. It runs in parallel with
+`backend` (2 min 18 s) and `frontend` (34 s), so it adds **nothing** to the
+pipeline's wall-clock.
+
 ### Smaller decisions
 
 - **One worker, no parallelism.** The backend runs one separation at a time
