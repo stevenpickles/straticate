@@ -211,7 +211,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |
-| 042 | Production build (backend serves frontend)   | PLANNED | 003, 024   | | |
+| 042 | Production build (backend serves frontend)   | PR OPEN | 003, 024   | `042-production-build` | #53 |
 | 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
