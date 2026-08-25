@@ -98,23 +98,28 @@ uv sync --extra torch   # …plus the real separator
 ### 5. CI
 
 `backend` installs the extra and keeps running the real separator's unit tests;
-`e2e` does not install it and still passes. `uv run` re-syncs the environment to
-the extras it is given, so `--extra torch` is repeated on every `uv run` step of
-the `backend` job — omitting it on one step would silently uninstall torch for
-the next.
+`e2e` does not install it and still passes. `--extra torch` is repeated on every
+`uv run` step of the `backend` job so each step states the environment it needs
+rather than depending on what the sync step left behind — and because those are
+the commands `AGENTS.md` tells a contributor to type.
 
 ### 6. `AGENTS.md`'s Definition-of-Done commands
 
-The same trap bites *people*, and no CI job would have caught it: the documented
-backend quality bar was `uv run ruff format --check .` · `uv run ruff check .` ·
-`uv run pyright` · `uv run pytest`, and the first of those to run now uninstalls
-torch, after which collection fails in `roformer_fixtures.py`,
+The documented backend quality bar was `uv run ruff format --check .` ·
+`uv run ruff check .` · `uv run pyright` · `uv run pytest`. A plain `uv sync` is
+now the default and no longer installs torch, so `uv run pytest` fails at
+*collection* — measured on this checkout, `612 tests collected, 6 errors`, in
 `test_api_jobs.py`, `test_inference_registry.py`, `test_roformer_separator.py`,
 `test_roformer_mel_filters.py`, `test_roformer_integration.py` and
-`test_torch_optional.py` (there is no `pytest.importorskip` anywhere, by
-design — the suite covers the real separator). All four commands now carry
-`--extra torch`, with the reason spelled out next to them. The application
-itself still runs fine without the extra; it is the *test suite* that needs it.
+`test_torch_optional.py` (all via `tests/roformer_fixtures.py`, which imports
+torch at module scope). There is no `pytest.importorskip` anywhere, by design:
+the suite covers the real separator. No CI job would have caught this — it bites
+only people, and only those following the documented process.
+
+All four commands now carry `--extra torch`, **with a caveat pointing at
+`DEVELOPMENT.md` rather than restating it.** See "What `uv run` actually does"
+below: the flag is right for the ordinary contributor and wrong-footing on a
+CUDA host, and feature 036 owns the file that documents both.
 
 ## Error contract: unchanged, deliberately
 
@@ -273,20 +278,35 @@ and backend cold-start time — not critical path.
   Hiding it would be a second, silent catalog filter (feature 032 owns that
   concept) and would make "why can't I see the HQ model?" an unanswerable
   question. The honest answer arrives at `POST /jobs`.
-- **`uv run` re-syncs.** There is no `UV_EXTRA` environment variable and no
-  `[tool.uv] default-extras`, so `uv run pytest` after `uv sync --extra torch`
-  would *remove* torch. Every torch-needing command must say `--extra torch`
-  itself. This is a real ergonomic trap for a developer working on the real
-  separator and is the one thing `DEVELOPMENT.md` must spell out.
+- **What `uv run` actually does** (uv 0.8.23; an earlier draft of this document
+  got it wrong, and feature 036's measurement on a CUDA host is what corrected
+  it). `uv run` **reconciles versions against the lock but does not prune**
+  packages that are merely not required: with torch installed, a bare
+  `uv run pytest` keeps it and collects all 744 tests. **`uv sync` is what
+  prunes.** So the two traps after this feature point in *opposite* directions:
+
+  1. **torch absent** — the new default, after a plain `uv sync`. `uv run
+     pytest` fails at collection in the six torch-importing modules. This is
+     what the `AGENTS.md` change above fixes.
+  2. **torch present as a CUDA build** — adding `--extra torch` makes torch a
+     *required* package again, so uv reconciles the installed CUDA wheel back to
+     the locked CPU one and the run silently leaves the GPU. Feature 036
+     measured this (`2.13.0+cu130` → `2.13.0+cpu`).
+
+  There is no `UV_EXTRA` environment variable and no `[tool.uv] default-extras`
+  to smooth either case. `DEVELOPMENT.md` (036's file) now carries both, side by
+  side, with the measurements; `AGENTS.md` names the flag the ordinary
+  contributor needs and **points there** for the CUDA case rather than
+  duplicating it — two documents disagreeing about this would be worse than
+  either.
 
 ### Out of scope — needs folding in by whoever owns the file
 
-- **`DEVELOPMENT.md` (feature 036 owns it).** Two edits are needed:
-  its "PyTorch and CUDA" section should say that a plain `uv sync` no longer
-  installs torch, that `uv sync --extra torch` is what a user who wants real
-  separation runs (and that the CUDA-build command follows it), and that
-  `uv run` needs `--extra torch` too. The quality-bar commands for anyone
-  touching the real separator become `uv run --extra torch <ruff|pyright|pytest>`.
+- **`DEVELOPMENT.md` (feature 036 owns it)** — **done there, not here.** Its
+  "PyTorch and CUDA" section now says that a plain `uv sync` no longer installs
+  torch, that `uv sync --extra torch` is what a user wanting real separation
+  runs, and carries 036's measured table of what `uv run` and `uv sync` each do
+  to a CPU and a CUDA installation. `AGENTS.md` points at it.
 - **`ARCHITECTURE.md` §14** currently says "PyTorch is a runtime dependency from
   feature 026 onwards". It is now an *optional* runtime dependency: mandatory
   for the real separator, absent by default, with its CPU-wheel pinning

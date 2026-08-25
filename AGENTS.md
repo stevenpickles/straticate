@@ -78,13 +78,18 @@ Before opening your PR, from the relevant directory:
 - Backend: `uv run --extra torch ruff format --check .` ·
   `uv run --extra torch ruff check .` · `uv run --extra torch pyright` ·
   `uv run --extra torch pytest` — all green.
-  **`--extra torch` on every one of them is not optional.** Since feature 034
-  PyTorch is an optional extra, and `uv run` re-syncs the environment to the
-  extras it is given — so a bare `uv run pytest` *uninstalls* torch and then
-  fails at collection in every module that imports it. The `backend` CI job
-  passes the flag on every step for the same reason. (The application itself
-  runs fine without it; that is the point of 034. It is the *test suite* that
-  needs it, because it covers the real separator.)
+  Since feature 034 PyTorch is an **optional extra**, so a plain `uv sync`
+  leaves it out — and the suite then fails at *collection* in the six modules
+  that import it (it covers the real separator; nothing is guarded with
+  `pytest.importorskip`, deliberately). `--extra torch` is what puts it back,
+  and the `backend` CI job passes it on every step for the same reason. The
+  application itself runs fine without it — that is the point of 034; it is the
+  *test suite* that needs it.
+  **Running a CUDA build of torch? Read DEVELOPMENT.md ("PyTorch and CUDA")
+  before using these commands.** `--extra torch` makes torch a required package
+  again, so uv reconciles it against the lock — which pins the CPU wheel — and
+  a GPU run can end up silently on CPU. DEVELOPMENT.md has the measured
+  behaviour of both cases; do not second-guess it from here.
 - Frontend: `npm run format:check` · `npm run lint` · `npm run typecheck` ·
   `npm test` · `npm run build` — all green.
 - Tests exist for new behavior (see the test strategy in

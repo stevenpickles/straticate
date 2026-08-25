@@ -16,8 +16,12 @@ jobs:
     # this is the job that runs the real separator's unit tests, type-checks
     # the module that imports torch, and is therefore the one place the extra
     # is genuinely exercised. ``--extra torch`` is repeated on every ``uv run``
-    # because ``uv run`` re-syncs the environment to the extras it is given —
-    # omitting it on one step would silently uninstall torch for the next.
+    # so each step states the environment it needs rather than depending on
+    # what the sync step happened to leave behind. (Measured on uv 0.8.23:
+    # ``uv run`` reconciles versions but does **not** prune packages that are
+    # merely not required, so a bare ``uv run`` here would not in fact drop
+    # torch — but relying on that is relying on an implementation detail, and
+    # these are the same commands AGENTS.md tells a contributor to type.)
     name: backend
     runs-on: ubuntu-latest
     defaults:
