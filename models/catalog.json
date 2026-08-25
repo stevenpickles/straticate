@@ -44,7 +44,7 @@
       "stems": ["vocals", "instrumental"],
       "sample_rate": 44100,
       "requirements": {
-        "recommended_vram_mb": 6144,
+        "recommended_vram_mb": 4096,
         "minimum_vram_mb": 4096,
         "minimum_ram_mb": 8192
       },
@@ -107,8 +107,8 @@
       "stems": ["vocals", "drums", "bass", "other"],
       "sample_rate": 44100,
       "requirements": {
-        "recommended_vram_mb": 4096,
-        "minimum_vram_mb": 3072,
+        "recommended_vram_mb": 3072,
+        "minimum_vram_mb": 2048,
         "minimum_ram_mb": 8192
       },
       "capabilities": { "cuda": true, "cpu": true },

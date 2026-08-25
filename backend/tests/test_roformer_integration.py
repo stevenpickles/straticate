@@ -251,3 +251,78 @@ async def test_cuda_runtime_stats_report_real_memory(
     # NVML is optional (ARCHITECTURE.md §12): present or absent, both are legal.
     assert device.utilization is None or 0.0 <= device.utilization <= 1.0
     assert device.temperature_celsius is None or device.temperature_celsius > 0.0
+
+
+@pytest.mark.gpu
+async def test_peak_device_memory_is_flat_across_track_lengths(
+    catalog: ModelCatalog,
+    installed_weights: Path,
+    parameters: RoFormerParameters,
+    tmp_path: Path,
+) -> None:
+    """Feature 038's acceptance criterion, on the hardware it is a claim about.
+
+    Twelve times the audio, twelve times the chunks, the *same* peak. Before 038
+    the decoded mixture, the accumulator and the weight tensor were all
+    device-resident and whole-track, so the peak grew at ≈1.35 MiB per second of
+    audio (feature 036's sweep) — over the 220 s of extra audio below, ≈297 MiB.
+    The tolerance is a small fraction of that, so this test fails if the
+    accumulator ever goes back on the card.
+
+    Measured on **2026-08-25**, RTX 4060 Laptop GPU, ``torch 2.13.0+cu130``:
+    1,526.1 MiB for both clips, and for 6-minute and 10-minute clips too — the
+    same figure to the byte, because what is on the card no longer depends on
+    the length of the track at all. Feature 038's document has the full sweep and
+    the ``requirements`` re-derived from it.
+
+    Both clips run in **one process on one separator**, deliberately: the
+    skeleton resets the CUDA peak per run, and comparing two runs that share a
+    resident network is what isolates the part of the peak that scales.
+
+    On a GPU host, run this with ``uv run --no-sync`` or it will not be a GPU
+    run — see DEVELOPMENT.md, *PyTorch and CUDA*.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device is available")
+
+    separator = RoFormerSeparator(
+        separator_info_from_model(catalog.get_model(MODEL_ID)),
+        weights_file=installed_weights,
+        parameters=parameters,
+    )
+    peaks: dict[float, int] = {}
+    chunks: dict[float, int] = {}
+    for seconds in (20.0, 240.0):
+        reports: list[SeparationProgress] = []
+        source = write_tone_wav(
+            tmp_path / f"clip-{seconds:.0f}.wav", seconds=seconds, channels=2, sample_rate=44100
+        )
+        await separator.separate(
+            source,
+            SeparationConfiguration(
+                audio_id="01AUDIO0000000000000000000",
+                mode_id="vocals",
+                quality_id="high_quality",
+                device_id="cuda:0",
+            ),
+            reports.append,
+            CancellationToken(),
+            job_id=JOB_ID,
+            output_dir=tmp_path / f"stems-{seconds:.0f}",
+        )
+        stats = separator.runtime_stats()
+        assert stats is not None and stats.device is not None
+        peaks[seconds] = stats.device.memory_peak_bytes
+        chunks[seconds] = reports[-1].chunks_total
+
+    growth = peaks[240.0] - peaks[20.0]
+    print(
+        f"\n[038] cuda:0 peak {peaks[20.0] / 1024**2:.1f} MiB at 20 s "
+        f"({chunks[20.0]} chunks) → {peaks[240.0] / 1024**2:.1f} MiB at 4 min "
+        f"({chunks[240.0]} chunks); growth {growth / 1024**2:+.1f} MiB"
+    )
+    assert chunks[240.0] > 10 * chunks[20.0], "the longer clip must really be more chunks"
+    assert growth < 64 * 1024**2, (
+        f"peak grew by {growth / 1024**2:.1f} MiB over 220 s of extra audio; "
+        f"something whole-track is back on the device"
+    )

@@ -49,9 +49,10 @@ class ModelRequirements(BaseModel):
     ``recommended_vram_mb`` is the comfortable figure: a full-length track on a
     card that is also driving a display. Both are measured **whole-device**
     peaks, because the CUDA context and the caching allocator's reservation are
-    part of what a card must have free, not only the tensors. Both also depend
-    on the model's chunking and on how long the track is, so the feature
-    document that sets them records the parameters they were measured at.
+    part of what a card must have free, not only the tensors. Both depend on the
+    model's chunking — but, since feature 038 streamed the overlap-add onto the
+    host, no longer on how long the track is — so the feature document that sets
+    them records the parameters they were measured at.
     """
 
     recommended_vram_mb: int | None = Field(

@@ -59,7 +59,7 @@
         "recommended_vram_mb": {
           "type": "integer",
           "minimum": 0,
-          "description": "GPU VRAM in MiB for comfortable use: a full-length track, on a card that is also driving a display. A **measured** whole-device peak plus headroom, not a bound the code enforces — record how it was measured, and at which default_inference_parameters, in the feature document that set it (peak scales with inference.chunk_size and with track length)."
+          "description": "GPU VRAM in MiB for comfortable use: a full-length track, on a card that is also driving a display. A **measured** whole-device peak plus headroom, not a bound the code enforces — record how it was measured, and at which default_inference_parameters, in the feature document that set it (peak scales with inference.chunk_size; since feature 038 it does not scale with track length)."
         },
         "minimum_vram_mb": {
           "type": "integer",
