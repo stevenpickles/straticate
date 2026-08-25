@@ -321,7 +321,7 @@ uv pip install nvidia-ml-py        # NOT pynvml — see below
 
 **Install `nvidia-ml-py`, never `pynvml`.** They are not alternatives with the
 same result. `nvidia-ml-py` is NVIDIA's binding and provides the module named
-`pynvml`, which is what `inference/roformer/separator.py` imports and what torch
+`pynvml`, which is what `inference/torch_device.py` imports and what torch
 imports. The PyPI package *called* `pynvml` is a deprecated shim: it installs
 `nvidia-ml-py` plus a `_pynvml_redirector` import hook that raises a
 `FutureWarning` the first time anything imports `pynvml`.

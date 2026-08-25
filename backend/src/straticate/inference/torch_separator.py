@@ -24,7 +24,9 @@ genuinely differ — the chunk loop (window shape, stride, padding, normalizatio
 autocast) and stem assembly (a residual computed by subtraction, versus the
 network's own sources mapped onto advertised names). Everything else — run-state
 lifecycle, stage sequencing, decode plumbing, device placement, the CUDA peak
-reset, the PCM bridge, cleanup and RTF — is here, once.
+reset, cleanup and RTF — is here, once. The PCM bridge is one module further
+out, in :mod:`straticate.inference.torch_audio`: this class never touches it,
+only the two subclasses do, inside their holes.
 
 Adding a third architecture is therefore those two methods, a parameters
 dataclass and a loader. It is *not* another copy of the lifecycle.
