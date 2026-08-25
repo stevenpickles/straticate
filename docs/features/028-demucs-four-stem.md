@@ -587,12 +587,14 @@ established.
   one.
 - **Only one GPU**, one driver, one OS. All CUDA figures are RTX 4060 Laptop /
   WDDM / `cu130` figures and are labelled as such.
-- **The E2E (Playwright) tier was not run.** It is `frontend/`, which feature
-  037 owns and which this branch does not touch. It was read: `install.spec.ts`
-  derives its mode and tier from the live catalog and asserts only
-  `modes.length > 0`, and `separation.spec.ts` picks `quality_options[0]` of the
-  four-stem mode, which with `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` is still
-  the `fast` fixture. Both should be unaffected; that is reasoning, not a run.
+- **The E2E (Playwright) tier was not run locally** — it is `frontend/`, which
+  feature 037 owns and which this branch does not touch. It **was** run by CI on
+  this branch and passed (1m37s), along with the `frontend` job, so the
+  catalog's new entry does not disturb it. That matches the reading:
+  `install.spec.ts` derives its mode and tier from the live catalog and asserts
+  only `modes.length > 0`, and `separation.spec.ts` picks `quality_options[0]`
+  of the four-stem mode, which with `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` is
+  still the `fast` fixture.
 - **`float32` only.** No half precision (the complex path forbids it), no
   `channels_last`, no batching of windows, no `torch.compile`.
 
