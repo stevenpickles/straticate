@@ -150,5 +150,5 @@ The MIT licence in this directory covers **this code**. The pretrained weights
 are not in the upstream repository at all — they are fetched from
 `dl.fbaipublicfiles.com` — and they are **not** MIT. See
 `docs/features/028-demucs-four-stem.md`, *Licensing*, and the
-`licensing` block of the `standard-4stem-001` entry in `models/catalog.json`.
+`licensing` block of the `standard-stems-001` entry in `models/catalog.json`.
 Straticate never redistributes them.

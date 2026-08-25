@@ -72,8 +72,9 @@ real device telemetry, on CUDA when available and on CPU otherwise.
 - [x] The checkpoint loads with **no missing and no unexpected keys**
       (41,984,456 parameters).
 - [x] Stem-to-file mapping is explicit and cannot silently mis-assign; a
-      reordered catalog stem list maps correctly, and a transposed `sources`
-      list fails loudly against the checkpoint's own record.
+      reordered catalog stem list maps correctly, a transposed `sources` list
+      fails loudly against the checkpoint's own record, and a checkpoint that
+      records no order at all is refused rather than trusted.
 - [x] Progress is real work; cancellation is prompt and leaves no partial stem.
 - [x] `runtime_stats()` is a cheap non-blocking snapshot; `gpu: null` on CPU.
 - [x] Weights absent → `model_weights_missing` (409); backend unavailable →
@@ -95,12 +96,21 @@ real device telemetry, on CUDA when available and on CPU otherwise.
   `chunk_size` and `overlap`, progress arriving from a worker thread, the loop
   staying responsive, cancellation mid-run and before the first chunk, cleanup
   after a mid-encode failure, `runtime_stats()` before/during/after, every error
-  code, one-separation-at-a-time, the catalog-parameter validation, the stem
-  mapping under three different advertised orders, and the restricted checkpoint
-  reader (both that it resolves the architecture reference without importing it,
-  and that it refuses an arbitrary callable).
+  code, one-separation-at-a-time, the catalog-parameter validation, the two
+  sample rates being required to agree, a failed device move not wedging the
+  cached separator, the stem mapping under three different advertised orders,
+  a checkpoint that records no usable `sources` (and one that records them as a
+  `numpy.ndarray`), and the restricted checkpoint reader — that it resolves the
+  architecture reference without importing it, that it refuses an arbitrary
+  callable, and that a **hand-assembled `GLOBAL` opcode** naming `torch.load`,
+  `torch.save`, `torch.serialization.load`, `os.system`, `builtins.eval`,
+  `builtins.exec` or `subprocess.Popen` is refused in `find_class`, before
+  `REDUCE`.
 - `test_inference_registry.py` — the Demucs builder configured purely from a
   catalog entry, and `model_weights_missing`.
+- `test_roformer_separator.py` — one addition, because one of this PR's fixes
+  applies to feature 026's separator identically: a failed device move must not
+  wedge its cached instance either.
 - `test_torch_optional.py` — the demucs package names its architecture without
   importing torch; its lazy exports all fail without torch; its misspelling is
   still a pyright error.
@@ -289,19 +299,28 @@ already says where per-model tuning lives: the catalog. So the hyperparameters
 come from `default_inference_parameters`, the network is built from those, and
 `load_state_dict(strict=True)` is what proves the two agree.
 
-`load_checkpoint_package` reads the file with a **restricted unpickler**: the
-architecture reference resolves to an inert placeholder and is never called,
-`torch`'s own rebuild machinery is trusted wholesale (the same boundary torch's
-`weights_only` loader draws), and everything else must be one of seven named
-globals — the ones a real `htdemucs` package actually uses. Anything else is
-`model_weights_invalid`.
+`load_checkpoint_package` reads the file with a **restricted unpickler**. The
+architecture reference resolves to an inert placeholder that is never called;
+every other name is checked against an **enumeration** — torch's own
+`weights_only` allowlist (144 individually named data constructors, obtained by
+asking `torch._weights_only_unpickler`, with `torch.load` and `torch.save`
+conspicuously not among them) plus the seven extra names a Demucs package
+carries. Anything else is `model_weights_invalid`.
+
+*Enumeration* is load-bearing and was the subject of the most serious code-review
+finding on this PR. The first version allowlisted the `torch` **module**, which
+sounds equivalent and is not: a pickle's `GLOBAL` opcode is a pair of raw
+strings, unbound by any object's real `__module__`, so a hand-written
+`c torch \n load \n … R` resolved and *called* `torch.load`. See *What code
+review found* below.
 
 This is **defence in depth, not a security boundary**: the SHA-256 is the
 boundary. What it removes is the class of accident where a file that passed the
 digest — because the digest itself was wrong, or the artifact was hand-placed —
-still gets to execute code at load time. There is a unit test that a package
-naming an ordinary callable is refused, and an integration test that the real
-checkpoint needs nothing outside the allowlist.
+still gets to execute code at load time. Unit tests cover the `GLOBAL`-opcode
+path over seven entry points and a package naming an ordinary callable; an
+integration test proves the real checkpoint needs nothing outside the
+allowlist, and that the allowlist covering it does not cover `torch.load`.
 
 The published weights are stored in `float16`; `load_state_dict` casts them into
 the `float32` network, which is what upstream does too. Both facts are asserted.
@@ -598,6 +617,95 @@ established.
 - **`float32` only.** No half precision (the complex path forbids it), no
   `channels_last`, no batching of windows, no `torch.compile`.
 
+### What code review found, and what changed
+
+Seven findings on PR #45. All seven are fixed here; the four that changed
+behaviour have regression tests that were **verified to fail against the
+pre-review code** (`7 failed, 6 passed` with the fixes reverted, all 13 passing
+with them in place).
+
+**1 — SECURITY: the pickle allowlist trusted a whole namespace, not a set of
+names.** `RestrictedUnpickler.find_class` admitted any name whose *module* was
+`torch`, and `super().find_class` is `getattr(sys.modules["torch"], name)`. A
+pickle's `GLOBAL` opcode is a pair of raw strings and is not bound by any
+object's real `__module__`, so a hand-written `c torch \n load \n … R`
+resolved **and called `torch.load`** — which on the `torch>=2.4` this project
+allows defaults to `weights_only=False`, i.e. a full unpickling of a second file
+of the attacker's choosing. Reproduced before the fix: the call went through and
+failed on its *argument* (`FileNotFoundError: 'pwnd'`), not on the allowlist.
+
+The class docstring's claim that this was "the same trust boundary torch's own
+`weights_only` unpickler draws" was **false**:
+`torch._weights_only_unpickler._get_allowed_globals()` enumerates 144
+individual names and `torch.load` is not among them. And the original test only
+covered `pickle.loads`, which *was* refused — the module-allowlisting hole was
+untestable through `pickle.dumps`, because pickling `torch.load` writes
+`torch.serialization load`, not `torch load`.
+
+Fixed by making the claim true: `torch_pickle_globals()` asks torch for that
+enumeration (guarded import, minimal documented fallback), and
+`CHECKPOINT_PICKLE_GLOBALS` adds the seven names a Demucs package needs beyond
+it. `SAFE_PICKLE_MODULES` is gone. The regression test hand-assembles the
+`GLOBAL` opcode — the only way to reach the path — over `torch.load`,
+`torch.save`, `torch.serialization.load`, `os.system`, `builtins.eval`,
+`builtins.exec` and `subprocess.Popen`, and asserts the refusal happens in
+`find_class`, before `REDUCE`.
+
+**2 — `_check_sources` could no-op, so a transposed catalog could still swap
+stem audio.** It returned quietly when the package carried no `kwargs`, or when
+`sources` was anything failing `isinstance(..., Sequence)` — which
+`numpy.ndarray` does. The other guard, `stem_source_indices`, compares the two
+lists as *sets*, which a transposition passes. So a future `htdemucs`-family
+checkpoint saved without `kwargs`, plus a catalog stating
+`["bass","drums","other","vocals"]`, would have put the drums in `bass.wav`
+while every shape assertion, the strict `load_state_dict` and every test passed
+— exactly what this feature's acceptance criteria say is impossible, and the
+docstring ("a startup error rather than a quiet mis-assignment") overstated the
+code.
+
+Fixed: a checkpoint that records no usable source list is `model_weights_invalid`
+("the order the catalog claims cannot be verified"), not a shrug. `_source_names`
+reads the value leniently on type (list, tuple, `numpy.ndarray`) and strictly on
+content. Three regression tests, including one that shows `stem_source_indices`
+*succeeding* on a transposed list and returning `(3, 1, 0, 2)` — the
+mis-assignment — while the separator refuses it.
+
+**3 — a partial `.to()` wedged the cached separator, in both backends.**
+`self._loaded_device = device` ran only after the move succeeded, but
+`nn.Module.to` moves parameters one at a time and a CUDA OOM part-way leaves the
+network split. A separator is cached per model for the process's life, so the
+next job — back on the device the network *used* to be on — took the "already
+there" early-out, skipped the move, and died with `Expected all tensors to be on
+the same device`, permanently. The fix is to forget the device *before* moving
+(`_loaded_device: torch.device | None`), so the next run always re-places it.
+
+**The identical code was in `inference/roformer/separator.py`, so the identical
+fix was made there too**, with its own regression test. That is a deliberate
+exception to this feature's "do not change what the RoFormer separator does"
+scope, taken on the coordinator's instruction: the defect is the same defect,
+and leaving one copy broken to preserve a scope boundary would be the wrong
+trade. It is also finding 5's first concrete cost.
+
+**4 — the decode rate and the network rate were never cross-checked.** `_decode`
+resamples to the entry's top-level `sample_rate`, while
+`default_inference_parameters.model.samplerate` builds the network and sizes the
+window. Both are 44,100 today and they are two edits apart: change one and the
+network is fed audio at the wrong rate while its window is sized from the other,
+degrading output silently. By this feature's own principle — the one
+`_check_sources` exists to serve — an equality check belongs at construction,
+and now is one (`_check_sample_rate`, `model_parameters_invalid`).
+
+**5 — the duplication figure was ~4× understated.** Corrected above, with the
+follow-up rescoped from "a shared telemetry module" to "a shared separator
+skeleton".
+
+**6 and 7 — documentation.** ROADMAP's *Next* section still said
+`standard_stems` was absent until 028 landed while its own ledger row said
+`PR OPEN`, and its CPU argument for 027 needed narrowing to the `vocals` mode
+now that the four-stem model runs at 1.6× real time on CPU; both lines are
+fixed, since they are this row's own consequence. `vendor/README.md` named a
+model ID (`standard-4stem-001`) that exists nowhere in the repository.
+
 ## Known limitations
 
 - **Whole-track memory**, as above: peak grows at 1.85 MiB per second of audio
@@ -609,22 +717,39 @@ established.
 - **The model is moved to the device on every run** if the device changed; there
   is no eviction, so a long-lived process holds the network on whichever device
   it last used. With one model and one job at a time this is intended.
-- **The CUDA device/telemetry helpers are duplicated** between
-  `inference/roformer/separator.py` and `inference/demucs/separator.py` —
-  `_resolve_torch_device`, `cuda_namespace`, `reset_peak_memory`,
-  `device_stats`, `NvmlProbe` and the PCM↔tensor pair, about 200 lines. They
-  were deliberately *not* extracted into a shared module: feature 026's tests
-  exercise its CUDA path by monkeypatching **that module's** globals
-  (`separator_module.cuda_namespace`, `separator_module._NVML`), so folding the
-  two together silently breaks a seam this feature has no business changing, and
-  "every existing test must pass unchanged" is a harder constraint than "no
-  duplication". A shared `inference/torch_device.py` used by both backends is
-  the right follow-up and should be its own numbered feature, with 026's tests
-  moved onto the new seam in the same PR. One consequence today: two
-  `NvmlProbe` instances exist, so a process that ran jobs on both backends would
-  initialise NVML twice. NVML refcounts `nvmlInit`, and only one separator runs
-  at a time, so this costs nothing measurable — but it is a symptom, not a
-  design.
+- **`inference/demucs/separator.py` and `inference/roformer/separator.py` are
+  half the same file.** The first version of this section said "about 200 lines
+  of CUDA telemetry"; code review measured it, and the real figure is **781 of
+  this module's 1,591 lines byte-identical** — 49% — with `difflib`. It is not
+  scattered: the largest matching block is **154 contiguous lines** covering
+  `separate`, `_separate`, `_check_mode`, `_decode` and `_place_on_device`, and
+  the next four are 61, 50, 39 and 38 lines (`NvmlProbe`, the PCM↔tensor
+  conversion pair, error-mapping docstrings, the model-parameter helpers). So
+  the shared surface is not a telemetry helper module: it is **the whole
+  separator skeleton** — the run lifecycle, the stage sequence, the decode and
+  device plumbing, the CUDA/NVML snapshot, the PCM bridge and the cleanup —
+  with two architecture-specific holes in it (`_run_chunks` and
+  `_finish_stems`).
+
+  It was deliberately *not* extracted here, and that part stands: feature 026's
+  tests exercise its CUDA path by monkeypatching **that module's** globals
+  (`separator_module.cuda_namespace`, `separator_module._NVML`,
+  `separator_module.reset_peak_memory`, `separator_module.write_wav`), so
+  folding the two together moves a seam this feature has no business moving, and
+  "every existing test must pass unchanged" is the harder constraint. But the
+  follow-up must be scoped to what is actually there: a shared
+  `inference/torch_device.py` would cover perhaps a quarter of it. What the
+  measurement argues for is a shared **separator base** — one lifecycle, one
+  telemetry snapshot, one PCM bridge, one cleanup — with both backends' tests
+  moved onto the new seams in the same PR. That should be its own numbered
+  feature.
+
+  **Finding 3 in this PR is the first bill for it**: a one-line ordering defect
+  in `_place_on_device` existed identically in both files and had to be fixed
+  twice, with two tests. One consequence today: two `NvmlProbe` instances exist,
+  so a process that ran jobs on both backends would initialise NVML twice. NVML
+  refcounts `nvmlInit` and only one separator runs at a time, so it costs
+  nothing measurable — but it is a symptom, not a design.
 - **`model_weights_invalid` and `model_parameters_invalid` are `500`s**, and
   because a separator is built inside `POST /jobs`, they answer *that* request
   rather than being job-failure codes. Same as 026; they are deployment faults.
@@ -635,17 +760,10 @@ established.
 
 ## Noticed, out of scope
 
-- **`ROADMAP.md`'s *Next* section is now partly historical.** It says
-  "`standard_stems` is absent until 028 lands a real four-stem model" and offers
-  028 tier advice that this PR has acted on. Only the 028 ledger row was
-  changed here, per the assignment; the prose belongs to the next ledger-sync
-  PR. `docs/features/032-hide-development-models.md` has the same tense problem
-  and is deliberately left as the historical record it is.
-- **`ROADMAP.md`'s CPU argument for 027 has weakened.** It reasons that "a fast
-  tier is a product requirement" because RoFormer is 3.5–5× slower than real
-  time on CPU. This model runs at **1.6× real time on CPU**, so the four-stem
-  mode already has a usable CPU story and the argument now applies only to the
-  `vocals` mode. 027 is blocked on licensing regardless.
+- `docs/features/032-hide-development-models.md` describes a state that has
+  passed (`standard_stems` served by nothing real). Deliberately left as the
+  historical record it is — unlike ROADMAP's *Next* section and the three
+  reference documents, which describe the present and were corrected.
 - **`ModelInstaller.describe()` takes a `CatalogEntry`** but reads as though it
   took a `Model` — feature 026 noticed this and it is still true. Not touched.
 - **`quality_options` still offers uninstalled models.** 025 and 026 both
