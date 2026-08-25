@@ -432,6 +432,12 @@ client-side routes survive a reload). `uv run uvicorn straticate.main:app
 --port 8000` serves it identically — the two entry points differ only in who
 owns the bind address, as above.
 
+A file that is genuinely missing from the bundle — a hashed chunk a tab is still
+asking for after a rebuild — is a `404`, not the entry document. That is
+deliberate: served the other way, the browser reports "expected a JavaScript
+module script but the server responded with a MIME type of text/html", which
+names neither the missing chunk nor the stale tab. Reload the page.
+
 Both commands go through `uv run`, which **re-syncs the environment to the
 extras that invocation names** — so on a machine carrying a CUDA build of
 PyTorch, run them as `uv run --no-sync …` like every other command here (see
@@ -590,8 +596,12 @@ in the built `index.html` are root-relative and therefore resolve against the
 mount. Setting `base` in `vite.config.ts` would leave every hermetic test green
 and serve an app that loads nothing. So CI builds the frontend once and asserts,
 against a running `python -m straticate`, that the root URL and a deep link are
-the built app, that the asset the built page asks for is served, and that an
-unknown `/api/v1/**` path is still the JSON envelope.
+the built app, that the asset the built page asks for is served **as
+JavaScript** (not merely served — a fallback that answered misses with HTML
+would return `200` for a file that does not exist), that a chunk which is not
+there is a `404`, that an unknown `/api/v1/**` path is still the JSON envelope
+in both the canonical and the `//api/…` spelling, and that `/docs/` still
+redirects rather than becoming the app.
 
 It costs **5 s** — measured on its first run: 4 s of `vite build`, 1 s to start
 the server and make the checks — because it runs in the job that **already has

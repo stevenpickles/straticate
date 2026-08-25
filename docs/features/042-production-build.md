@@ -21,12 +21,13 @@ natural shape is one process on one port.
 
 ## Scope
 
-- `backend/src/straticate/frontend.py` — new module: the SPA mount, the fallback
-  route that refuses `/api/**`, and the page served when there is no bundle.
+- `backend/src/straticate/frontend.py` — new module: the bundle server, the
+  fallback installed as the router's `default`, and the page served when there
+  is no bundle.
 - `backend/src/straticate/config.py` — `Settings.frontend_dist_dir`, defaulting
   to the repository's `frontend/dist` resolved from the *module's* location.
-- `backend/src/straticate/main.py` — `create_app()` mounts the frontend last;
-  the lifespan logs which of the two modes the server started in.
+- `backend/src/straticate/main.py` — `create_app()` installs the frontend
+  fallback; the lifespan logs which of the two modes the server started in.
 - `README.md` — a "Run it" quick start (build once, one command, one URL) kept
   distinct from "Develop it".
 - `DEVELOPMENT.md` — the production build/run path, alongside the unchanged
@@ -56,20 +57,22 @@ are 043's.
 - [x] `npm run build` then `python -m straticate` serves a working app on one
       port: upload, configure, separate, inspect and export all function —
       **verified by driving the built app in a real browser**, see *Verification*
-- [x] Deep links and refreshes work, and `/api/v1/**` is never shadowed — an
-      unknown API path is still the JSON error envelope, a bad method on a real
-      route is still `405`, and the WebSocket is untouched
+- [x] Deep links and refreshes work, and `/api/v1/**` is never shadowed **in any
+      spelling** — an unknown API path is still the JSON error envelope, a bad
+      method on a real route is still `405`, `redirect_slashes` still redirects,
+      and the WebSocket is untouched
+- [x] A genuine miss inside the bundle is a `404`, not the entry document
 - [x] With no `frontend/dist`, the API starts and works normally and the root
       URL explains what to do
 - [x] The bundle path is configurable (`STRATICATE_FRONTEND_DIST_DIR`) and
       working-directory independent
 - [x] Development mode is unchanged; the Playwright tier still passes (24 tests)
 - [x] Docs distinguish "run it" from "develop it"
-- [x] All gates green; backend suite clean under `-W error` (**867 passed**)
+- [x] All gates green; backend suite clean under `-W error` (**891 passed**)
 
 ## Required tests
 
-`backend/tests/test_frontend_mount.py` (24 tests), every one of them against an
+`backend/tests/test_frontend_mount.py` (48 tests), every one of them against an
 application built with an **explicit** `frontend_dist_dir` — pointing either at
 a throwaway bundle in `tmp_path` or at a directory that does not exist. That is
 not fastidiousness: the default is the repository's `frontend/dist`, which
@@ -78,20 +81,29 @@ relying on the default would assert opposite things depending on who ran it.
 
 - the bundle is served: root, hashed asset, deep link, `HEAD`, and a traversal
   attempt that gets the app rather than the file outside it;
+- a **miss** inside the bundle is not a deep link: a stale hashed chunk, a
+  missing stylesheet, `favicon.ico` and a module `import()` (`Accept: */*`) all
+  stay `404`, while a navigation to an extension-shaped path still gets the app;
 - the API is untouched: `/api/v1/health` works, an unknown API path is the
-  `not_found` envelope under **every** method, `POST /api/v1/health` is still
-  `405`, `/api` and `/api/v2/...` are reserved too, `/docs` and `/openapi.json`
-  are not shadowed, the OpenAPI document gains no path, and the WebSocket still
-  connects;
+  `not_found` envelope under **every** method and in **every spelling**
+  (`//api/…`, `///api/…`, `/./api/…`, `/x/../api/…`, `//api`, driven straight
+  at the ASGI scope because no HTTP client can express them),
+  `POST /api/v1/health` is still `405`, `/api` and `/api/v2/...` are reserved,
+  `/docs` and `/openapi.json` are not shadowed **and still redirect from their
+  trailing-slash spellings**, the routing table gains no route at all, the
+  OpenAPI document gains no path, and the WebSocket still connects;
+- the entry document behaves like a file: `If-None-Match` gets `304`, and an
+  `index.html` deleted under a running server is a `404` envelope, not a `500`;
 - no bundle: the API works, the root URL names `npm run build` and the setting,
-  a deep link is still a `404`, and a directory with no `index.html` counts as
-  no bundle;
-- the path: absolute by default, unchanged by `chdir`, settable from the
-  environment, and an application serving the bundle it was *given*.
+  `HEAD /` sends headers only, a deep link is still a `404`, a directory with no
+  `index.html` counts as no bundle, and `POST /` is `404` in **both** modes;
+- the path: absolute by default, unchanged by `chdir` (asserting the `chdir`
+  actually happened), settable from the environment, and an application serving
+  the bundle it was *given*.
 
 ## Notes / decisions
 
-### The fallback refuses to match; it does not decline afterwards
+### The frontend is the router's `default`, not a route
 
 This is the whole feature, and the failure mode is silent. A catch-all route (or
 `StaticFiles(html=True)` mounted at `/`) matches `/api/v1/nope` as happily as
@@ -100,30 +112,91 @@ This is the whole feature, and the failure mode is silent. A catch-all route (or
 looks broken until something tries to parse it.
 
 Answering "is this the API?" *inside* the handler is not enough either, because
-of how Starlette's router dispatches:
+of how Starlette's router (and FastAPI's) dispatches:
 
-```python
-for route in self.routes:
-    match, child_scope = route.matches(scope)
-    if match == Match.FULL:
-        ...handle and return
-    elif match == Match.PARTIAL and partial is None:
-        partial = route          # remembered, used only if nothing FULL-matches
+```text
+full match → partial match (405) → redirect_slashes → default
 ```
 
 A **full match wins immediately, wherever it is in the table** — being last does
-not protect anything. So a fallback that accepted every method would answer
-`POST /api/v1/health` itself, and the `405` that route's partial match exists to
-produce would never happen. `SinglePageAppRoute.matches` therefore returns
-`Match.NONE` for anything under `/api`, for any method other than `GET`/`HEAD`,
-and for any non-HTTP scope. With those three refusals the routing table behaves
-exactly as it did when nothing was mounted; the mount can only *add* answers for
-paths that previously had none.
+not protect anything. A catch-all route therefore breaks three things at once:
+it answers `POST /api/v1/health` itself, so the `405` that route's partial match
+exists to produce never happens; it answers `/api/v1/nope` with HTML; and by
+matching every unrouted path it makes `redirect_slashes` **dead code**, so
+`/docs/` quietly becomes the app instead of redirecting to `/docs`.
+
+The first version of this feature was such a route, with the exclusions moved
+into `matches()`. That fixed the first two but not the third, and it left the
+property resting on a hand-maintained list of refusals. Installing the frontend
+as the router's **`default`** is the same idea taken to its conclusion: the
+default is what runs when everything else has declined, so the routing table is
+**literally unchanged** — a test asserts `app.routes` is identical before and
+after — and every ordering property follows from that rather than from a guard
+remembering to say no. The fallback can only add answers for requests that would
+otherwise have been `404`.
+
+It still declines three kinds of request, handing them back to the router's own
+`not_found` so they keep exactly the response they had: anything under `/api`,
+any method other than `GET`/`HEAD` (which is what keeps `POST /` a `404` whether
+or not anyone has run `npm run build`), and any non-HTTP scope.
 
 `/api`, not `/api/v1`: a future `/api/v2` should be a routing decision, not a
 silent change in which requests turn into HTML, and it is already the boundary
 Vite's dev proxy uses, so development and production agree on where the API
 ends. A test pins that `main.API_PREFIX` still lives under it.
+
+### The API guard runs on the normalized path
+
+`//api/v1/nope` is what a client emits when it builds `f"{base}/api/v1/jobs"`
+with a `base` that ends in a slash. Browsers do not collapse it, no route
+matches it, and a guard that compares the *raw* path against `/api` therefore
+sees a non-API path and hands it to the frontend — an API call answered
+`200 text/html`, which is precisely the failure this design exists to prevent,
+reintroduced by a spelling. The first version of this feature had exactly that
+hole; it was found in review, and the regression tests now cover `//api/…`,
+`///api/…`, `/./api/…`, `/x/../api/…` and `//api`.
+
+Two details worth keeping:
+
+- `posixpath.normpath` alone is not enough. POSIX gives a path beginning with
+  **exactly two** slashes implementation-defined meaning, so `normpath("//api")`
+  is `"//api"`. Repeated slashes are collapsed first, then normalized.
+- No HTTP client can express these spellings — httpx resolves `/./x` and
+  `/a/../x` while building the URL and reads a leading `//` as an authority — so
+  the tests drive the ASGI scope directly, which is what a socket-level client
+  actually sends. (`curl --path-as-is` is the equivalent at the CI end.)
+
+Resolving `..` errs deliberately toward the API: `/x/../api/v1/nope` reserves
+rather than serves. Nothing is resolved against the filesystem here; StaticFiles
+does its own, stricter lookup and refuses to leave the bundle directory.
+
+### A miss inside the bundle is not a deep link
+
+`/jobs/01J…` is a client-side route and must return `index.html`.
+`/assets/index-OLD-HASH.js` is a file that is genuinely not there and must
+return `404`. Answering the second with the entry document is how a tab left
+open across a rebuild fails: it lazily `import()`s a chunk whose hash has
+changed, and the browser reports *"expected a JavaScript module script but the
+server responded with a MIME type of text/html"* — an error naming neither the
+missing chunk nor the stale tab. The same applies to any `fetch()` of a bundle
+file.
+
+`is_navigation()` draws the line on two signals, either sufficient: the client
+asked for HTML (`Accept: text/html…`, which every navigation sends and no module
+`import()` does), or the last path segment carries no file extension (which
+covers `curl` and anything else sending `Accept: */*` for a page). A navigation
+to an extension-shaped path like `/reports/2026.05` is rescued by the first; a
+module import of a missing chunk is caught by the second.
+
+### The entry document is served as a file, not rebuilt per request
+
+The fallback returns `StaticFiles.get_response("index.html", scope)` rather than
+a freshly constructed `FileResponse`. Two things follow. Conditional requests
+work — a browser holding the document sends `If-None-Match` and gets `304`,
+instead of the whole document plus an `ETag` it can never spend. And deleting
+`index.html` from a running server (reachable, because the directory is
+inspected once at startup) answers the documented `404` envelope rather than a
+`FileNotFoundError` and a `500`.
 
 ### No bundle is a documented state (feature 018's pattern)
 
@@ -206,8 +279,19 @@ app loads nothing.
 
 So CI builds the frontend once and asserts, against a running
 `python -m straticate`, that the root URL and a deep link are the built app,
-that the asset the built page asks for is served, and that an unknown
-`/api/v1/**` path is still the JSON envelope.
+that the asset the built page asks for is served **as JavaScript**, that a chunk
+which is not there is a `404`, that an unknown `/api/v1/**` path is still the
+JSON envelope **in both the canonical and the double-slash spelling**
+(`curl --path-as-is`), and that `/docs/` still redirects.
+
+The content-type assertion is not decoration, and its absence was a real hole in
+the first version of this step: while the fallback answered every miss with
+`index.html`, `curl -sf "$base$asset"` returned `200` **whether or not the file
+existed**, so the step proved only that the URL was root-relative. A rollup
+change emitting an entry name absent from disk would have left it green — which
+is the exact class of bug the step was added to catch. Checking the media type,
+and separately that a known-missing chunk is a `404`, is what makes the claim
+true.
 
 It is in the **`e2e` job** because that job already installs both toolchains, so
 the marginal cost is one `vite build` and one server start — **measured at 5 s**
@@ -256,6 +340,29 @@ and `POST /api/v1/nope` → `404` envelope, `/api` → `404` envelope, `/docs` a
 a server started with `STRATICATE_FRONTEND_DIST_DIR` pointing at a directory
 that does not exist served the "frontend is not built" page at `/`, a `404`
 envelope on a deep link, and a fully working API.
+
+After the review fixes, the same server was driven again end to end — upload,
+configure, separate (telemetry and progress over the WebSocket), inspect,
+playback, deep-link refresh, no console errors — and each fix was checked
+against it directly: `curl --path-as-is //api/v1/nope`, `///api/v1/nope` and
+`//api` → `404 application/json`; `/assets/no-such-chunk.js` → `404` envelope
+while the real hashed asset stays `200 text/javascript`; `/docs/` and
+`/openapi.json/` → `307` to the real route; `POST /` → `404`; a deep link with
+`If-None-Match` → `304` with an empty body. `//jobs/abc` still returns the app,
+so normalizing the guard did not make the frontend pickier.
+
+### Review findings, and what they changed
+
+Code review of the first version found seven issues; all are fixed here and
+each has a regression test that fails against that version. Two were behavioural
+(`//api/v1/nope` returned `200 text/html`; every `StaticFiles` miss became
+`index.html`), and one of the "low" findings mattered more than its label — the
+CI step added to catch the asset-URL class of bug **could not catch it**,
+because that second behavioural bug made its `curl -sf` succeed for a file that
+did not exist. The routing-order reasoning itself was verified correct and is
+unchanged in substance; moving from a route to the router's `default` is that
+same reasoning applied to the two places a route could not reach
+(`redirect_slashes`, and `POST /` differing between the two modes).
 
 ### Noticed, out of scope
 
