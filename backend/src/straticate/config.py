@@ -20,6 +20,19 @@ def _default_models_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "models"
 
 
+def _default_frontend_dist_dir() -> Path:
+    """Resolve the repository's ``frontend/dist`` directory (cwd-independent).
+
+    The same reasoning as :func:`_default_models_dir`, and for the same reason:
+    a relative ``frontend/dist`` would resolve against whatever directory the
+    server happened to be started from, so the app would appear or vanish
+    depending on where you typed ``uvicorn``. Installed non-editably the
+    directory will not exist, and ``STRATICATE_FRONTEND_DIST_DIR`` must point at
+    the bundle explicitly.
+    """
+    return Path(__file__).resolve().parents[3] / "frontend" / "dist"
+
+
 def _default_cors_origins() -> list[str]:
     """Origins the Vite dev server is reachable on (see DEVELOPMENT.md)."""
     return ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -37,7 +50,9 @@ class Settings(BaseSettings):
     :func:`straticate.main.serve`, ``cors_origins`` and ``log_level`` by the
     application factory, ``data_dir`` by the audio store, the job output layout
     and the export cache, ``models_dir`` and ``include_development_models`` by
-    the model catalog, ``max_upload_bytes`` by the upload route, and
+    the model catalog, ``frontend_dist_dir`` by
+    :func:`straticate.frontend.mount_frontend`, ``max_upload_bytes`` by the
+    upload route, and
     ``ffmpeg_timeout_seconds`` by :func:`straticate.audio.ffmpeg.run_ffmpeg`. A
     setting nothing reads is a documented promise the application does not
     keep, so it does not belong here.
@@ -74,6 +89,21 @@ class Settings(BaseSettings):
     Defaults to the repository's ``models/`` directory, resolved from this
     module's location so the server can be started from any working directory.
     Override with ``STRATICATE_MODELS_DIR``.
+    """
+
+    frontend_dist_dir: Path = Field(default_factory=_default_frontend_dist_dir)
+    """Directory holding the built frontend bundle (``index.html`` and assets).
+
+    Defaults to the repository's ``frontend/dist``, resolved from this module's
+    location so the server serves the same app from any working directory
+    (feature 042). Override with ``STRATICATE_FRONTEND_DIST_DIR`` — a packaged
+    installation, or a bundle built somewhere other than the checkout, needs
+    nothing else.
+
+    **Its absence is a normal state.** A checkout that has not run
+    ``npm run build`` has no such directory; the application starts and serves
+    the whole API regardless, and only the root URL differs (it explains what
+    to build). See :mod:`straticate.frontend`.
     """
 
     include_development_models: bool = False
