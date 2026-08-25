@@ -189,6 +189,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 038 | Streaming overlap-add (bounded VRAM)         | PLANNED | 026        | | |
 | 039 | Shared separator skeleton (de-duplicate)     | PR OPEN | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | PR OPEN | 025, 037   | `040-free-disk-space-endpoint` | #49 |
+| 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
