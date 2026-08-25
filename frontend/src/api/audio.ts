@@ -6,7 +6,7 @@
  * {@link ApiError} envelope handling as the fetch-based client helpers.
  */
 
-import { API_BASE, ApiError, del, errorBodyFromText } from './client'
+import { API_BASE, ApiError, del, errorBodyFromText, get } from './client'
 import type { AudioFile } from './types'
 
 /**
@@ -117,6 +117,18 @@ export function uploadAudio(
   onProgress?: UploadProgressCallback,
 ): Promise<AudioFile> {
   return startAudioUpload(file, onProgress).promise
+}
+
+/**
+ * Fetch one uploaded audio record by ULID (`GET /api/v1/audio/{id}`).
+ *
+ * The authoritative view of an upload, used when the client has an id but
+ * no record — restoring a session after a reload (feature 033). Rejects
+ * with an `audio_not_found` {@link ApiError} (404) when the upload is gone,
+ * which it is after a backend restart: uploads are registered in memory.
+ */
+export function getAudio(id: string): Promise<AudioFile> {
+  return get<AudioFile>(`/audio/${encodeURIComponent(id)}`)
 }
 
 /** Delete an uploaded audio file and its derived data (`DELETE /api/v1/audio/{id}`). */
