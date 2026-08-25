@@ -28,10 +28,18 @@
  * And no fixed sleeps: every wait is the DOM reaching a state the script put
  * it in.
  */
-import type { APIRequestContext, Locator, Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { FIXTURES } from './environment'
-import { Workflow, expect, separationModes, test } from './app'
-import type { SeparationMode } from './app'
+import {
+  Workflow,
+  defaultServerModes,
+  expect,
+  listModels,
+  modelIdOf,
+  separationModes,
+  test,
+} from './app'
+import type { ModelRecord } from './app'
 
 const fixture = FIXTURES.tiny
 
@@ -42,67 +50,6 @@ const fixture = FIXTURES.tiny
  */
 const TOTAL_BYTES = 870 * 1024 * 1024
 const TOTAL_LABEL = '870 MB'
-
-/** A model as the backend serves it (only the fields this spec reads or writes). */
-interface ModelRecord {
-  readonly id: string
-  readonly display_name: string
-  readonly development_only: boolean
-  installation?: {
-    state: 'available' | 'downloading' | 'installed' | 'failed'
-    requires_download: boolean
-    total_bytes: number | null
-    downloaded_bytes: number | null
-    progress: number | null
-    error?: { code: string; message: string } | null
-  }
-}
-
-/** The model catalog, straight from the backend. */
-async function listModels(request: APIRequestContext): Promise<ModelRecord[]> {
-  const response = await request.get('/api/v1/models')
-  expect(response.ok(), 'the backend serves its model catalog').toBe(true)
-  return (await response.json()) as ModelRecord[]
-}
-
-/**
- * The separation modes a server with default settings would serve: the same
- * catalog, with every development fixture's tier removed and any mode left
- * without a tier dropped (feature 032). Derived, never hardcoded.
- */
-async function defaultServerModes(
-  request: APIRequestContext,
-): Promise<SeparationMode[]> {
-  const models = await listModels(request)
-  const fixtures = new Set(
-    models.filter((model) => model.development_only).map((model) => model.id),
-  )
-  expect(
-    fixtures.size,
-    'the suite runs with the development fixtures enabled, so there are some to hide',
-  ).toBeGreaterThan(0)
-
-  const modes = (await separationModes(request))
-    .map((mode) => ({
-      ...mode,
-      quality_options: mode.quality_options.filter(
-        (option) => !fixtures.has(option.model_id),
-      ),
-    }))
-    .filter((mode) => mode.quality_options.length > 0)
-
-  expect(
-    modes.length,
-    'a default server still offers at least one real separation mode',
-  ).toBeGreaterThan(0)
-  return modes
-}
-
-/** The model ID a request path names, or `null` for a non-model path. */
-function modelIdOf(url: URL): string | null {
-  const match = /^\/api\/v1\/models\/([^/]+)/.exec(url.pathname)
-  return match?.[1] === undefined ? null : decodeURIComponent(match[1])
-}
 
 /** An `installation` block in one of its four states. */
 function installation(
