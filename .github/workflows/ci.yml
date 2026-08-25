@@ -12,6 +12,16 @@ concurrency:
 
 jobs:
   backend:
+    # Installs the optional ``torch`` extra (feature 034) and keeps doing so:
+    # this is the job that runs the real separator's unit tests, type-checks
+    # the module that imports torch, and is therefore the one place the extra
+    # is genuinely exercised. ``--extra torch`` is repeated on every ``uv run``
+    # so each step states the environment it needs rather than depending on
+    # what the sync step happened to leave behind. (Measured on uv 0.8.23:
+    # ``uv run`` reconciles versions but does **not** prune packages that are
+    # merely not required, so a bare ``uv run`` here would not in fact drop
+    # torch — but relying on that is relying on an implementation detail, and
+    # these are the same commands AGENTS.md tells a contributor to type.)
     name: backend
     runs-on: ubuntu-latest
     defaults:
@@ -30,19 +40,19 @@ jobs:
           cache-dependency-glob: backend/uv.lock
 
       - name: Sync dependencies
-        run: uv sync
+        run: uv sync --extra torch
 
       - name: Format check
-        run: uv run ruff format --check .
+        run: uv run --extra torch ruff format --check .
 
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --extra torch ruff check .
 
       - name: Type check
-        run: uv run pyright
+        run: uv run --extra torch pyright
 
       - name: Tests
-        run: uv run pytest
+        run: uv run --extra torch pytest
 
   frontend:
     name: frontend
@@ -105,6 +115,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
 
+      # Deliberately **without** ``--extra torch``. This tier drives the fake
+      # separator exclusively, so PyTorch is ~183 MiB it would download and
+      # never execute; since feature 034 the application imports, starts and
+      # serves without it, and a plain ``uv sync`` is what proves that on every
+      # PR. If this step ever needs the extra, the lazy-import property has
+      # regressed — fix that rather than this line.
       - name: Sync backend dependencies
         working-directory: backend
         run: uv sync
