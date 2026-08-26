@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from './client'
-import { cancelJob, createJob, getJob, listJobs } from './jobs'
+import {
+  DEFAULT_STEREO_HANDLING,
+  STEREO_HANDLING_OPTIONS,
+  cancelJob,
+  createJob,
+  getJob,
+  listJobs,
+  stereoHandlingOption,
+} from './jobs'
 import { sampleConfiguration, sampleJob, sampleJobId } from '../test/fixtures'
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -131,5 +139,45 @@ describe('cancelJob', () => {
     const apiError = error as ApiError
     expect(apiError.status).toBe(409)
     expect(apiError.code).toBe('job_not_cancellable')
+  })
+})
+
+describe('stereo-handling presentation table (feature 041)', () => {
+  it('describes every choice the contract offers, in picker order', () => {
+    expect(STEREO_HANDLING_OPTIONS.map((option) => option.id)).toEqual([
+      'as_is',
+      'mono',
+    ])
+    for (const option of STEREO_HANDLING_OPTIONS) {
+      expect(option.label.length).toBeGreaterThan(0)
+      expect(option.note.length).toBeGreaterThan(0)
+      expect(stereoHandlingOption(option.id)).toEqual(option)
+    }
+  })
+
+  it('defaults to the value the backend applies when the field is omitted', () => {
+    expect(DEFAULT_STEREO_HANDLING).toBe('as_is')
+    expect(STEREO_HANDLING_OPTIONS[0]?.id).toBe(DEFAULT_STEREO_HANDLING)
+  })
+
+  it('promises nothing about quality, only about what is done and what it costs', () => {
+    // This control changes the user's audio. "Improves separation" would be a
+    // claim the app cannot make for an arbitrary mix; feature 041 measured one
+    // track, not a population.
+    for (const option of STEREO_HANDLING_OPTIONS) {
+      expect(option.note).not.toMatch(/improve|better|best|fix(es)?\b/i)
+    }
+    expect(stereoHandlingOption('mono').note).toMatch(/mono/i)
+  })
+
+  it('frames the fold as recovering a stem, not as separating better', () => {
+    // Feature 041 measured this: the four stems reconstruct the mixture at
+    // +0.999 folded or not, so nothing is gained overall — a near-silent stem
+    // becomes usable because the low end is reassigned. The note must say that
+    // and stop there.
+    const note = stereoHandlingOption('mono').note
+    expect(note).toMatch(/recovers a stem/i)
+    expect(note).toMatch(/near-silent/i)
+    expect(note).toMatch(/does not otherwise change/i)
   })
 })

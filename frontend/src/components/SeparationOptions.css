@@ -140,3 +140,16 @@
   font-size: 0.85rem;
   color: var(--color-text-muted);
 }
+
+/*
+ * What a stereo-handling choice does to the user's audio, beside the choice
+ * (feature 041). Same placement and the same reason as the weights note: it is
+ * a description, not part of the option's accessible name.
+ */
+.separation-option-note {
+  grid-column: 2;
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--color-text-muted);
+}

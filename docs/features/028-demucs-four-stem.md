@@ -759,6 +759,17 @@ the bass entirely — the same track, same model, same settings:
 a 33 dB improvement, with the other three stems unaffected. Feature **041**
 tracks offering this in the product.
 
+> **Two claims above were measured more carefully by feature 041 and are
+> weaker than stated here.** "The other three stems unaffected" is true of
+> *level* but not of balance: normalised to each variant's own input level, the
+> fold costs `drums` about 3 dB and `other` about 3 dB while `vocals` gains
+> about 2 dB. And the fold **recovers** the bass stem rather than fixing the
+> assignment — it moves 16% of the source's sub-250 Hz energy into `bass`, up
+> from 0.002%, while `other` still holds 41%. Nothing is lost either way (the
+> four stems reconstruct the mixture at +0.999 at every setting); the low end is
+> reassigned, not recovered whole. See
+> `docs/features/041-mono-folddown-option.md`, *The measurement*.
+
 **`htdemucs_ft` does not help — tested, not assumed.** The fine-tuned variant is
 a bag of four models with an identity weight matrix, so each source is produced
 by its own specialist. The bass specialist (`d12395a8-e57c48e6.th`, SHA-256

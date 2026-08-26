@@ -315,6 +315,9 @@ describe('SeparationOptions starting a separation', () => {
       audio_id: sampleAudioFile.id,
       mode_id: twoStemMode?.id,
       quality_id: twoStemMode?.quality_options[1]?.id,
+      // Feature 041: always stated, never left to a server default the
+      // browser cannot see. `as_is` is what nobody touching the control gets.
+      stereo_handling: 'as_is',
     })
     expect(Object.keys(body as object)).not.toContain('device_id')
 
@@ -325,6 +328,7 @@ describe('SeparationOptions starting a separation', () => {
         audio_id: sampleAudioFile.id,
         mode_id: twoStemMode?.id,
         quality_id: twoStemMode?.quality_options[1]?.id,
+        stereo_handling: 'as_is',
       }),
     })
   })
@@ -1150,5 +1154,83 @@ describe('SeparationOptions keeping a tier’s price honest', () => {
       expect(catalogReads(fetchMock)).toBe(2)
     })
     expect(modelReads(fetchMock)).toBeGreaterThan(modelReadsBefore)
+  })
+})
+
+describe('SeparationOptions stereo handling (feature 041)', () => {
+  it('offers every choice, with "Keep stereo" selected and each one explained', async () => {
+    stubFetch({})
+    renderOptions()
+
+    const keep = await screen.findByRole('radio', { name: 'Keep stereo' })
+    const fold = screen.getByRole('radio', { name: 'Fold to mono' })
+    expect(keep).toBeChecked()
+    expect(fold).not.toBeChecked()
+
+    // The explanation is a *description*, not part of the option's name — so
+    // "Fold to mono" stays the accessible name and the cost is still announced.
+    expect(fold).toHaveAccessibleDescription(/stems come back mono/i)
+    expect(keep).toHaveAccessibleDescription(/exactly as it is/i)
+  })
+
+  it('posts the chosen handling', async () => {
+    const fetchMock = stubFetch({})
+    renderOptions()
+
+    await userEvent.click(
+      await screen.findByRole('radio', { name: 'Fold to mono' }),
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start separation' }),
+    )
+
+    await waitFor(() => {
+      expect(postedJobBodies(fetchMock)).toHaveLength(1)
+    })
+    expect(postedJobBodies(fetchMock)[0]).toMatchObject({
+      stereo_handling: 'mono',
+    })
+  })
+
+  it('is nothing to do with the catalog, so changing mode does not undo it', async () => {
+    const fetchMock = stubFetch({})
+    renderOptions()
+
+    await userEvent.click(
+      await screen.findByRole('radio', { name: 'Fold to mono' }),
+    )
+    await userEvent.click(
+      screen.getByRole('radio', { name: fourStemMode?.display_name }),
+    )
+    expect(screen.getByRole('radio', { name: 'Fold to mono' })).toBeChecked()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start separation' }),
+    )
+    await waitFor(() => {
+      expect(postedJobBodies(fetchMock)).toHaveLength(1)
+    })
+    expect(postedJobBodies(fetchMock)[0]).toMatchObject({
+      mode_id: fourStemMode?.id,
+      stereo_handling: 'mono',
+    })
+  })
+
+  it('never applies anything the user did not ask for', async () => {
+    const fetchMock = stubFetch({})
+    renderOptions()
+
+    // Straight to Start, touching nothing: the request must say `as_is`.
+    // Detecting a wide stereo mix and quietly folding it is exactly what this
+    // feature's brief rules out, and this is where that would show up first.
+    await userEvent.click(
+      await screen.findByRole('button', { name: 'Start separation' }),
+    )
+    await waitFor(() => {
+      expect(postedJobBodies(fetchMock)).toHaveLength(1)
+    })
+    expect(postedJobBodies(fetchMock)[0]).toMatchObject({
+      stereo_handling: 'as_is',
+    })
   })
 })

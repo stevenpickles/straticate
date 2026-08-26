@@ -24,6 +24,7 @@ const configuration: SeparationConfiguration = {
   mode_id: 'vocals',
   quality_id: 'high_quality',
   device_id: 'cuda:0',
+  stereo_handling: 'as_is',
 }
 
 const job: Job = {

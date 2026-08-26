@@ -416,3 +416,71 @@ describe('useAppState / useAppDispatch', () => {
     )
   })
 })
+
+describe('appReducer stereo handling (feature 041)', () => {
+  /** Application state with an upload registered and the catalog loaded. */
+  function loaded(): AppState {
+    return appReducer(
+      appReducer(
+        {
+          ...initialAppState,
+          upload: { status: 'uploaded', file: sampleAudioFile },
+        },
+        { type: 'configure/modesRequested' },
+      ),
+      { type: 'configure/modesLoaded', modes: sampleSeparationModes },
+    )
+  }
+
+  it('starts at the backend default, so nothing is applied unasked', () => {
+    expect(initialConfigureState.stereoHandling).toBe('as_is')
+    expect(loaded().configure.stereoHandling).toBe('as_is')
+  })
+
+  it('configure/stereoHandlingSelected records the choice', () => {
+    const state = appReducer(loaded(), {
+      type: 'configure/stereoHandlingSelected',
+      stereoHandling: 'mono',
+    })
+    expect(state.configure.stereoHandling).toBe('mono')
+  })
+
+  it('survives selecting a different mode and tier', () => {
+    let state = appReducer(loaded(), {
+      type: 'configure/stereoHandlingSelected',
+      stereoHandling: 'mono',
+    })
+    const [, fourStemMode] = sampleSeparationModes
+    state = appReducer(state, {
+      type: 'configure/modeSelected',
+      modeId: fourStemMode?.id ?? '',
+    })
+    state = appReducer(state, {
+      type: 'configure/qualitySelected',
+      qualityId: fourStemMode?.quality_options[0]?.id ?? '',
+    })
+    expect(state.configure.stereoHandling).toBe('mono')
+  })
+
+  it('survives a catalog reload, which says nothing about the user audio', () => {
+    const state = appReducer(
+      appReducer(loaded(), {
+        type: 'configure/stereoHandlingSelected',
+        stereoHandling: 'mono',
+      }),
+      { type: 'configure/modesLoaded', modes: sampleSeparationModes },
+    )
+    expect(state.configure.stereoHandling).toBe('mono')
+  })
+
+  it('resets with the upload, because the next file is a different recording', () => {
+    const state = appReducer(
+      appReducer(loaded(), {
+        type: 'configure/stereoHandlingSelected',
+        stereoHandling: 'mono',
+      }),
+      { type: 'upload/reset' },
+    )
+    expect(state.configure.stereoHandling).toBe('as_is')
+  })
+})
