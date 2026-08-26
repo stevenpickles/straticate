@@ -306,6 +306,53 @@ on the CPU, and every timing figure printed is a CPU figure. Immediately before
 it, the same tier under `uv run --no-sync pytest -m integration` was **4 passed
 on `cuda:0`**. Use `--no-sync` here.
 
+### Two `uv run`s in one worktree fight over the environment
+
+The sync above is per *invocation*, so two long-running commands in the same
+worktree that name **different extras** take turns rewriting the same `.venv`.
+That is not hypothetical: the two documented commands disagree. The E2E tier
+starts its backend as `uv run python -m straticate` — no extra, deliberately,
+because the fake separator needs no PyTorch (`playwright.config.ts`, feature
+034) — while the backend suite is `uv run --extra torch pytest`. Run the tier
+and the suite at once in `backend/` and each `uv run` undoes what the other
+just did.
+
+Measured with uv 0.8.23, on Windows, with a server already running from the
+`.venv` under test:
+
+| what ran | effect on `.venv` |
+| --- | --- |
+| `uv run --extra torch pytest …` | **installed 13 packages in 10.85 s** (torch and its dependencies) |
+| `uv run python -m straticate` | torch left in place — `uv run` does not prune |
+| `uv sync` | **removed** torch, sympy, setuptools, `rotary-embedding-torch` |
+
+The running server survived every one of those, including the removal, and kept
+serving uploads throughout — but only because feature 034 made the RoFormer
+builder a lazy import, so a fake-separator run never touches torch at all. A
+process that *has* imported what the other command removes does not get that
+reprieve.
+
+**How to recognise it.** Nothing in either log mentions torch. What you see is
+one command paying 10–20 s of reinstall it did not ask for, on every
+invocation, while the other reverses it — so a loop that should take four
+minutes takes much longer for no visible reason, and `uv pip list` gives a
+different answer depending on which command ran last.
+
+**The fix is a second environment, not a second checkout.** `uv` takes it from
+the environment, and it leaves the project's own `.venv` alone:
+
+```bash
+cd backend
+UV_PROJECT_ENVIRONMENT=.venv-suite uv run --extra torch pytest
+```
+
+Verified: that created `.venv-suite`, installed 48 packages into it, imported
+`torch 2.13.0+cpu` from it, and left `.venv` without torch and the running
+server healthy. Matching the extras on both commands works too, as does
+`--no-sync` on both once the environment is built — but only the separate
+environment survives someone else running the *other* command without thinking
+about it.
+
 ### Optional: NVML, for GPU utilization and temperature
 
 GPU telemetry works without NVML: memory allocated, peak and total come from
