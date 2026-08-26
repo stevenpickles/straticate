@@ -47,7 +47,7 @@ actually deliver rather than left asserting something unreachable.
 | Capability-driven mode selection | **done** — 010 derives modes from the catalog; 026 honours `Model.capabilities` at device resolution |
 | Bounded VRAM | **done** — 038 streams the overlap-add onto the host. RoFormer's peak is flat *to the byte* at any length (1,526 MiB allocated, 2,981 whole-device, from 30 s to 60 min); Demucs' is flat to ~38 min and then rises 24× more slowly than before. Host RAM, not VRAM, now limits track length |
 | Production build | **done** — 042; `uvicorn straticate.main:app` serves API and SPA on one port |
-| Release preparation | **043** — CHANGELOG, version bump, manual `dev → main` tag |
+| Release preparation | **done** — 043; `CHANGELOG.md` written from the ledger for users, `backend/pyproject.toml` at `0.1.0`, and the whole workflow verified from a clean clone |
 
 **The gap this milestone ships with, stated plainly:** the `vocals` mode has only
 a high-quality tier, which runs at ~0.3× real time on CPU — roughly ten minutes
@@ -56,13 +56,38 @@ CPU path (Demucs, 1.63× real time). Reopening the fast-vocals question needs a
 model whose terms somebody with standing has stated; see
 `docs/features/027-mdx-fast-separator.md`.
 
-Release PR `dev → main`, annotated tag `v0.1.0`.
+**Every M3 requirement is met.** What remains is the project owner's, and
+deliberately so (`AGENTS.md`: never push to `main`): open the release PR
+`dev → main`, merge it, and create the annotated tag `v0.1.0`. Feature 043
+prepared `dev` and stopped there.
 
-## Current state (2026-08-24)
+## Current state (2026-08-26)
 
-**Milestones M1 and M2 are both met.** Features 001–026 plus 029 and 031 are
-merged. **693 backend tests and 517 frontend tests**, all CI-enforced, the
-backend suite clean under `-W error`.
+**M1, M2 and M3 are all met, and `dev` is prepared for the v0.1.0 release.**
+Every numbered feature 001–045 is merged or resolved — 027 `WONTFIX` (no licence
+with standing for the MDX-family weights) and 007 folded into 006; 043 is the
+release preparation itself. **935 backend tests and 802 frontend tests**, all
+CI-enforced, the backend suite clean under `-W error`.
+
+The release notes are [CHANGELOG.md](CHANGELOG.md), written from this ledger for
+users rather than as a commit log: what the application does, what it needs, and
+— the section that took the most care — what it cannot do. Everything the
+release ships with a caveat is recorded there with the measurement behind it.
+
+**What is left is the project owner's**, per `AGENTS.md`: the release PR
+`dev → main`, the merge, and the annotated tag `v0.1.0`. Feature 043 does not
+create, merge or tag anything.
+
+Verified on 2026-08-26 from a clean clone of `dev` on Windows 11, following
+`README.md` verbatim: `npm ci && npm run build` (8.9 s / 10.5 s),
+`uv sync --extra torch` (23.5 s), `uv run python -m straticate`, then the
+workflow at `127.0.0.1:8000` — install the 80.2 MB Standard Stems weights,
+upload, configure, separate, watch live chunk progress and telemetry, play the
+stems, export. 20 s of audio separated in **11.84 s of processing, real-time
+factor 1.689** on CPU, against 028's published 1.63–1.64.
+`GET /api/v1/version` answered `0.1.0` and the header read `backend v0.1.0`.
+No console errors, no warnings in the server log. Details in
+`docs/features/043-release-preparation.md`.
 
 ### M2 — first real separation
 
@@ -131,20 +156,41 @@ Met earlier the same day and verified by hand in a browser: upload → catalog-d
 configuration → job → live chunk progress → telemetry → cancel → synchronized
 stem playback with solo/mute/seek → export. See the git history of this section.
 
-### Next
+### After v0.1.0
 
-- **027** (MDX fast tier) — the CPU story, now narrowed to the `vocals` mode:
-  RoFormer is 3.5–5× slower than real time on CPU, while 028's four-stem model
-  measures **1.6× faster** than real time on the same host, so `standard_stems`
-  already has a usable CPU story and `vocals` does not.
-- **028** (4-stem separation) is **in review** — `standard_stems` has a real
-  model again, `standard-stems-001` (Hybrid Transformer Demucs), claiming
-  `balanced` and leaving `high_quality` free for a bagged checkpoint later.
-  **027** still has the tier problem this note was about: `vocals` has no free
-  tier left, so `fake-vocals-001` must be retiered or dropped in that PR. See
-  `docs/features/032-hide-development-models.md`.
-- **030** (Playwright E2E tier) — overdue since M1; it would have caught two
-  M1 defects that unit tests did not.
+Nothing below is numbered yet. The first three are things the release ships
+*with*, recorded in `CHANGELOG.md` where a user will meet them; the rest are
+open questions.
+
+- **`StemPlayer` cannot recover from a failed result fetch.** One `useEffect`,
+  one `getSeparationResult`, no retry — a single dropped request leaves the
+  Inspect step permanently reading "Something went wrong. Please try again."
+  with no control that tries again. Found and quantified by **044** (finding 2)
+  and deliberately not fixed there. The smallest real defect in the release and
+  the cheapest to fix.
+- **Nothing prunes job outputs, exports or uploads.** 021, 022, 024 and 040 each
+  recorded it and none of them owns it: disk use grows with every job forever,
+  deleting an uploaded file leaves its stems behind, and the free-space warning
+  040 added covers the *models* directory only. No feature owns retention.
+- **Job records do not survive a restart** (012, 015, 021), so stems that exist
+  on disk become unreachable through the API. The UI explains it and offers a
+  re-run, which is honest but is not persistence.
+- **Wide-stereo detection**, which **041** deliberately left out and then handed
+  everything to: the signal (full-band L/R correlation), the failing case
+  (+0.23 against 0.7–0.95), a defensible threshold (below ~+0.5), what it must
+  say, and what it must never do (apply anything). The one thing it has to
+  measure for itself is the false-positive rate on ordinary modern tracks —
+  every number 041 published is from **one** record.
+- **A band-limited fold** — mono below a crossover, stereo above. 041 calls it
+  the most promising unexplored option and did not ship it precisely because it
+  was unmeasured.
+- **A fast `vocals` tier** stays blocked on the same thing that closed 027: a
+  model whose weights licence somebody with standing has stated.
+- **`scripts/` and `testdata/` do not exist.** `README.md`, `ARCHITECTURE.md`
+  and `DEVELOPMENT.md` all describe them; the repository has neither, and audio
+  fixtures are generated into temporary directories at test time. Found by 043's
+  clean-checkout run and left alone: it spans three documents that 043 does not
+  own.
 - Whether `quality_options` should hide tiers whose weights are not installed
   is **settled by 037: no.** Raised by 010 and deferred by 025, 026 and 032.
   Hiding makes the product silently differ from machine to machine, and on a
@@ -166,8 +212,8 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
   checkout still requires a weights install (870 MiB or 80 MiB) before it can
   separate anything. `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` restores the
   previous behaviour and is what CI, the backend suite and 030's Playwright tier
-  set. A first-run install affordance is another thing waiting on the unclaimed
-  model-management UI.
+  set. The first-run install affordance this note used to be waiting for shipped
+  in **035**, and **037** gave it a full model library.
 
 ## Feature ledger
 
@@ -215,7 +261,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | MERGED  | 028        | `041-mono-folddown-option` | #57 |
 | 042 | Production build (backend serves frontend)   | MERGED  | 003, 024   | `042-production-build` | #53 |
-| 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
+| 043 | Release preparation for v0.1.0               | PR OPEN | 038, 042   | `043-release-preparation` | #62 |
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 

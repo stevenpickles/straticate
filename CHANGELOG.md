@@ -1,0 +1,239 @@
+# Changelog
+
+All notable changes to Straticate are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely — the headings
+below are written for the person *running* Straticate rather than as a list of
+merges — and the project follows [Semantic Versioning](https://semver.org/).
+
+Model weights are versioned separately from the application and are never
+bundled with it; the *Licensing* section of each release says what shipped in
+the catalog.
+
+## [0.1.0] — 2026-08-26
+
+The first release. Straticate separates a mixed music file into stems, in a
+browser, on your own machine, with no account and no cloud service.
+
+### What it does
+
+**One process, one URL.** Build the frontend once; after that `python -m
+straticate` serves the interface and the API together on
+<http://127.0.0.1:8000>. Deep links and refreshes work. A checkout with no
+built bundle still serves the whole API — the root URL tells you what to build.
+
+**Select → Configure → Separate → Inspect → Export.**
+
+- **Select** — drag a music file in or pick one. The file is validated on its
+  actual contents rather than its extension, and probed with `ffprobe`; uploads
+  up to 1 GiB are accepted by default (`STRATICATE_MAX_UPLOAD_BYTES`). Duration,
+  container, codec, channels, sample rate, bit depth, bit rate and size are
+  shown before you commit to anything.
+- **Configure** — two separation modes, both served by the backend rather than
+  hardcoded in the interface:
+
+  | Mode | Stems | Model |
+  | --- | --- | --- |
+  | Vocal Isolation | `vocals`, `instrumental` | Mel-Band RoFormer (Kim Vocal 2) |
+  | Standard Stems | `vocals`, `drums`, `bass`, `other` | Hybrid Transformer Demucs (htdemucs v4) |
+
+  Each quality tier is priced where you choose it — "Installed", "Needs a
+  870.8 MB download", "Downloading its weights…" — and the selected model's
+  licence terms, attribution and hardware requirements are shown beside it,
+  before you install anything. A **Keep stereo / Fold to mono** control decides
+  what happens to the recording's stereo image before separation; the default
+  keeps it exactly as it is.
+- **Separate** — one job at a time, run asynchronously. Progress is real work
+  (`chunks completed / chunks total`) pushed over a WebSocket, never a timer, and
+  Cancel is honoured. A live telemetry panel shows the model, the compute device
+  and — on CUDA — VRAM allocated and peak, plus the stage, elapsed time, audio
+  processed and real-time factor. GPU utilization and temperature fill in too if
+  the optional `nvidia-ml-py` binding is installed, and are simply blank if it is
+  not; nothing here requires it. Reloading the page mid-job returns you to the
+  job.
+- **Inspect** — every stem plays in sample-accurate sync off one clock, with
+  per-stem solo and mute, play/pause and a seek scrubber.
+- **Export** — WAV 24-bit, WAV 32-bit float or FLAC. One stem gives you an audio
+  file; two or more give you a zip of the stems plus a `separation.json`
+  describing the run. Repeating an export you have already taken is served from
+  a cache.
+
+**Model weights install themselves, once, from the app.** Nothing is bundled and
+nothing is redistributed: the catalog pins a download URL and a SHA-256, and the
+app fetches from the publisher's own server, verifies the hash and publishes the
+file atomically. It shows the download size, the licence terms and how much room
+is free on the target disk before it starts, and it will warn — but never
+refuse — if the margin looks tight. Installs can be cancelled and weights can be
+removed.
+
+**The GPU is found, or it is not, and either way it just runs.** Compute devices
+are detected for you; a job that pins no device gets the best one available.
+Installing a CUDA build of PyTorch is one documented command and changes no
+code, no settings, no API and no schema.
+
+### What you need
+
+- **[uv](https://docs.astral.sh/uv/)** — it fetches Python 3.12 for you.
+- **Node.js ≥ 20 and npm**, to build the frontend bundle once.
+- **FFmpeg, including `ffprobe`, on `PATH`.** Not optional: it probes uploads,
+  decodes audio for separation and transcodes exports.
+- **PyTorch**, installed with `uv sync --extra torch`. This is the CPU build. A
+  GPU is optional; see DEVELOPMENT.md (*PyTorch and CUDA*) for the one command
+  that swaps in a CUDA wheel, and for the two ways a later `uv` invocation can
+  quietly swap it back out.
+- **Disk for model weights**, downloaded on first use: **870.8 MB**
+  (913,106,900 bytes) for Vocal Isolation, **80.2 MB** (84,141,911 bytes) for
+  Standard Stems.
+- **Host RAM, which is what limits how long a track can be.** VRAM is not the
+  binding constraint — since the overlap-add was moved onto the host it is flat
+  with track length — but the host's memory is. The figure covers the **peak
+  working set of the whole backend process while a separation runs**, not the
+  audio alone, and it is linear in track length:
+
+  | | Standard Stems (Demucs) | Vocal Isolation (RoFormer) |
+  | --- | --- | --- |
+  | peak working set | ≈ 1,600 MiB + 2.81 MiB per second of audio | ≈ 2,260 MiB + 2.33 MiB per second |
+  | what 8 GiB covers | about **39 minutes** of audio | about **42 minutes** |
+  | what 16 GiB covers | about 85 minutes | about 100 minutes |
+  | a four-minute song | about 1.7 GiB | about 1.7 GiB |
+
+  Those are fits to measured runs, and they are the *process*, so anything else
+  large on the machine comes out of the same budget.
+- **A GPU is optional.** With one, the catalog asks for 4,096 MiB of VRAM for
+  either model (3,072 MiB minimum for Standard Stems). Those figures are
+  advisory: nothing is refused for failing them.
+
+Straticate binds to loopback and has **no authentication**. It is a local-first
+tool, not a service to put on a network.
+
+### Measured, on an NVIDIA GeForce RTX 4060 Laptop GPU (8,188 MiB) with an Intel laptop CPU
+
+| | CPU | `cuda:0` |
+| --- | --- | --- |
+| Vocal Isolation, 30 s clip | 100.5 s (**0.30× real time**) | 6.7 s (**4.50×**) |
+| Standard Stems, 30 s clip | 18.3 s (**1.63× real time**) | 2.2–2.8 s (10.7–13.5×) |
+
+Peak VRAM is flat with track length: **2,980.6 MiB whole-device** for Vocal
+Isolation at *any* length from 30 seconds to an hour — the same figure to the
+byte — and about **1,815–1,890 MiB** for Standard Stems out to roughly 38
+minutes, after which it climbs at 0.077 MiB per second of audio (2,210.6 MiB at
+90 minutes). Track length is bounded by host RAM, not by the card.
+
+Separation quality, correlated against known ground truth on a synthesised
+mixture — the *mixture's* own correlation with each source is given as the
+baseline that makes the numbers mean something:
+
+| stem | against its own source | mixture baseline |
+| --- | --- | --- |
+| `vocals` (Vocal Isolation) | **+0.993** | +0.231 |
+| `instrumental` (Vocal Isolation) | **+1.000** | — |
+| `vocals` (Standard Stems) | **+0.952** | +0.324 |
+| `drums` | **+0.907** | +0.221 |
+| `bass` | **+0.985** | +0.568 |
+| `other` | **+0.993** | +0.723 |
+
+Read the baseline column. `other`'s +0.993 is impressive against a mixture that
+already correlates with that source at +0.723, and much less so than the same
+number would be for `drums`. Both figures come from synthesised mixtures where
+the true sources were known — not from real records, which have no ground truth
+to correlate against.
+
+### Known limitations
+
+These are the things worth knowing *before* you separate something, not
+afterwards.
+
+**Vocal Isolation has no fast tier, and on a CPU it is slow.** It runs at about
+**0.3× real time** — roughly ten minutes for a three-minute song on a machine
+with no GPU. Standard Stems is the mode with a usable CPU path at 1.63× real
+time. A fast vocals model was investigated and abandoned: no party with standing
+has stated a licence for the MDX-family weights that would fill the tier, and
+restrictive terms are workable where silence is not.
+
+**Demucs loses the bass stem on wide-separation stereo mixes.** On a 1968 stereo
+mix whose channels are nearly independent (full-band L/R correlation **+0.229**,
+against 0.7–0.95 for modern productions) the `bass` stem came back effectively
+silent: **−65.7 dBFS**, peak 176 of 32767. The model is trained on material
+where bass is essentially always centred. Choosing **Fold to mono** recovers it
+to **−32.6 dBFS**, peak 7,788 — a 33 dB recovery, reproduced three times.
+
+Be clear about what the fold does and does not do:
+
+- It **recovers a stem that would otherwise be unusable. It does not fix the
+  separation.** It moves **16%** of the source's below-250 Hz energy into `bass`,
+  up from 0.002% — and `other` still holds **41%** of it. What you get is a
+  `bass` stem that exists, not a clean split.
+- It **is not free for the other stems.** Measured against each variant's own
+  input level, the fold costs `drums` about **3 dB** and `other` about **3 dB**,
+  while `vocals` gains about **2 dB**.
+- **Every stem comes back mono**, because the mixture that was separated was
+  mono. `Stem.channels` says `1` and the files really are one channel.
+- **Nothing detects the condition.** You have to notice the near-silent stem and
+  know that this control exists. There is no suggestion in the interface, and
+  nothing is ever folded unasked.
+- **All of the above is from one track.** It is the right track for the
+  comparison — it is the failure case — but it is not a survey. Partial
+  mid/side narrowing was measured across seven settings and rejected: there is
+  no setting that both recovers the stem and leaves an audible stereo image.
+
+**Model weights carry their own licences, and one of the two shipped models is
+research-use-only.** See *Licensing* below. This is the limitation most likely
+to matter to you and the one least likely to be noticed.
+
+**Job records live in memory and do not survive a restart.** Restarting the
+backend loses every job record, while the stems and exports it produced stay on
+disk — so a result URL for output that still exists will answer `404`. The
+interface explains this and offers to run the job again. A failed model install
+is forgotten the same way; the model simply reports itself as available again.
+
+**Nothing prunes anything.** Uploads, job output directories, stems and export
+artifacts accumulate under the data directory forever. There is no retention
+policy, no cleanup command and no size cap; deleting an uploaded file does not
+delete the stems derived from it, and every distinct format-and-selection you
+export leaves another file behind. The free-space figure the app reports is for
+the **models** directory only — nothing warns about the data directory filling
+up.
+
+**A 24-bit or 32-bit-float export adds no detail.** The separator writes 16-bit
+PCM, so those formats re-encode what is there rather than recovering anything.
+The interface says so beside the format picker.
+
+**Smaller edges, stated so they are not surprises:**
+
+- One job at a time, and no job history or library — the interface holds one
+  separation at a time.
+- If the request that fetches a finished job's stems fails, the Inspect step
+  shows "Something went wrong. Please try again." with **no control that tries
+  again**; reload the page. This is a known open defect.
+- Model downloads are not resumable — an install interrupted at 95% starts
+  over — there is no update path (remove and install again), and installed
+  weights are not re-verified after the install-time SHA-256 check.
+- Cancelling a running separation takes effect at the next chunk boundary, which
+  is several seconds of CPU time.
+- Exports are buffered in the browser tab with no progress indicator, and a
+  download in progress cannot be cancelled.
+- The stem player has no per-stem volume, no keyboard transport and no
+  scrub-while-playing preview, and it re-downloads the stems if you leave the
+  Inspect step and come back.
+
+### Licensing
+
+**Straticate itself is MIT.** Its model weights are not, and a model's
+source-code licence does not carry over to its weights.
+
+| Model | Code | Weights | Commercial use | Redistribution |
+| --- | --- | --- | --- | --- |
+| `vocals-hq-001` — Mel-Band RoFormer (Kim Vocal 2) | MIT | **MIT** | Permitted | Permitted |
+| `standard-stems-001` — Hybrid Transformer Demucs (htdemucs v4) | MIT | **No formal licence designated — research and personal use only** | **Not permitted** | **Not permitted** |
+
+The Demucs weights have no licence document. The only statement with standing is
+the author's, on `facebookresearch/demucs` issue #327 (2022-05-23), that the
+weights are not covered by the MIT licence and "are provided only for scientific
+purposes". Straticate records that verbatim rather than summarising it into a
+licence identifier it does not have, shows it in the app before you install, and
+never redistributes the file — it downloads it from the publisher's own server.
+
+**If you intend to use Straticate commercially, check each model's weights
+licence before installing it.** The application being MIT does not make the
+models so.
+
+[0.1.0]: https://github.com/stevenpickles/straticate/releases/tag/v0.1.0
