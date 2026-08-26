@@ -139,10 +139,10 @@ function Probe() {
   )
 }
 
-function renderOptions() {
+function renderOptions(file = sampleAudioFile) {
   const initialState: AppState = {
     phase: 'configure',
-    upload: { status: 'uploaded', file: sampleAudioFile },
+    upload: { status: 'uploaded', file },
     configure: initialConfigureState,
   }
   return render(
@@ -1214,6 +1214,36 @@ describe('SeparationOptions stereo handling (feature 041)', () => {
       mode_id: fourStemMode?.id,
       stereo_handling: 'mono',
     })
+  })
+
+  it('offers nothing to choose when the upload is already mono', async () => {
+    // Both values are documented as identical no-ops on a single-channel
+    // source, so offering the fold there would promise an effect that cannot
+    // happen — and its note says it recovers a stem.
+    stubFetch({})
+    renderOptions({
+      ...sampleAudioFile,
+      metadata: { ...sampleAudioFile.metadata, channels: 1 },
+    })
+
+    expect(
+      await screen.findByText(/already mono, so there is nothing to fold/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('radio', { name: 'Fold to mono' }),
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('radio', { name: 'Keep stereo' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers the choice for a stereo upload', async () => {
+    stubFetch({})
+    renderOptions()
+    expect(
+      await screen.findByRole('radio', { name: 'Fold to mono' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByText(/already mono/i)).not.toBeInTheDocument()
   })
 
   it('never applies anything the user did not ask for', async () => {

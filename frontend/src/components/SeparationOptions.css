@@ -153,3 +153,12 @@
   line-height: 1.35;
   color: var(--color-text-muted);
 }
+
+/*
+ * The same note standing alone, where the choice itself is not offered: a
+ * single-channel upload has nothing to fold (feature 041). It spans the whole
+ * group rather than the option column, because there is no option beside it.
+ */
+.separation-option-note-only {
+  grid-column: 1 / -1;
+}

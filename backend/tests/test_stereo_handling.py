@@ -175,7 +175,18 @@ def roformer_separator(tmp_path: Path) -> Any:
     return RoFormerSeparator(tiny_info(), weights_file=weights, parameters=tiny_parameters())
 
 
-@pytest.mark.parametrize("build", [demucs_separator, roformer_separator])
+def fake_separator(_tmp_path: Path) -> Any:
+    """The development engine. It folds too -- see below."""
+    from straticate.inference.fake import FAKE_VOCALS_INFO, FakeSeparator
+
+    return FakeSeparator(
+        FAKE_VOCALS_INFO,
+        chunk_delay_seconds=0.0,
+        model_load_seconds=0.0,
+    )
+
+
+@pytest.mark.parametrize("build", [demucs_separator, roformer_separator, fake_separator])
 async def test_mono_handling_yields_mono_stems(build: Any, source: Path, tmp_path: Path) -> None:
     """The choice reaches the separator and changes what comes out.
 
@@ -193,7 +204,7 @@ async def test_mono_handling_yields_mono_stems(build: Any, source: Path, tmp_pat
         assert (channels, rate) == (1, stem.sample_rate_hz)
 
 
-@pytest.mark.parametrize("build", [demucs_separator, roformer_separator])
+@pytest.mark.parametrize("build", [demucs_separator, roformer_separator, fake_separator])
 async def test_the_default_separates_exactly_as_before(
     build: Any, source: Path, tmp_path: Path
 ) -> None:

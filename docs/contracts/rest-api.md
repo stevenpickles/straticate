@@ -464,6 +464,12 @@ either value. Omitting the field is exactly equivalent to sending `"as_is"`, so
 a client written before this feature is unchanged; the field is always present
 on a `Job`'s echoed `configuration`.
 
+**This holds on every backend**, including the development fixtures a server
+started with `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` offers. A job that asks
+for `"mono"` and is answered `201` really was folded, whatever ran it — a fake
+separator's audio is a placeholder, but what it reports about its own behaviour
+is not.
+
 **`GET /jobs` returns jobs in submission order (oldest first)** — the order the
 backend accepted them, which is also the order they run in (the queue is FIFO
 with one active job, ARCHITECTURE.md §6). Clients that want newest-first sort

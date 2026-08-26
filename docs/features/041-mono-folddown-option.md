@@ -158,7 +158,7 @@ once with `stereo_handling="mono"`.
 | --- | --- | --- |
 | vocals | −23.62 dBFS, 2 ch | −23.66 dBFS, **1 ch** |
 | drums | −29.08 dBFS, 2 ch | −34.48 dBFS, **1 ch** |
-| **bass** | **−65.67 dBFS**, peak 176/32767 | **−32.55 dBFS**, peak **7,789**/32767 |
+| **bass** | **−65.67 dBFS**, peak 176/32767 | **−32.55 dBFS**, peak **7,788**/32767 |
 | other | −19.40 dBFS, 2 ch | −24.32 dBFS, **1 ch** |
 
 That is 028's −65.7 / −32.6 and its peak of 176, reproduced through the control
@@ -167,6 +167,15 @@ also matches the sweep's `k = 0.00` row to within 2 of 32767 (the harness writes
 one extra 16-bit WAV; the shipped path does not). `Stem.channels` reports `1`
 and the files on disk really are one channel, so the result record describes
 what was separated.
+
+**This table was re-measured after code review moved the fold out of torch**,
+rather than carried over: changing the implementation changes the tie-break, so
+the old numbers could no longer be assumed to describe the shipped code. Every
+level and peak above is unchanged at the precision published — rms to 0.01 dB,
+peak to four decimals — and the `as_is` run is bit-identical, as the identity
+path must be. Three of the four folded stems moved by **one** int16 count
+(`bass` 7,789 → 7,788, `vocals` 15,704 → 15,705, `other` 14,903 → 14,902),
+which is exactly the 1-LSB tie difference predicted above and nothing else.
 
 `tests/test_stereo_handling.py` additionally asserts that the fold *is* the mid
 component of the mid/side pair, which is what keeps the shipped `mono` path and
@@ -223,11 +232,16 @@ feature 032, and the fake-separator honesty rules all say the same thing).
   default that keeps the field optional on the wire.
 - **`backend/src/straticate/schemas/__init__.py`** — re-export.
 - **`backend/src/straticate/inference/stereo.py`** — new. One pure function,
-  `apply_stereo_handling(PcmAudio, StereoHandling) -> PcmAudio`.
+  `apply_stereo_handling(PcmAudio, StereoHandling) -> PcmAudio`, in plain
+  integer arithmetic so **every** separator can call it (see *Why the transform
+  is not torch* below).
 - **`backend/src/straticate/inference/torch_separator.py`** — apply it
   immediately after the decode, off the event loop, so both torch backends get
   it from the shared skeleton (feature 039's whole point) and `_run_chunks`,
   `_finish_stems` and the encoder all agree about what was separated.
+- **`backend/src/straticate/inference/fake.py`** — the same call, at the same
+  point. The development engine's *audio* is a placeholder; what it reports
+  about its own behaviour must still be true.
 - **`frontend/src/api/generated/api.d.ts`** — regenerated. **Not hand-edited.**
 - **`frontend/src/api/jobs.ts`** — the presentation table over the generated
   union, following `api/export.ts`'s `EXPORT_FORMAT_TABLE` idiom exactly.
@@ -274,10 +288,9 @@ feature 032, and the fake-separator honesty rules all say the same thing).
 
 ## Expected modules/files
 
-- `backend/src/straticate/inference/stereo.py` (new),
-  `backend/src/straticate/inference/torch_separator.py`
+- `backend/src/straticate/inference/{stereo.py (new),torch_separator.py,fake.py}`
 - `backend/src/straticate/schemas/{jobs,__init__}.py`
-- `backend/tests/{test_stereo_handling.py (new),test_api_jobs.py}`
+- `backend/tests/{test_stereo_handling.py (new),test_api_jobs.py,test_api_results.py}`
 - `frontend/src/api/{jobs.ts,types.ts,generated/api.d.ts}`,
   `frontend/src/api/jobs.test.ts`
 - `frontend/src/state/appState.{tsx,test.tsx}`
@@ -313,27 +326,40 @@ introduce); it cannot overflow at full scale; an already-mono source is returned
 untouched; and the fold equals the mid component of the mid/side pair, which is
 what keeps the shipped path and the measured `k = 0` row the same thing.
 
-**The wiring**, parametrised over **both** torch backends. A job asking for
-`mono` gets one-channel stems and a result record that says `channels == 1`; a
-configuration that never mentions the field and one that names `as_is`
-explicitly produce **byte-identical** stem files, still stereo; and a folded
-RoFormer run's `vocals + instrumental` still reconstructs the folded mixture to
-within a rounding step — the assertion that catches a fold applied after the
-residual is derived, or to a copy.
+**The wiring**, parametrised over **all three** separators — both torch backends
+*and the fake engine*, which is the parametrisation code review's medium finding
+added. A job asking for `mono` gets one-channel stems and a result record that
+says `channels == 1`; a configuration that never mentions the field and one that
+names `as_is` explicitly produce **byte-identical** stem files, still stereo; and
+a folded RoFormer run's `vocals + instrumental` still reconstructs the folded
+mixture to within a rounding step — the assertion that catches a fold applied
+after the residual is derived, or to a copy.
+
+**The client-visible contract**, in `test_api_results.py`: a **fake-backed**
+server given `stereo_handling: "mono"` returns one channel on every stem of the
+result record *and* in the WAV headers of the bytes it serves, while the default
+still returns two. That is the test that would have caught the medium finding,
+and it is at the level the finding was about — what a client is told.
 
 Frontend: the picker offers both choices with "Keep stereo" preselected and each
 one accessibly *described* rather than renamed; choosing the fold posts
 `stereo_handling: "mono"`; the choice survives changing mode and tier (it is not
 a catalog value); starting without touching the control posts `"as_is"`; the
-reducer records, preserves across a catalog reload, and resets with the upload;
-and the presentation table is exhaustive over the generated union and makes no
-quality promise.
+reducer records, preserves across a catalog reload, **survives a failed catalog
+fetch and the retry that follows it**, and resets with the upload; **a
+single-channel upload is told the control does not apply and is offered no
+radios**; and the presentation table is exhaustive over the generated union and
+makes no quality promise.
 
 Every one of those was **mutation-verified** rather than merely written:
 reverting the transform to a copy plus `sum/2/floor` fails all five transform
-tests that should catch it, and removing the `apply_stereo_handling` call from
-`TorchSeparator._separate` fails all three wiring tests on both backends. A test
-that passes against the broken code is not coverage.
+tests that should catch it; removing the `apply_stereo_handling` call from
+`TorchSeparator._separate` fails all three wiring tests on both backends;
+removing it from `FakeSeparator` fails `test_mono_handling_yields_mono_stems`
+with exactly the reported symptom (`channels=2` after asking for `mono`);
+dropping the `stereoHandling` carry from `modesFailed` fails the catalog-retry
+test; and forcing the mono-upload check to `false` fails the "offers nothing to
+choose" test. A test that passes against the broken code is not coverage.
 
 Separation *quality* is deliberately not in CI: it needs real weights and real
 music. The measurement above is the evidence, and it is the integration tier's
@@ -361,17 +387,58 @@ In `TorchSeparator._separate`, on the line after the decode, dispatched with
   would claim a stereo image that no longer exists, and would cost twice the
   disk to do it.
 
-### Why the transform crosses the torch bridge
+### Why the transform is not torch — and the bug that settled it
 
-The arithmetic is a mean of two planes. The planes are 7.2 million 16-bit
-integers each for this track, and the straightforward `array` comprehension was
-**measured at 2.2 s** for the mean and **8.3 s** for the general
-`a·L + b·R` form — per job, on the CPU, for a run whose GPU inference is tens of
-seconds. Going through `torch_audio`'s existing `pcm_to_tensor`/`tensor_to_pcm`
-makes it milliseconds and gets the project's rounding rule (round to nearest,
-once, at the end) rather than a floor's DC bias. `inference/stereo.py` is
-imported only by `TorchSeparator`, which is torch by definition and is itself
-imported lazily, so feature 034's "torch is an optional extra" is untouched.
+The first version of this module crossed feature 039's existing
+`torch_audio` bridge, because the arithmetic is a mean over 7.2 million 16-bit
+frames and torch does that in milliseconds. **That was wrong, and code review
+caught what it cost.**
+
+Torch is an *optional* extra (feature 034), so a module that imports it is
+reachable only from `TorchSeparator`. `FakeSeparator` therefore never folded:
+a fake-backed server — which is what the end-to-end tier, CI and a development
+checkout actually run — accepted `stereo_handling: "mono"`, answered `201`,
+echoed `"mono"` back on `Job.configuration`, and returned **two-channel stems**.
+The UI offers the control for every tier and posts it regardless of
+architecture, so the user was told a fold had happened that had not.
+
+The tempting fix was to weaken the contract sentence. The right one was to make
+the contract true, and it is squarely feature 032's principle: 032 exists
+because the fake separator was presenting fixture audio as real separation, and
+a fake path reporting `channels: 2` after being asked to fold is the same
+failure in miniature — the application asserting something about its own
+behaviour that is not so. The fake engine's audio is honestly a placeholder;
+its *self-description* still has to be true.
+
+So the fold came back out from behind the bridge and is now plain integer
+arithmetic that every backend calls. The cost was measured rather than
+estimated: **3.9 s** for this 2:43 track (7.19 M frames), against milliseconds
+in torch. It is paid only when a user explicitly asks for the fold — the default
+returns the very object it was given without touching a sample — it runs in a
+worker thread, and it sits beside a separation that takes tens of seconds on a
+GPU and minutes on a CPU. A contract that is true on every backend is worth
+more than three seconds on an opt-in path.
+
+**Two things fell out of doing it in integers, and both are improvements.**
+
+The first is a bug this feature nearly shipped. Writing the fold as
+`(L + R) // 2` — or as the "obvious" `s + 1 if s >= 0 else s - 1` correction —
+biases *even negative* sums downwards: a sum of −2 gives −2 where the exact
+mean is −1. That is a DC offset on roughly a quarter of all frames. It was
+caught by the rounding test written for the original torch version, which is
+the whole argument for writing that test.
+
+The second is that the result is now **exact**. Ties (an odd sum, about half of
+all real frames) are broken **to even**, matching `torch.round` and therefore
+`tensor_to_pcm`, which quantizes every stem this application writes — so the
+mixture and the stems are quantized by one rule. Checked exhaustively against
+every reachable two-channel sum, and against 200 k random frames at three and
+four channels. The float32 version this replaced disagreed with the exact mean
+by one LSB on about **9% of frames**, always on those ties, resolved by
+whichever way float error happened to fall; measured over 200 k adversarial and
+random frames, neither version was ever *farther* from the true mean than the
+other, and the maximum difference was 1 LSB. The integer version is simply
+deterministic where the float one was not.
 
 ### The field is required in TypeScript, and that is not an accident
 
@@ -426,9 +493,11 @@ real.
   feature does not own.
 - **No E2E coverage.** `frontend/e2e/**` and `playwright.config.ts` are feature
   044's, concurrently, so they were not touched. The control is covered by unit
-  tests on both sides of the contract and by the reducer tests; a Playwright
-  case that folds a fixture and asserts mono stems would be a reasonable
-  follow-up for whoever owns that tier next.
+  tests on both sides of the contract, by the reducer tests, and — since review
+  — by an API-level test that runs a **fake-backed** job with `"mono"` and
+  asserts one-channel stems in the result record *and* in the WAV headers. A
+  Playwright case would now be straightforward for whoever owns that tier next,
+  because the fake engine folds for real.
 - **One track.** Every number here is from the same 2:43 mix feature 028 used —
   which is the right material for a *comparison* (it is the failure case) but is
   not a survey. The claim this feature makes is "on material like this, the fold
@@ -443,10 +512,11 @@ real.
   most promising unexplored option. It was out of scope: the brief asked for
   fold-versus-narrowing, and inventing a third transform to ship would have
   meant shipping an unmeasured one.
-- **`FakeSeparator` ignores the field.** The fold lives in `TorchSeparator`, so
-  a development-fixture job accepts `stereo_handling` and does nothing with it.
-  Its output is not real separation anyway, and 032 keeps it away from users;
-  worth knowing if an E2E test ever tries to assert mono stems against it.
+- **A mono upload is told the control does not apply**, rather than being
+  offered a choice that cannot do anything. Both values are documented as
+  identical no-ops on a single-channel source, and the fold's note claims it
+  recovers a stem, so showing it there would promise an effect that cannot
+  happen. The channel count comes from the upload's own probed metadata.
 
 ## Noticed, out of scope
 

@@ -461,6 +461,57 @@ async def test_result_of_a_completed_job(
     assert set(result["metrics"]) == {"processing_seconds", "realtime_factor"}
 
 
+async def test_a_folded_job_reports_mono_stems_on_a_fake_backed_server(
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
+) -> None:
+    """The client-visible half of feature 041's contract, on the fake engine.
+
+    ``docs/contracts/rest-api.md`` promises that ``stereo_handling: "mono"``
+    folds the mixture and that **every** stem then comes back with one channel,
+    with ``Stem.channels`` saying so. That promise has to hold on the server the
+    end-to-end tier and a development checkout actually run, which is backed by
+    :class:`~straticate.inference.fake.FakeSeparator` -- not only on the two
+    torch backends. It did not, once: the fold lived behind the torch bridge, so
+    a fake-backed deployment accepted the request, echoed ``"mono"`` back on the
+    job, and returned two-channel stems.
+
+    This is feature 032's principle rather than a cosmetic one. The fake
+    engine's *audio* is honestly a placeholder; what it says about its own
+    behaviour must still be true.
+    """
+    job_id = await create_job(results_client, **configuration(audio_id, stereo_handling="mono"))
+    terminal = await recorder.wait_for_terminal(job_id)
+    assert isinstance(terminal, JobCompletedEvent), terminal
+
+    job = (await results_client.get(f"{JOBS_URL}/{job_id}")).json()
+    assert job["configuration"]["stereo_handling"] == "mono"
+
+    response = await results_client.get(result_url(job_id))
+    assert response.status_code == 200, response.text
+    stems = cast(list[dict[str, Any]], response.json()["stems"])
+    assert stems, "the job produced no stems"
+    for stem in stems:
+        assert stem["channels"] == 1, f"{stem['name']} was not folded"
+
+    # …and the bytes on the wire agree with the record.
+    for stem in stems:
+        audio = await results_client.get(stem_url(job_id, cast(str, stem["name"])))
+        assert audio.status_code == 200, audio.text
+        # WAV channel count lives at byte 22 of the canonical header.
+        assert int.from_bytes(audio.content[22:24], "little") == 1
+
+
+async def test_an_unfolded_job_still_reports_stereo_stems(
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
+) -> None:
+    """The default is untouched by the above."""
+    job_id = await run_to_completion(results_client, recorder, audio_id)
+    stems = cast(
+        list[dict[str, Any]], (await results_client.get(result_url(job_id))).json()["stems"]
+    )
+    assert [stem["channels"] for stem in stems] == [2] * len(stems)
+
+
 async def test_result_matches_the_result_on_the_job_record(
     results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:

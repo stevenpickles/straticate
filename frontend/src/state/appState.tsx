@@ -324,6 +324,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         configure: {
           ...initialConfigureState,
+          // Carried across for the same reason as `modesLoaded`: a failed
+          // catalog *fetch* says nothing about the user's recording. Without
+          // this, choosing the fold, leaving the step and coming back to a
+          // failed reload silently reverts it to `as_is` — and the retry that
+          // succeeds shows "Keep stereo" with no indication it changed.
+          stereoHandling: state.configure.stereoHandling,
           modes: {
             status: 'error',
             code: action.code,

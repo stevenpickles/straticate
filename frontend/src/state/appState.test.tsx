@@ -473,6 +473,30 @@ describe('appReducer stereo handling (feature 041)', () => {
     expect(state.configure.stereoHandling).toBe('mono')
   })
 
+  it('survives a failed catalog fetch and the retry that follows it', () => {
+    // The real path: choose the fold, leave the configure step and come back so
+    // the catalog is re-fetched, that fetch fails, press "Try again", it
+    // succeeds. Before this was fixed the radio came back on "Keep stereo" with
+    // no indication, and the job separated as-is.
+    let state = appReducer(loaded(), {
+      type: 'configure/stereoHandlingSelected',
+      stereoHandling: 'mono',
+    })
+    state = appReducer(state, { type: 'configure/modesRequested' })
+    state = appReducer(state, {
+      type: 'configure/modesFailed',
+      code: 'service_unavailable',
+      message: 'nope',
+    })
+    expect(state.configure.stereoHandling).toBe('mono')
+
+    state = appReducer(state, {
+      type: 'configure/modesLoaded',
+      modes: sampleSeparationModes,
+    })
+    expect(state.configure.stereoHandling).toBe('mono')
+  })
+
   it('resets with the upload, because the next file is a different recording', () => {
     const state = appReducer(
       appReducer(loaded(), {
