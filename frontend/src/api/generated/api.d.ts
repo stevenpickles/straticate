@@ -947,9 +947,14 @@ export interface components {
          *     ``recommended_vram_mb`` is the comfortable figure: a full-length track on a
          *     card that is also driving a display. Both are measured **whole-device**
          *     peaks, because the CUDA context and the caching allocator's reservation are
-         *     part of what a card must have free, not only the tensors. Both also depend
-         *     on the model's chunking and on how long the track is, so the feature
-         *     document that sets them records the parameters they were measured at.
+         *     part of what a card must have free, not only the tensors. Both depend on the
+         *     model's chunking, and both **may** still depend on how long the track is:
+         *     feature 038 streamed the overlap-add onto the host, which removed that
+         *     dependence entirely for Mel-Band RoFormer, but an architecture that reduces
+         *     over the whole track keeps a residual term — Demucs' normalization
+         *     statistics do, above about 38 minutes of audio. So the feature document that
+         *     sets these records the parameters they were measured at, **and the track
+         *     lengths**, which is why 038 measured out to 90 minutes rather than 10.
          */
         ModelRequirements: {
             /**
@@ -1028,6 +1033,11 @@ export interface components {
              * @description Compute device to use; null lets the backend pick the best device.
              */
             device_id?: string | null;
+            /**
+             * @description How to treat the input's stereo image before separating. "as_is" (the default) separates the mixture untouched; "mono" folds it down to a single channel first, which recovers stems a very wide stereo image can otherwise lose, at the cost of mono stems.
+             * @default as_is
+             */
+            stereo_handling: components["schemas"]["StereoHandling"];
         };
         /**
          * SeparationMode
@@ -1126,6 +1136,25 @@ export interface components {
              */
             channels: number;
         };
+        /**
+         * StereoHandling
+         * @description What the separator does with the input's stereo image before separating.
+         *
+         *     A statement about the **user's audio**, not about the model. Every
+         *     separation model in use is trained on centred, strongly correlated stereo,
+         *     and a mix whose channels are near-independent is outside that distribution:
+         *     feature 028 measured a 1968 stereo mix (full-band L/R correlation +0.23,
+         *     low end hard-panned 5.8 dB left) whose ``bass`` stem came out 33 dB quieter
+         *     than the same track folded to mono. This is the control that lets the
+         *     person who owns the recording say which it is.
+         *
+         *     ``AS_IS`` is the default and is **bit-for-bit** the previous behaviour: the
+         *     decoded mixture is handed to the separator untouched. Nothing is ever
+         *     applied without being asked for (feature 032's rule, and this feature's
+         *     brief) — a wide mix is not detected and silently corrected.
+         * @enum {string}
+         */
+        StereoHandling: "as_is" | "mono";
         /**
          * StorageReport
          * @description How much room the machine running Straticate has for model weights.

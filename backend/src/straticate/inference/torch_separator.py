@@ -23,8 +23,9 @@ A concrete backend implements exactly :meth:`TorchSeparator._run_chunks` and
 genuinely differ — the chunk loop (window shape, stride, padding, normalization,
 autocast) and stem assembly (a residual computed by subtraction, versus the
 network's own sources mapped onto advertised names). Everything else — run-state
-lifecycle, stage sequencing, decode plumbing, device placement, the CUDA peak
-reset, cleanup and RTF — is here, once. The PCM bridge is one module further
+lifecycle, stage sequencing, decode plumbing, the job's stereo-handling choice
+(feature 041, in :mod:`straticate.inference.stereo`), device placement, the CUDA
+peak reset, cleanup and RTF — is here, once. The PCM bridge is one module further
 out, in :mod:`straticate.inference.torch_audio`, and the host-resident
 overlap-add buffer feature 038 added is beside it in
 :mod:`straticate.inference.torch_overlap_add`: this class never touches either,
@@ -74,6 +75,7 @@ from straticate.inference.pcm import (
     decode_to_pcm,
     write_wav,
 )
+from straticate.inference.stereo import apply_stereo_handling_async
 from straticate.inference.torch_device import device_stats, reset_peak_memory, resolve_torch_device
 from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.jobs import (
@@ -345,6 +347,17 @@ class TorchSeparator(ABC):
         try:
             announce(stage_callback, JobState.DECODING)
             source = await self._decode(input_path)
+            # The job's stereo-handling choice (feature 041) applies here and
+            # nowhere else: from this line on, ``source`` *is* the mixture, so
+            # the chunk loop, the residual arithmetic in ``_finish_stems`` and
+            # the encoded stems all agree about what was separated. The default
+            # is identity, so an existing job is untouched — literally the same
+            # object, not an equal one, and no thread hop either. A fold that
+            # *was* asked for runs in cancellable blocks, because on long
+            # material it is a minute of pure-Python work.
+            source = await apply_stereo_handling_async(
+                source, configuration.stereo_handling, cancellation_token
+            )
             cancellation_token.raise_if_cancelled()
 
             announce(stage_callback, JobState.LOADING_MODEL)

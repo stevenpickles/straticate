@@ -46,6 +46,30 @@ class JobState(StrEnum):
 _TERMINAL_STATES = frozenset({JobState.COMPLETED, JobState.CANCELLED, JobState.FAILED})
 
 
+class StereoHandling(StrEnum):
+    """What the separator does with the input's stereo image before separating.
+
+    A statement about the **user's audio**, not about the model. Every
+    separation model in use is trained on centred, strongly correlated stereo,
+    and a mix whose channels are near-independent is outside that distribution:
+    feature 028 measured a 1968 stereo mix (full-band L/R correlation +0.23,
+    low end hard-panned 5.8 dB left) whose ``bass`` stem came out 33 dB quieter
+    than the same track folded to mono. This is the control that lets the
+    person who owns the recording say which it is.
+
+    ``AS_IS`` is the default and is **bit-for-bit** the previous behaviour: the
+    decoded mixture is handed to the separator untouched. Nothing is ever
+    applied without being asked for (feature 032's rule, and this feature's
+    brief) — a wide mix is not detected and silently corrected.
+    """
+
+    AS_IS = "as_is"
+    """Separate the mixture exactly as it was decoded. The default."""
+
+    MONO = "mono"
+    """Fold the mixture to mono ``(L + R) / 2`` first; the stems come back mono."""
+
+
 class SeparationConfiguration(BaseModel):
     """User-facing configuration of a separation job (the create-job request)."""
 
@@ -55,6 +79,15 @@ class SeparationConfiguration(BaseModel):
     device_id: str | None = Field(
         default=None,
         description="Compute device to use; null lets the backend pick the best device.",
+    )
+    stereo_handling: StereoHandling = Field(
+        default=StereoHandling.AS_IS,
+        description=(
+            "How to treat the input's stereo image before separating. "
+            '"as_is" (the default) separates the mixture untouched; "mono" folds it '
+            "down to a single channel first, which recovers stems a very wide stereo "
+            "image can otherwise lose, at the cost of mono stems."
+        ),
     )
 
 

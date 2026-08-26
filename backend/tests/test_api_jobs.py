@@ -312,12 +312,39 @@ async def test_create_returns_201_queued_with_the_resolved_model_and_device(
     assert job["error"] is None
     assert job["result"] is None
     # The request omitted `device_id`; the response carries the resolved one.
+    # It omitted `stereo_handling` too, and the response carries its default:
+    # the field is optional on the wire (feature 041) but always present on a
+    # job, so a client reading a job back never has to know what the server's
+    # default was.
     assert job["configuration"] == {
         "audio_id": audio_id,
         "mode_id": "vocals",
         "quality_id": "balanced",
         "device_id": FAKE_GPU.id,
+        "stereo_handling": "as_is",
     }
+
+
+async def test_create_echoes_a_requested_stereo_handling(
+    jobs_client: httpx2.AsyncClient, audio_id: str
+) -> None:
+    """Feature 041's field survives the create round trip onto the job record."""
+    job = await create_job(jobs_client, **configuration(audio_id, stereo_handling="mono"))
+    assert job["configuration"]["stereo_handling"] == "mono"
+
+    fetched = await jobs_client.get(f"{JOBS_URL}/{job['id']}")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["configuration"]["stereo_handling"] == "mono"
+
+
+async def test_create_rejects_an_unknown_stereo_handling(
+    jobs_client: httpx2.AsyncClient, audio_id: str
+) -> None:
+    """A closed enum, so a typo is a 422 rather than a silently ignored field."""
+    response = await jobs_client.post(
+        JOBS_URL, json=configuration(audio_id, stereo_handling="narrow")
+    )
+    assert response.status_code == 422, response.text
 
 
 async def test_create_honours_a_pinned_device(
