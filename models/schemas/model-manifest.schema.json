@@ -59,7 +59,7 @@
         "recommended_vram_mb": {
           "type": "integer",
           "minimum": 0,
-          "description": "GPU VRAM in MiB for comfortable use: a full-length track, on a card that is also driving a display. A **measured** whole-device peak plus headroom, not a bound the code enforces — record how it was measured, and at which default_inference_parameters, in the feature document that set it (peak scales with inference.chunk_size and with track length)."
+          "description": "GPU VRAM in MiB for comfortable use: a full-length track, on a card that is also driving a display. A **measured** whole-device peak plus headroom, not a bound the code enforces — record how it was measured, and at which default_inference_parameters, in the feature document that set it (peak scales with inference.chunk_size, and may still scale with track length: feature 038 made the overlap-add accumulator host-resident, which removed that dependence entirely for Mel-Band RoFormer, but an architecture that reduces over the whole track keeps a residual term -- Demucs' normalization statistics do, above about 38 minutes of audio. Measure at the longest track the entry is meant to support, not only on short clips)."
         },
         "minimum_vram_mb": {
           "type": "integer",

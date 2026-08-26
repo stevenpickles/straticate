@@ -25,6 +25,7 @@ from straticate.inference import torch_separator as skeleton_module
 from straticate.inference.base import SeparationProgress
 from straticate.inference.pcm import PcmAudio, decode_to_pcm, interleave
 from straticate.inference.roformer import RoFormerParameters, RoFormerSeparator
+from straticate.inference.torch_overlap_add import HostOverlapAdd
 from straticate.jobs.cancellation import CancellationToken, JobCancelled
 from straticate.schemas.jobs import JobState, SeparationConfiguration, SeparationResult
 from tests.audio_fixtures import peak_amplitude, read_wav, write_tone_wav
@@ -828,3 +829,88 @@ async def test_the_peak_is_reset_once_per_run_not_once_per_device(
     await run(separator, source, tmp_path / "second")
 
     assert resets == ["cpu", "cpu"], "the peak measurement must restart with every separation"
+
+
+# --------------------------------------------------------------------------
+# Feature 038: device residency is bounded by the window, not by the track
+# --------------------------------------------------------------------------
+#
+# Flatness of the *measured* peak is hardware-dependent and lives in the
+# integration tier (``test_roformer_integration.py``). What normal CI can assert
+# — with no GPU and no download — is the structural property that makes flatness
+# possible: quadruple the number of chunks and nothing that reaches the compute
+# device gets any larger. Before 038 the mixture, the accumulator and the weight
+# tensor were all device-resident and all whole-track, so every one of these
+# numbers grew with the input.
+
+
+async def test_device_residency_does_not_scale_with_the_number_of_chunks(
+    weights: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Four times the audio, four times the chunks, the same tensors on the device.
+
+    The two seams are the only places audio crosses the boundary: ``_forward``
+    takes the window that goes *to* the device, and ``HostOverlapAdd.add`` takes
+    the estimate that comes *back*. Both are bounded by ``chunk_samples``, and
+    the bound is asserted as well as the invariance — an implementation that
+    kept residency constant by making the window grow instead would satisfy one
+    and not the other.
+    """
+    to_device: list[int] = []
+    from_device: list[int] = []
+    forward = RoFormerSeparator._forward  # pyright: ignore[reportPrivateUsage]
+    add = HostOverlapAdd.add
+
+    def recording_forward(self: RoFormerSeparator, part: torch.Tensor, device: Any) -> torch.Tensor:
+        to_device.append(part.numel())
+        return forward(self, part, device)
+
+    def recording_add(
+        self: HostOverlapAdd, offset: int, weighted: torch.Tensor, envelope: torch.Tensor
+    ) -> None:
+        from_device.append(weighted.numel())
+        add(self, offset, weighted, envelope)
+
+    monkeypatch.setattr(RoFormerSeparator, "_forward", recording_forward)
+    monkeypatch.setattr(HostOverlapAdd, "add", recording_add)
+
+    separator = make_separator(weights)
+    measured: list[tuple[int, int, int]] = []
+    for index, seconds in enumerate((2.0, 8.0)):
+        to_device.clear()
+        from_device.clear()
+        clip = write_tone_wav(
+            tmp_path / f"clip-{index}.wav", seconds=seconds, channels=2, sample_rate=22050
+        )
+        await run(separator, clip, tmp_path / f"stems-{index}")
+        measured.append((len(to_device), max(to_device), max(from_device)))
+
+    (short_chunks, short_in, short_out), (long_chunks, long_in, long_out) = measured
+
+    assert long_chunks >= 3 * short_chunks, "the longer clip must really be more chunks"
+    assert long_in == short_in, "the window handed to the network grew with the track"
+    assert long_out == short_out, "the estimate coming back grew with the track"
+    # And both are the window, not the track: two channels in, one stem out.
+    assert short_in == 2 * TINY_CHUNK_SAMPLES
+    assert short_out <= 1 * 2 * TINY_CHUNK_SAMPLES
+
+
+async def test_the_estimates_come_back_on_the_host(weights: Path, source: Path) -> None:
+    """``_run_chunks`` owes the skeleton a CPU tensor; 038 never puts one elsewhere."""
+    separator = make_separator(weights)
+    audio = await decode_to_pcm(source, sample_rate=TINY_SAMPLE_RATE, timeout_seconds=60)
+    state = skeleton_module.RunState(
+        job_id=JOB_ID,
+        stage=JobState.SEPARATING,
+        device=torch.device("cpu"),
+        chunks_total=0,
+        audio_total_seconds=0.0,
+        started_monotonic=0.0,
+    )
+
+    estimates = separator._run_chunks(  # pyright: ignore[reportPrivateUsage]
+        audio, state, lambda _: None, CancellationToken(), torch.device("cpu")
+    )
+
+    assert estimates.device.type == "cpu"
+    assert estimates.dtype is torch.float32
