@@ -261,7 +261,7 @@ open questions.
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | MERGED  | 028        | `041-mono-folddown-option` | #57 |
 | 042 | Production build (backend serves frontend)   | MERGED  | 003, 024   | `042-production-build` | #53 |
-| 043 | Release preparation for v0.1.0               | PR OPEN | 038, 042   | `043-release-preparation` | |
+| 043 | Release preparation for v0.1.0               | PR OPEN | 038, 042   | `043-release-preparation` | #62 |
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 
