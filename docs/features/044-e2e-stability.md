@@ -315,16 +315,26 @@ An intermittent product bug and an intermittent test look identical in a report
       feature is not permitted to fix. Marking it met would take a retry, and a
       retry would hide the defect. It becomes deliverable when the stall is
       fixed.
-- [x] **Wall-clock cost in CI is unchanged or better** — the change adds one
-      `requestfailed` listener per page, one `expect.poll` that resolves on its
-      first evaluation when the fetch succeeded, and — on failure only — one
-      text attachment. Nothing on the passing path is new work. Quiet full runs
-      either side, all 24 tests: **1 min 36 s** before, **58 s** and **1.1 min**
-      after, on a machine whose background load differed between them. Under
-      the load ramp, median 220 s before against 234 s after at comparable
-      contention, inside the run-to-run spread. The defensible claim is that
-      there is no mechanism by which it could cost more — not that it got
-      faster.
+- [x] **Wall-clock cost in CI is unchanged or better** — measured on this PR's
+      own CI run against the three preceding ones:
+
+      | run | `e2e` | `backend` | pipeline |
+      | --- | --- | --- | --- |
+      | 038 PR | 102 s | 170 s | 170 s |
+      | ledger sync → `dev` | 112 s | 178 s | 178 s |
+      | 041 PR | 111 s | 174 s | 174 s |
+      | **044 (this PR)** | **117 s** | 176 s | 176 s |
+
+      The three jobs run in parallel and `backend` is the critical path, so the
+      pipeline's wall clock is unchanged. `e2e` at 117 s sits at the top of a
+      102–112 s spread — one sample, and the change adds no work to the passing
+      path (one `requestfailed` listener, one `expect.poll` that resolves on its
+      first evaluation when the fetch succeeded, and an attachment only on
+      failure), so there is no mechanism by which it could cost more. Locally,
+      quiet full runs either side: 1 min 36 s before, 58 s and 1.1 min after;
+      under the load ramp, median 220 s before against 234 s after at
+      comparable contention, inside the run-to-run spread.
+
 - [x] **If retries are used at all, the reasoning is recorded** — none were
       added; the reasoning for *not* adding them is above, and is now also in
       `playwright.config.ts` beside the setting.
