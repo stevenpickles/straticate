@@ -217,7 +217,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 042 | Production build (backend serves frontend)   | MERGED  | 003, 024   | `042-production-build` | #53 |
 | 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
-| 045 | Fake separator must not block the event loop | PR OPEN | 041, 044   | `045-fake-separator-event-loop` | #60 |
+| 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
