@@ -70,14 +70,14 @@ that is a generated file, and committing it is what keeps CI's `uv sync` from
 finding the lock out of date, but it is worth knowing the string appears there
 too.
 
-**Verified rather than assumed**, and verified from the clean clone rather than
-from this worktree:
+**Verified rather than assumed**, and the first two from the clean clone rather
+than from this worktree:
 
-| what | result |
-| --- | --- |
-| `GET /api/v1/version` | `{"version":"0.1.0"}` |
-| the header in the browser | `backend v0.1.0` |
-| `tests/test_version.py` (029's drift test) | 3 passed, inside the 935 |
+| what | where | result |
+| --- | --- | --- |
+| `GET /api/v1/version` | clean clone | `{"version":"0.1.0"}` |
+| the header in the browser | clean clone | `backend v0.1.0` |
+| `tests/test_version.py` — 029's drift test, 3 tests | this worktree, inside the 935 | passed |
 
 029's design is what made it one edit. `straticate.__version__` resolves from
 installed distribution metadata; `api/system.py` and `main.py` both read it, so
@@ -88,8 +88,9 @@ value is not `UNKNOWN_VERSION`, which is what stops a stale editable install
 from making the comparison pass by accident.
 
 One nicety fell out for free: `docs/contracts/rest-api.md` has documented
-`GET /version` → `{ "version": "0.1.0" }` since feature 005. It was aspirational
-for forty features. It is now true.
+`GET /version` → `{ "version": "0.1.0" }` since **feature 001**, the repository
+bootstrap — it was written into the contract before there was an endpoint to
+serve it. It was aspirational for the whole project. It is now true.
 
 ### `frontend/package.json` stays at `0.0.0`, deliberately
 
