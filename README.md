@@ -85,13 +85,30 @@ a specific network architecture. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Status
 
-**Pre-alpha — under active initial development.**
+**v0.1.0 — first release.** The workflow above works end to end, on real models,
+on CPU or CUDA. [CHANGELOG.md](CHANGELOG.md) is the release note: what it does,
+what it needs, and — the section worth reading before you separate anything —
+what it cannot do.
 
-The project is being built in small, numbered feature branches merged into the
-`dev` integration branch. The first major milestone is a complete
-browser → backend → job → WebSocket → results workflow using a *fake* separator,
-proving the architecture before any real ML model is integrated. See
-[ROADMAP.md](ROADMAP.md) for the feature ledger and current status.
+The four you are most likely to meet:
+
+- **Vocal Isolation has no fast tier.** It runs at about **0.3× real time on
+  CPU** — roughly ten minutes for a three-minute song without a GPU. Standard
+  Stems is the mode with a usable CPU path (1.63× real time).
+- **Demucs loses the bass stem on wide-separation stereo mixes** (early stereo
+  records with near-independent channels). "Fold to mono" **recovers** that
+  stem — 33 dB on the measured case — but it does not fix the separation: it
+  moves 16% of the source's low band into `bass`, `other` still holds 41%, and
+  the fold costs `drums` and `other` about 3 dB each while `vocals` gains about
+  2 dB. Every stem then comes back mono, and nothing detects the condition for
+  you.
+- **Job records are in memory.** Restart the backend and every job record is
+  gone, while its stems and exports stay on disk.
+- **Nothing prunes.** Uploads, stems and export artifacts accumulate under the
+  data directory forever; there is no retention policy.
+
+Development continues in small, numbered feature branches merged into the `dev`
+integration branch. See [ROADMAP.md](ROADMAP.md) for the feature ledger.
 
 ## Repository layout
 
@@ -108,6 +125,7 @@ testdata/   Small audio fixtures for tests
 
 | Document | Purpose |
 | --- | --- |
+| [CHANGELOG.md](CHANGELOG.md) | What each release does, needs, and cannot do |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System components, boundaries, job model, abstractions |
 | [ROADMAP.md](ROADMAP.md) | Phases, numbered feature ledger, dependency graph |
 | [DEVELOPMENT.md](DEVELOPMENT.md) | Environment setup, running, testing, quality checks |
