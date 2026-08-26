@@ -484,6 +484,11 @@ real.
 
 ## Known limitations
 
+- **The fold costs ~3.9 s of CPU on a 2:43 track**, in a worker thread, because
+  it is deliberately not torch (see above). Longer material scales linearly. If
+  that ever matters, the fix is a fast path *inside* `apply_stereo_handling`
+  when torch happens to be importable — not moving the function back behind the
+  bridge, which is what caused the contract to be false in the first place.
 - **No detection, so the user has to know to look.** This is the honest gap.
   Someone separating an early stereo record gets a near-silent stem, and nothing
   on screen connects that to the control that fixes it. The follow-up is
