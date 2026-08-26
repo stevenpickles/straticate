@@ -16,11 +16,14 @@ import type { Page } from '@playwright/test'
 import { FIXTURES } from './environment'
 import {
   Workflow,
+  attachFailedApiRequests,
   expect,
   fourStemMode,
   installSocketTracking,
+  recordFailedApiRequests,
   recordProgressEvents,
   test,
+  type FailedApiRequest,
   type JobRecord,
   type ProgressEvent,
   type SeparationMode,
@@ -39,13 +42,21 @@ test.describe.serial('a separation, end to end', () => {
   let mode: SeparationMode
   let job: JobRecord
   let progressEvents: ProgressEvent[]
+  let apiFailures: FailedApiRequest[]
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage()
     await installSocketTracking(page)
     progressEvents = recordProgressEvents(page)
+    // This block owns its page, so it does not get the `page` fixture's
+    // automatic recorder and has to ask for one (feature 044).
+    apiFailures = recordFailedApiRequests(page)
     workflow = new Workflow(page)
     mode = await fourStemMode(page.request)
+  })
+
+  test.afterEach(async () => {
+    await attachFailedApiRequests(apiFailures, test.info())
   })
 
   test.afterAll(async () => {
@@ -128,11 +139,29 @@ test.describe.serial('a separation, end to end', () => {
     await workflow.viewResultsButton.click()
     await expect(workflow.phase).toHaveText('Inspect')
 
+    // The player fetches `GET /jobs/{id}/result` once and renders either the
+    // stems or an error — there is no third outcome and no retry. Wait for it
+    // to reach one of them, then say which.
+    //
+    // Feature 044: when that fetch is dropped before it reaches the backend,
+    // the player parks in its error state and the stem list stays empty. The
+    // stem-name assertion alone would then report "0 stem names" against four
+    // expected, which is true and useless — the reason is in the error the
+    // player is already showing. Asserting on it first spends nothing when the
+    // fetch succeeds and names the cause when it does not.
+    const stemNames = workflow.player.locator('.stem-player-stem-name')
+    const loadFailed = workflow.player.locator('.stem-player-error')
+    await expect
+      .poll(async () => (await stemNames.count()) + (await loadFailed.count()))
+      .toBeGreaterThan(0)
+    await expect(
+      loadFailed,
+      'the stem player could not load the separation result',
+    ).toHaveText([])
+
     // The player renders what the backend produced, which is what the mode's
     // catalog entry promised.
-    await expect(workflow.player.locator('.stem-player-stem-name')).toHaveText([
-      ...mode.stems,
-    ])
+    await expect(stemNames).toHaveText([...mode.stems])
 
     const play = workflow.player.getByRole('button', { name: 'Play' })
     await expect(play).toBeEnabled()

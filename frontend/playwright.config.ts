@@ -40,6 +40,18 @@ export default defineConfig({
   // One retry in CI absorbs an infrastructure hiccup (a runner stall while a
   // server boots); it is not a licence for flaky assertions, which is why the
   // suite waits on real conditions and never on a clock.
+  //
+  // **No retries locally, deliberately** (feature 044). The three flakes that
+  // earned 044 a number were all in `separation.spec.ts`, and the diagnosis
+  // was not a flaky test: the fake separator filters each chunk inline on the
+  // event loop, so the backend serves nothing at all for the length of a chunk
+  // — measured at 0.37 s on a quiet machine and 8.1 s at 17x CPU contention,
+  // scaling linearly toward the 20 s `expect` budget below. A local retry
+  // would have made that disappear from the report as a green second attempt.
+  // The tier found a real defect precisely because nobody had given it one,
+  // and giving it one now would hide the next. CI's retry stays because a
+  // runner stall while a server boots is a different failure class from an
+  // application that stops answering.
   retries: process.env.CI !== undefined ? 1 : 0,
   // In CI: annotations on the PR's diff (`github`), a readable log (`list`),
   // and an HTML report the workflow uploads when something fails.

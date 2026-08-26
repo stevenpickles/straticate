@@ -11,6 +11,12 @@
  * 2. **Nothing about the catalog is hardcoded.** Modes, quality tiers and stem
  *    names are read from the backend (`GET /separation-modes`) and used to
  *    drive and assert the UI, exactly as the app does (AGENTS.md principle 6).
+ * 3. **A failure says what went wrong** (feature 044). A request to `/api`
+ *    that never reached the backend surfaces in the DOM as an absence — an
+ *    empty stem list, a panel that never filled — and the assertion that
+ *    catches it can only report the absence. Every page therefore records its
+ *    failed API requests, and a failing test attaches them
+ *    ({@link recordFailedApiRequests}).
  */
 import { readFile } from 'node:fs/promises'
 import { basename } from 'node:path'
@@ -20,6 +26,7 @@ import {
   type APIRequestContext,
   type Locator,
   type Page,
+  type TestInfo,
 } from '@playwright/test'
 
 declare global {
@@ -30,7 +37,8 @@ declare global {
 }
 
 /**
- * The base `test`, with every page recording the sockets it opens.
+ * The base `test`, with every page recording the sockets it opens and the API
+ * requests that never arrived.
  *
  * Feature 016's client owns its socket privately, and nothing in the UI can
  * drop a connection — so the tier reaches for the one seam a browser test
@@ -42,11 +50,84 @@ export const test = base.extend<{ socketTracking: void }>({
   socketTracking: [
     async ({ page }, use) => {
       await installSocketTracking(page)
+      const failures = recordFailedApiRequests(page)
       await use()
+      await attachFailedApiRequests(failures, test.info())
     },
     { auto: true },
   ],
 })
+
+/** One `/api` request the browser could not complete. */
+export interface FailedApiRequest {
+  /** Request method. */
+  readonly method: string
+  /** Path, without the origin — the origin is always the dev server. */
+  readonly path: string
+  /** Why the browser gave up, as Chromium reported it. */
+  readonly failure: string
+}
+
+/**
+ * Record every request to `/api` the browser failed to complete.
+ *
+ * Applied automatically to the `page` fixture; call it directly on a page
+ * built with `browser.newPage()` and hand the result to
+ * {@link attachFailedApiRequests}.
+ *
+ * This exists because of what feature 044 measured. A request that never
+ * reaches the backend leaves the UI showing *nothing* — the stem list stays
+ * empty, a panel never fills — so the assertion that trips is one about a
+ * missing element, and its message is about the element rather than about the
+ * request. The cause is visible only in the dev server's stderr, which is
+ * where an hour went before anyone thought to look:
+ *
+ * ```text
+ * [vite] http proxy error: /api/v1/jobs/{id}/result
+ * Error: connect ETIMEDOUT 127.0.0.1:8123
+ * ```
+ *
+ * Recording it costs nothing and turns that hour into a line in the report.
+ */
+export function recordFailedApiRequests(page: Page): FailedApiRequest[] {
+  const failures: FailedApiRequest[] = []
+  page.on('requestfailed', (request) => {
+    const { pathname, search } = new URL(request.url())
+    if (!pathname.startsWith('/api/')) {
+      return
+    }
+    failures.push({
+      method: request.method(),
+      path: `${pathname}${search}`,
+      failure: request.failure()?.errorText ?? 'unknown',
+    })
+  })
+  return failures
+}
+
+/**
+ * Attach the failed API requests to a test that did not get the result it
+ * expected.
+ *
+ * Only on failure, and only when there are any: a passing run says nothing
+ * about them, and a run with none attaches nothing.
+ */
+export async function attachFailedApiRequests(
+  failures: readonly FailedApiRequest[],
+  info: TestInfo,
+): Promise<void> {
+  if (failures.length === 0 || info.status === info.expectedStatus) {
+    return
+  }
+  await info.attach('failed API requests', {
+    contentType: 'text/plain',
+    body: failures
+      .map(
+        (request) => `${request.method} ${request.path} — ${request.failure}`,
+      )
+      .join('\n'),
+  })
+}
 
 /**
  * Record every `WebSocket` the page opens on `window.__straticateSockets`.
