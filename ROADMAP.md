@@ -210,7 +210,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 035 | First-run model install affordance (UI)      | MERGED  | 025, 032   | `035-install-affordance` | #41 |
 | 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
 | 037 | Model management UI (install/remove/browse)  | MERGED  | 025, 035   | `037-model-management-ui` | #44 |
-| 038 | Streaming overlap-add (bounded VRAM)         | PR OPEN | 026, 028, 039 | `038-streaming-overlap-add` | #… |
+| 038 | Streaming overlap-add (bounded VRAM)         | PR OPEN | 026, 028, 039 | `038-streaming-overlap-add` | #55 |
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |

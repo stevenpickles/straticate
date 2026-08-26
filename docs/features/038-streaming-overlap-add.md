@@ -3,7 +3,7 @@
 Branch: `038-streaming-overlap-add`
 Status: PR OPEN
 Dependencies: 026, 028, 039
-PR: #…
+PR: #55
 
 ## Objective
 
@@ -197,14 +197,14 @@ and on this branch, and every written stem was SHA-256'd.
 | model | device | clips | stems hashed | result |
 | --- | --- | --- | --- | --- |
 | `vocals-hq-001` | `cpu` | 12 s, 30 s | 4 | identical |
-| `vocals-hq-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min, **45 min** | 10 | identical |
+| `vocals-hq-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min, **45 min**, **60 min** | 12 | identical |
 | `standard-stems-001` | `cpu` | 12 s, 30 s | 8 | identical |
 | `standard-stems-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min | 16 | identical |
 
-**Thirty-eight stems, twelve on CPU and twenty-six on CUDA, every one
-byte-for-byte what `dev` produces** for the same input and the same parameters —
-including a 45-minute track through 677 chunks, where any drift in the
-accumulation would have had every opportunity to show.
+**Forty stems, twelve on CPU and twenty-eight on CUDA, every one byte-for-byte
+what `dev` produces** for the same input and the same parameters — including a
+60-minute track through 902 chunks, where any drift in the accumulation would
+have had every opportunity to show.
 
 ### What re-measuring found
 
