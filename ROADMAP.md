@@ -69,6 +69,12 @@ with standing for the MDX-family weights) and 007 folded into 006; 043 is the
 release preparation itself. **935 backend tests and 802 frontend tests**, all
 CI-enforced, the backend suite clean under `-W error`.
 
+**046 is the exception to that range** and is deliberately not on `dev`: it adds
+the tag-triggered release workflow and corrects the release process in
+`CONTRIBUTING.md`, on the `release/v0.1.0` branch, because it is the release
+itself that needs it. It reaches `dev` through the reconciliation step
+`CONTRIBUTING.md` already required.
+
 The release notes are [CHANGELOG.md](CHANGELOG.md), written from this ledger for
 users rather than as a commit log: what the application does, what it needs, and
 — the section that took the most care — what it cannot do. Everything the
@@ -264,6 +270,7 @@ open questions.
 | 043 | Release preparation for v0.1.0               | MERGED  | 038, 042   | `043-release-preparation` | #62 |
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
+| 046 | Release workflow and release-process corrections | PR OPEN | 043        | `046-release-workflow` | — |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
