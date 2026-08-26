@@ -18,6 +18,7 @@ import pickle
 import sys
 import threading
 from fractions import Fraction
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from straticate.inference.demucs import (
     DemucsParameters,
     DemucsSeparator,
 )
+from straticate.inference.demucs import separator as separator_module
 from straticate.inference.demucs.separator import (
     CHECKPOINT_PICKLE_GLOBALS,
     CheckpointArchitecture,
@@ -1255,17 +1257,38 @@ async def test_the_estimates_come_back_on_the_host(weights: Path, source: Path) 
     assert estimates.dtype is torch.float32
 
 
-async def test_the_decoded_mixture_is_not_normalized_in_place(weights: Path, source: Path) -> None:
-    """The window is normalized on the device, and the caller's tensor is left alone.
+async def test_the_decoded_mixture_is_not_normalized_in_place(
+    weights: Path, source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window is normalized on the device; the mixture it was cut from is not.
 
     ``Tensor.to`` returns *self* when the tensor is already on the target device,
-    so a CPU run that normalized the window in place would be rewriting the
-    decoded mixture — and every later, overlapping window would then see audio
-    that had been normalized twice. Nothing about the stems would announce it.
+    so on a CPU run an in-place ``sub_`` inside :func:`_centred_window` rewrites
+    the very tensor the loop is still cutting windows out of, and every later
+    overlapping window is then normalized twice. Nothing about the stems would
+    announce it.
+
+    **The tensor at risk is the loop's own local**, not the :class:`PcmAudio` it
+    was built from: :func:`~straticate.inference.torch_audio.pcm_to_tensor` goes
+    through ``torch.frombuffer(bytearray(...))``, so what it returns never
+    aliases the decoded arrays and re-deriving it after the run would compare a
+    fresh tensor against a fresh tensor whatever the loop did. So the test takes
+    a reference to the *same object the loop uses*, by standing in front of the
+    factory, and checks that object afterwards. Restore ``div_`` to ``sub_`` in
+    :func:`_centred_window` and this fails.
     """
     separator = make_separator(weights)
     audio = await decode_to_pcm(source, sample_rate=TINY_SAMPLE_RATE, timeout_seconds=60)
-    before = pcm_to_tensor(audio, 2).clone()
+
+    built: list[torch.Tensor] = []
+    factory = separator_module.pcm_to_tensor
+
+    def recording(recorded_source: PcmAudio, wanted_channels: int) -> torch.Tensor:
+        tensor = factory(recorded_source, wanted_channels)
+        built.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(separator_module, "pcm_to_tensor", recording)
     state = skeleton_module.RunState(
         job_id=JOB_ID,
         stage=JobState.SEPARATING,
@@ -1279,4 +1302,73 @@ async def test_the_decoded_mixture_is_not_normalized_in_place(weights: Path, sou
         audio, state, lambda _: None, CancellationToken(), torch.device("cpu")
     )
 
-    assert torch.equal(pcm_to_tensor(audio, 2), before)
+    assert len(built) == 1, "the loop is expected to build the mixture exactly once"
+    assert torch.equal(built[0], pcm_to_tensor(audio, 2)), (
+        "the chunk loop normalized the mixture it was cutting windows out of; "
+        "every overlapping window after the first saw doubly-normalized audio"
+    )
+
+
+async def test_two_overlapping_windows_agree_where_they_overlap(
+    weights: Path, source: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same consequence, seen from the other side: the windows themselves.
+
+    Neighbouring windows overlap by ``1 - overlap`` of a window, and normalization
+    is element-wise, so a sample covered by both must arrive at the network with
+    the same value both times. If the mixture were being normalized in place the
+    second window would carry ``(x - shift) / scale`` applied twice to that
+    region, and this is what that looks like from outside
+    :func:`_centred_window`.
+    """
+    separator = make_separator(weights)
+    audio = await decode_to_pcm(source, sample_rate=TINY_SAMPLE_RATE, timeout_seconds=60)
+
+    windows: list[tuple[int, int, torch.Tensor]] = []
+    centred = separator_module._centred_window  # pyright: ignore[reportPrivateUsage]
+
+    def recording(
+        mixture: torch.Tensor,
+        offset: int,
+        length: int,
+        target: int,
+        device: torch.device,
+        shift: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        part = centred(mixture, offset, length, target, device, shift, scale)
+        windows.append((offset, length, part.clone()))
+        return part
+
+    monkeypatch.setattr(separator_module, "_centred_window", recording)
+    state = skeleton_module.RunState(
+        job_id=JOB_ID,
+        stage=JobState.SEPARATING,
+        device=torch.device("cpu"),
+        chunks_total=0,
+        audio_total_seconds=0.0,
+        started_monotonic=0.0,
+    )
+
+    separator._run_chunks(  # pyright: ignore[reportPrivateUsage]
+        audio, state, lambda _: None, CancellationToken(), torch.device("cpu")
+    )
+
+    window = separator.parameters.window_samples
+    stride = separator.parameters.stride_samples
+    shared = window - stride
+    assert shared > 0, "this test needs the windows to actually overlap"
+    compared = 0
+    for (first_offset, first_length, first), (_, second_length, second) in pairwise(windows):
+        # Only pairs whose *requested span* is a whole window are directly
+        # comparable. A short final span is re-centred and zero-padded back up to
+        # the window (upstream's ``TensorChunk.padded``), so it covers different
+        # samples than its offset suggests; it is skipped rather than mis-aligned.
+        if first_length != window or second_length != window:
+            continue
+        assert torch.equal(first[..., stride:], second[..., :shared]), (
+            f"the window at {first_offset} and the one {stride} samples later "
+            f"disagree where they cover the same audio"
+        )
+        compared += 1
+    assert compared > 0, "no pair of full-span overlapping windows was compared"

@@ -45,7 +45,7 @@ actually deliver rather than left asserting something unreachable.
 | HQ vocal separation | **done** — 026, Mel-Band RoFormer |
 | 4-stem separation | **done** — 028, Demucs |
 | Capability-driven mode selection | **done** — 010 derives modes from the catalog; 026 honours `Model.capabilities` at device resolution |
-| Bounded VRAM | **done** — 038 streams the overlap-add onto the host; peak is flat across 30 s to 10 min for both models (1,526 MiB RoFormer, 550 MiB Demucs, allocated) |
+| Bounded VRAM | **done** — 038 streams the overlap-add onto the host. RoFormer's peak is flat *to the byte* at any length (1,526 MiB allocated, 2,981 whole-device, from 30 s to 60 min); Demucs' is flat to ~38 min and then rises 24× more slowly than before. Host RAM, not VRAM, now limits track length |
 | Production build | **done** — 042; `uvicorn straticate.main:app` serves API and SPA on one port |
 | Release preparation | **043** — CHANGELOG, version bump, manual `dev → main` tag |
 

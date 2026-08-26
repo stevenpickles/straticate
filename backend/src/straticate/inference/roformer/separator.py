@@ -400,10 +400,19 @@ class RoFormerSeparator(TorchSeparator):
             run.audio_processed_seconds = min(max(covered, 0), frames) / source.sample_rate
             self._report(progress_callback, run)
 
-        estimates = torch.nan_to_num(accumulator.resolve(minimum_weight=1e-8), nan=0.0)
+        # Both of the last two steps are in place or copy-out, for the same
+        # reason ``HostOverlapAdd.resolve`` divides in place: the accumulator is
+        # the largest tensor in the run, and the out-of-place ``nan_to_num``
+        # that stood here held a second one of it at the exact moment the first
+        # was biggest -- 1.27 GiB twice over, for an hour of audio. The
+        # ``contiguous`` is the other half of that: slicing the reflect-padded
+        # borders off leaves a *view*, which keeps the whole padded buffer alive
+        # through stem assembly and encoding, and ``.to("cpu")`` will not
+        # copy it out because the tensor is already there.
+        estimates = accumulator.resolve(minimum_weight=1e-8).nan_to_num_(nan=0.0)
         if border > 0:
             estimates = estimates[..., border : border + frames]
-        return estimates.detach().to("cpu", dtype=torch.float32)
+        return estimates.detach().contiguous()
 
     def _forward(self, part: Tensor, device: torch.device) -> Tensor:
         """One forward pass, returned as ``(num_stems, channels, samples)``."""

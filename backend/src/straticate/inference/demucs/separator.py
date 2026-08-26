@@ -1021,10 +1021,14 @@ def _centred_window(
     what keeps the samples past the ends of the track at zero rather than at
     ``-shift / scale``.
 
-    The normalization is written out of place on purpose: ``Tensor.to`` returns
-    **self** when the tensor is already on the target device, so on a CPU run an
-    in-place ``sub_`` here would rewrite the caller's decoded mixture — and every
-    later window would then be normalized twice.
+    The **first** of the two normalization steps is written out of place on
+    purpose: ``Tensor.to`` returns *self* when the tensor is already on the
+    target device, so on a CPU run an in-place ``sub_`` here would rewrite the
+    caller's decoded mixture, and every later overlapping window would then see
+    audio that had been normalized twice — silently wrong stems, with nothing
+    anywhere reporting a problem. ``sub`` allocates, which breaks the aliasing;
+    ``div_`` on *its* result is then safe and saves the second window-sized
+    allocation, because that result is nobody else's tensor.
     """
     total = int(mixture.shape[-1])
     delta = target - length
@@ -1032,7 +1036,7 @@ def _centred_window(
     end = start + target
     first = max(0, start)
     last = min(total, end)
-    part = mixture[..., first:last].to(device).sub(shift).div(scale)
+    part = mixture[..., first:last].to(device).sub(shift).div_(scale)
     return torch.nn.functional.pad(part, (first - start, end - last))
 
 

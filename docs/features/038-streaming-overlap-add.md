@@ -104,10 +104,14 @@ What a card must have free is the whole-device figure, not the allocated one.
 ## Acceptance criteria
 
 - [x] Peak device memory is flat (within noise) across 30 s, 2 min, 6 min and
-      10 min inputs, for both models
+      10 min inputs, for both models — and, measured well past the brief's
+      range, flat **to the byte** out to 60 minutes for `vocals-hq-001`, and to
+      about 38 minutes for `standard-stems-001`, after which its residual
+      reduction term adds 0.077 MiB per second of audio whole-device
 - [x] Output is bit-identical to `dev` for both models, proven by hash, on CPU
       and CUDA
-- [x] `recommended_vram_mb` / `minimum_vram_mb` re-derived for both entries
+- [x] `recommended_vram_mb` / `minimum_vram_mb` re-derived for both entries — one
+      of the four moves, and *why the other three do not* is the finding
 - [x] Wall-clock cost measured and reported against the current RTFs
 - [x] Progress, cancellation, telemetry and stem mapping behave exactly as
       before
@@ -124,7 +128,14 @@ What a card must have free is the whole-device figure, not the allocated one.
 - `test_{roformer,demucs}_separator.py::test_device_residency_does_not_scale_with_the_number_of_chunks`
   — the structural property, in normal CI, against the synthetic checkpoints.
 - `test_demucs_separator.py::test_the_decoded_mixture_is_not_normalized_in_place`
-  — the CPU-run trap described below.
+  — the CPU-run trap described below, checked against **the tensor the loop
+  itself builds** (taken by standing in front of the factory), because
+  re-deriving it from the `PcmAudio` afterwards compares two fresh tensors and
+  cannot fail.
+- `test_demucs_separator.py::test_two_overlapping_windows_agree_where_they_overlap`
+  — the same fault seen from outside `_centred_window`: a sample covered by two
+  windows must reach the network with the same value both times. Both tests were
+  confirmed to **fail** with `sub_` restored.
 - `test_{roformer,demucs}_integration.py::test_peak_device_memory_is_flat_across_track_lengths`
   — `@pytest.mark.gpu`, the hardware claim itself.
 
@@ -199,12 +210,18 @@ and on this branch, and every written stem was SHA-256'd.
 | `vocals-hq-001` | `cpu` | 12 s, 30 s | 4 | identical |
 | `vocals-hq-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min, **45 min**, **60 min** | 12 | identical |
 | `standard-stems-001` | `cpu` | 12 s, 30 s | 8 | identical |
-| `standard-stems-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min | 16 | identical |
+| `standard-stems-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min, **60 min** | 20 | identical |
 
-**Forty stems, twelve on CPU and twenty-eight on CUDA, every one byte-for-byte
-what `dev` produces** for the same input and the same parameters — including a
-60-minute track through 902 chunks, where any drift in the accumulation would
-have had every opportunity to show.
+**Forty-four stems, twelve on CPU and thirty-two on CUDA, every one
+byte-for-byte what `dev` produces** for the same input and the same parameters —
+including a 60-minute track through 902 chunks, where any drift in the
+accumulation would have had every opportunity to show.
+
+Re-verified after code review, because three of the review's findings
+(`nan_to_num_` in place, `.contiguous()` on the returned estimates, and `div_`
+in `_centred_window`) touch the numerics path even though all three should be
+neutral: the CPU rows and the `cuda:0` 10-minute and 45-minute rows were re-run
+against the post-review code and hash the same as before, to the byte.
 
 ### What re-measuring found
 
@@ -257,22 +274,27 @@ Slope: **1.85 → 0.00 MiB per second of audio allocated**, and no measurable
 trend whole-device.
 
 Pushed further, on this branch, to find where the transient mono reference
-eventually does start to count:
+eventually does start to count — because the eight rows above are all *below*
+the length at which it can, and a floor derived only from them would be a floor
+derived from the easy half of the range:
 
-| clip | chunks | alloc | reserved | whole-device | RTF |
-| --- | --- | --- | --- | --- | --- |
-| 20 min | 206 | 547.3 | 740 | 1,854.6 | 29.66 |
-| 45 min | 462 | 616.0 | 706 | 1,820.6 | 29.08 |
-| 60 min | 616 | 767.8 | 792 | 1,906.6 | 27.53 |
+| clip | chunks | alloc | reserved | whole-device |
+| --- | --- | --- | --- | --- |
+| 20 min | 206 | 550.4 | 772 | 1,886.6 |
+| 45 min | 462 | 616.0 | 706 | 1,820.6 |
+| 60 min | 616 | 767.8 | 792 | 1,906.6 |
+| 90 min | 924 | 1,070.3 | 1,096 | **2,210.6** |
 
-Peak **allocated** is flat to about 38 minutes and then rises at **0.168 MiB per
-second of audio** — four bytes per sample, exactly the mono reference, which
+Peak **allocated** is flat to about **38 minutes** and then rises at **0.168 MiB
+per second of audio** — four bytes per sample, exactly the mono reference, which
 overtakes the forward pass's ~382 MiB working set at 2,271 s of audio. The fit
-predicts 622 MiB at 45 min and 773 at 60; measured, 616.0 and 767.8. What a card
-must actually have free — the whole-device figure — does **not** follow it out to
-an hour, because the allocator reserves that block and then reuses it for the
-loop. 0.168 MiB/s is an eleven-fold reduction on 028's 1.85, and it is the
-subject of the first known limitation below.
+predicts 622 MiB at 45 min and 773 at 60; measured, 616.0 and 767.8.
+**Whole-device follows it**, more slowly (the allocator absorbs part of the
+block into the pool it would have reserved anyway): flat within 74 MiB out to an
+hour, then 2,210.6 MiB at 90 minutes, a slope of **0.077 MiB per second** past
+the crossover. That is 11× and 24× smaller than the 1.85 MiB/s it replaced, and
+it is **not zero** — which is why the Demucs entry's `requirements` do not move
+below 028's figures, and why the first known limitation says so plainly.
 
 ### Wall clock: no measurable cost
 
@@ -339,64 +361,71 @@ result.
 
 ### The `requirements` re-derived
 
-Both entries were length-dependent numbers, and the point of this feature is
-that they are not any more. The value a card must have free is now a single
-measured figure that a longer track does not move.
-
 ```json
 "vocals-hq-001": {
   "recommended_vram_mb": 4096,   // was 6144
-  "minimum_vram_mb":     4096,   // was 4096
-  "minimum_ram_mb":      8192
+  "minimum_vram_mb":     4096,   // unchanged in value; changed in meaning
+  "minimum_ram_mb":      8192    // unchanged; see below for what it covers
 }
 "standard-stems-001": {
-  "recommended_vram_mb": 3072,   // was 4096
-  "minimum_vram_mb":     2048,   // was 3072
-  "minimum_ram_mb":      8192
+  "recommended_vram_mb": 4096,   // unchanged
+  "minimum_vram_mb":     3072,   // unchanged
+  "minimum_ram_mb":      8192    // unchanged
 }
 ```
 
+**Only one of the four VRAM figures moves, and the reason the other three do not
+is the point.** A floor is set by the worst case a user can reach, and this
+feature changed which case that is.
+
 - **`vocals-hq-001`, recommended 6,144 → 4,096.** 036 set 6,144 as "the measured
   4,213 MiB for a ten-minute track plus ~1.9 GiB of headroom", where the
-  ten-minute figure was the largest of a rising line. The line is gone: the
-  measurement is 2,981 MiB for *any* length, and 4,096 is that plus 1,115 MiB —
-  enough for a desktop compositor, or for a CUDA context larger than this
-  host's 1,079 MiB, but no longer for a track that might be longer than the one
-  measured, because that is no longer a thing to leave room for.
+  ten-minute figure was simply the largest of a rising line. The line is gone:
+  2,980.6 MiB at 30 seconds, at ten minutes, at forty-five and at sixty, to the
+  byte. 4,096 is that plus 1,115 MiB — enough for a desktop compositor or a
+  CUDA context larger than this host's 1,079 MiB, and no longer holding room
+  for a track longer than the one measured, because that is not a thing to hold
+  room for any more.
 - **`vocals-hq-001`, minimum stays 4,096, and its meaning changes completely.**
   036's floor meant "a 4 GiB card runs the music you actually have — about nine
   minutes' worth". It now means **a 4 GiB card runs anything**. 3,072 was
-  considered and rejected: 3,072 − 2,981 = 91 MiB is not a floor, it is a
-  coincidence, and a driver whose context is 100 MiB larger than this one's
-  would turn it into an OOM. A number that survives only on this exact host is
-  not worth advertising.
-- **`standard-stems-001`, recommended 4,096 → 3,072.** The measurement is
-  1,887 MiB flat; 3,072 leaves 1,185 MiB, the same kind of headroom, for the
-  same three reasons.
-- **`standard-stems-001`, minimum 3,072 → 2,048.** 1,887 measured on an
-  otherwise idle card leaves 161 MiB in 2 GiB. That is genuinely the floor —
-  it works with nothing else resident and fails with a compositor on the card —
-  which is exactly what `minimum_vram_mb` is defined to mean. 028's 3,072 was
-  set by a ten-minute track, and there is no longer a ten-minute track to set it
-  by.
+  considered and rejected: 3,072 − 2,981 is 91 MiB, which is a coincidence
+  rather than a floor, and a driver whose context is 100 MiB larger than this
+  one's would turn it into an OOM.
+- **`standard-stems-001` keeps 028's 4,096 / 3,072, and the first draft of this
+  feature was wrong to lower them to 3,072 / 2,048.** Those numbers were derived
+  from 30 s, 2 min, 6 min and 10 min clips — every one of them below the
+  ~38-minute crossover documented above, i.e. from exactly the part of the range
+  where this architecture *is* flat. Measured past it, a 90-minute track needs
+  **2,210.6 MiB**, so a card meeting an advertised 2,048 floor would OOM on it,
+  and the advertised floor would have re-introduced the failure this feature
+  exists to remove — quietly, and only for the users with the longest files.
+  3,072 holds to roughly **four and a half hours** on this fit. What changes for
+  Demucs is therefore not the number but its coverage: 028's 3 GiB floor meant
+  *about a ten-minute track*, and it now means *about a four-hour one*.
 
-Both are advisory; nothing is refused for failing them (036 established that,
-and it is unchanged). The manifest schema's and `Requirements`' descriptions
-both asserted that peak "scales with track length"; both were corrected in this
-PR, because they are now false.
+Both remain advisory; nothing is refused for failing them (036 established
+that, and it is unchanged). The manifest schema's and `Requirements`'
+descriptions previously said peak "scales with track length"; the first draft of
+this feature replaced that with an unconditional "does not", which is true for
+RoFormer and false for Demucs. Both now say that it *may*, name the architecture
+that still does, and tell whoever derives the next entry's figures to measure at
+the longest track it is meant to support.
 
 ### A track long enough to exhaust the card today
 
 Two long tracks were run end to end, `dev` and this branch, on `cuda:0`:
 
-| track | chunks | | alloc | reserved | whole-device | wall clock |
+| model | track | chunks | | alloc | reserved | whole-device |
 | --- | --- | --- | --- | --- | --- | --- |
-| 45 min | 677 | before | 6,368.4 | 7,334 | **8,187.6** | 424.9 s |
-| 45 min | 677 | **after** | **1,526.1** | **1,864** | **2,980.6** | 426.0 s |
-| 60 min | 902 | before | 8,182.1 | **9,146** | **8,187.6** | 578.8 s |
-| 60 min | 902 | **after** | **1,526.1** | **1,864** | **2,980.6** | 615.4 s |
+| `vocals-hq-001` | 45 min | 677 | before | 6,368.4 | 7,334 | **8,187.6** |
+| `vocals-hq-001` | 45 min | 677 | **after** | **1,526.1** | **1,864** | **2,980.6** |
+| `vocals-hq-001` | 60 min | 902 | before | 8,182.1 | **9,146** | **8,187.6** |
+| `vocals-hq-001` | 60 min | 902 | **after** | **1,526.1** | **1,864** | **2,980.6** |
+| `standard-stems-001` | 60 min | 616 | before | 7,454.0 | 8,042 | **8,187.6** |
+| `standard-stems-001` | 60 min | 616 | **after** | **767.8** | **792** | **1,906.6** |
 
-Stems identical in both pairs.
+Stems identical in every pair.
 
 At 45 minutes `dev` uses **8,187.6 MiB of an 8,188 MiB card** — the card is
 full, and anything else resident on it (a desktop compositor, a second process,
@@ -406,7 +435,10 @@ error in the measurement: on Windows/WDDM the driver lets a process oversubscrib
 into shared system memory rather than failing, so what would be an out-of-memory
 error elsewhere is instead a silent spill across PCIe. This branch needs 1,864
 MiB reserved for both, and for a 30-second clip, and would need the same for a
-six-hour one.
+six-hour one. Demucs' 60-minute run tells the same story from 7,454 MiB down to
+768. What these runs *do* need is host memory — 10.7 GiB for the 60-minute
+RoFormer, 11.7 for the Demucs — which is the subject of *What moved to host RAM*
+below and of the second known limitation.
 
 On wall clock those two pairs disagree with each other: **+0.27% at 45 minutes
 and +6.3% at 60** (578.8 s against 615.4), each a single `dev`-then-branch pair
@@ -445,49 +477,98 @@ working tensor and was refused. That is precisely the failure this feature was
 opened for — "a CUDA OOM part-way through a job the user has already waited
 minutes for" — reproduced, and then made not to happen.
 
-### What moved to host RAM
+### What moved to host RAM — measured, not estimated
 
-The accumulator and the weight did not vanish; they moved. For a ten-minute
-stereo track at 44.1 kHz (26.46 M frames):
+The accumulator and the weight did not vanish; they moved. The obvious worry is
+that this feature trades a CUDA OOM for a host `MemoryError` on a machine that
+meets the published `minimum_ram_mb: 8192`. It was measured rather than reasoned
+about — peak working set and peak commit for the whole process, from
+`GetProcessMemoryInfo`, one fresh process per row, MiB:
 
-| | RoFormer | Demucs |
-| --- | --- | --- |
-| accumulator | 202 MiB | 807 MiB |
-| weight | 101 MiB | 101 MiB |
+| model | clip | | peak working set | peak commit |
+| --- | --- | --- | --- | --- |
+| `standard-stems-001` | 10 min | before | 3,448.6 | 6,915.5 |
+| `standard-stems-001` | 10 min | **after** | **3,287.1** | **5,517.9** |
+| `standard-stems-001` | 60 min | before | 11,947.3 | 21,313.7 |
+| `standard-stems-001` | 60 min | **after** | **11,714.4** | **14,034.3** |
+| `standard-stems-001` | 90 min | after | 16,885.6 | 19,536.7 |
+| `vocals-hq-001` | 10 min | before | 3,888.8 | 8,506.1 |
+| `vocals-hq-001` | 10 min | **after** | **3,659.5** | **7,049.0** |
+| `vocals-hq-001` | 60 min | after | 10,653.1 | 14,047.6 |
 
-Both were previously on the card and are now in RAM, on top of what the host
-already held (the decoded PCM, the mixture tensor and the finished stems). Peak
-host use for a ten-minute Demucs run is therefore roughly 1.6 GiB, against
-roughly 0.6 GiB before. `minimum_ram_mb` is 8,192 for both entries and was left
-alone — it is out of this feature's scope, and 1.6 GiB is comfortably inside it
-— but it is the figure a future feature should re-derive if anything else grows.
+**At every length that could be compared, this branch uses *less* host memory
+than `dev`, not more** — 161 MiB less for a ten-minute Demucs run, 229 less for
+RoFormer, and 1.4 GiB less commit. The accumulator arriving on the host is
+offset by what no longer happens: `dev` copied the whole finished accumulator
+device→host at the end of the loop, so the host paid for it either way, and it
+paid for the wide `(stems, channels, samples)` weight tensor's copy too.
+
+So `minimum_ram_mb: 8192` is **not falsified by this change**. What is new is
+that longer tracks are now reachable at all, and those need host memory in
+proportion to their length. Fitting the rows above:
+
+```text
+peak working set (MiB) ≈ 1,600 + 2.81 × seconds   (standard-stems-001)
+peak working set (MiB) ≈ 2,260 + 2.33 × seconds   (vocals-hq-001)
+```
+
+Demucs' 2.81 MiB per second of audio is the accumulator (1.35), the four
+finished int16 stems (0.67), the host mixture (0.34), the decoded PCM (0.17),
+the weight (0.17) and the float temporaries stem assembly builds one at a time.
+So **8,192 MiB of RAM covers about 39 minutes of audio for Demucs and about 42
+for RoFormer**; 16 GiB covers roughly 85 and 100; 32 GiB, three hours and more.
+A four-minute song needs about 1.7 GiB either way.
+
+That is the honest form of this feature's headline. **038 does not make track
+length free — it moves what limits it from the graphics card to the host**,
+where there is typically four to eight times more of it, where it can be added
+without buying a GPU, and where running out is a `MemoryError` at a predictable
+size rather than a CUDA OOM whose threshold depended on a card the user cannot
+change. `minimum_ram_mb` is left at 8,192 (it is out of this feature's scope,
+and it is right for any normal song), but the figure it covers is now written
+down, which it was not before.
 
 ## Known limitations
 
-- **Demucs' normalization statistics are still O(duration) on the device**, and
-  the sweep above says exactly how much. The mono reference is four bytes per
-  sample — 100 MiB for a ten-minute track, 605 MiB for an hour — held only until
-  `shift` and `scale` are computed, before the first forward pass. It is below
-  the forward pass's own working set until about **38 minutes** of audio and
-  measurably above it after that (616 MiB allocated at 45 minutes, 768 at 60,
-  against 550 flat below the crossover); the whole-device figure did not follow
-  it out to an hour, because the allocator reserves the block and reuses it. At
-  0.168 MiB per second it is an eleven-fold improvement on the 1.85 it replaced,
-  not an elimination. It is there because `mean()` and `std()` over the whole
-  track are reductions, and a reduction is the one operation whose result differs
-  between host and device; moving it would have changed the audio, which this
-  feature is not allowed to do. Removing it needs a different bargain — a
-  blocked reduction whose result is *defined* rather than inherited, which is a
-  change to the output and therefore a separate, numbered decision. RoFormer has
-  no equivalent: it has no whole-track reduction, which is why its figure is flat
-  to the byte.
+- **Demucs' normalization statistics are still O(duration) on the device, and
+  that is why its `requirements` do not move.** The mono reference is four bytes
+  per sample — 100 MiB for a ten-minute track, 605 MiB for an hour — held only
+  until `shift` and `scale` are computed, before the first forward pass. Below
+  about **38 minutes** of audio it is smaller than the forward pass's own
+  ~382 MiB working set and invisible; above it, peak allocated rises at
+  0.168 MiB per second (measured 616 MiB at 45 minutes, 768 at 60, 1,070 at 90,
+  against 550 flat below) and whole-device at 0.077 (2,210.6 MiB at 90 minutes).
+  Eleven to twenty-four times smaller than the 1.85 MiB/s it replaced, and not
+  zero. It is there because `mean()` and `std()` over the whole track are
+  reductions, and a reduction is the one operation whose result differs between
+  host and device; moving it would have changed the audio, which this feature is
+  not allowed to do. Removing it needs a different bargain — a blocked reduction
+  whose result is *defined* rather than inherited — which is a change to the
+  output and therefore a separate, numbered decision. **RoFormer has no
+  equivalent**: no whole-track reduction, which is why its figure is flat to the
+  byte and its `recommended_vram_mb` could drop.
+- **Host RAM, not VRAM, now limits track length.** Measured above: about 39
+  minutes of audio per 8 GiB for Demucs, 42 for RoFormer. This branch uses less
+  host memory than `dev` at every length `dev` could complete, so nothing
+  regressed — but a user with 8 GiB of RAM and a 4 GiB card will now meet the
+  RAM wall where they used to meet the VRAM one. `minimum_ram_mb` stays 8,192
+  (out of scope here, and correct for any normal song); a feature that wants to
+  advertise album-length or DJ-set separation should re-derive it, or spill the
+  accumulator to disk, which is the next thing to do if this ever binds.
 - **RoFormer's reflect-padded borders are still materialised whole-track on the
-  host.** Cheap (host RAM) and outside this feature's problem, but it means the
-  decoded mixture is held twice in RAM during a run.
+  host**, so the decoded mixture is held twice in RAM during a run. Cheap next
+  to the accumulator, and it is part of the 2.33 MiB/s above.
 - **Neither backend reads the mixture from disk in windows.** The brief invited
-  considering it; the decoded PCM is host-resident already and moving it to disk
-  would trade RAM the machine has for I/O it does not need. If host RAM ever
-  becomes the binding constraint, this is where to look.
-- **The measurements are one host.** RTX 4060 Laptop, WDDM, `cu130`. The CUDA
-  context (1,079 MiB) and the allocator's behaviour differ elsewhere; the
-  *flatness* does not, because it is a property of what the code allocates.
+  considering it; the decoded PCM is host-resident already, and the measurements
+  above say host RAM is comfortable up to lengths well past any music file. It
+  is the obvious next move if the previous limitation ever binds.
+- **On Windows/WDDM there is no clean OOM to observe.** The driver lets a
+  process oversubscribe into shared system memory rather than failing, which is
+  why `dev`'s 60-minute runs "reserved" 9,146 MiB (RoFormer) and 8,042 (Demucs)
+  on an 8,188 MiB card and still finished, slowly. Capping the process is how
+  this feature reproduced the real failure; on Linux, or on any card without
+  that fallback, `dev` simply dies.
+- **The measurements are one host.** RTX 4060 Laptop, WDDM, `cu130`, 64 GiB of
+  RAM. The CUDA context (1,079 MiB) and the allocator's behaviour differ
+  elsewhere; the flatness does not, because it is a property of what the code
+  allocates.
