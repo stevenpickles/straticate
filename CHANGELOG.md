@@ -45,9 +45,11 @@ built bundle still serves the whole API — the root URL tells you what to build
 - **Separate** — one job at a time, run asynchronously. Progress is real work
   (`chunks completed / chunks total`) pushed over a WebSocket, never a timer, and
   Cancel is honoured. A live telemetry panel shows the model, the compute device
-  and — on CUDA — VRAM allocated and peak, utilization and temperature, plus the
-  stage, elapsed time, audio processed and real-time factor. Reloading the page
-  mid-job returns you to the job.
+  and — on CUDA — VRAM allocated and peak, plus the stage, elapsed time, audio
+  processed and real-time factor. GPU utilization and temperature fill in too if
+  the optional `nvidia-ml-py` binding is installed, and are simply blank if it is
+  not; nothing here requires it. Reloading the page mid-job returns you to the
+  job.
 - **Inspect** — every stem plays in sample-accurate sync off one clock, with
   per-stem solo and mute, play/pause and a seek scrubber.
 - **Export** — WAV 24-bit, WAV 32-bit float or FLAC. One stem gives you an audio
@@ -64,7 +66,7 @@ refuse — if the margin looks tight. Installs can be cancelled and weights can 
 removed.
 
 **The GPU is found, or it is not, and either way it just runs.** Compute devices
-are detected at startup; a job that pins no device gets the best one available.
+are detected for you; a job that pins no device gets the best one available.
 Installing a CUDA build of PyTorch is one documented command and changes no
 code, no settings, no API and no schema.
 
@@ -128,6 +130,12 @@ baseline that makes the numbers mean something:
 | `drums` | **+0.907** | +0.221 |
 | `bass` | **+0.985** | +0.568 |
 | `other` | **+0.993** | +0.723 |
+
+Read the baseline column. `other`'s +0.993 is impressive against a mixture that
+already correlates with that source at +0.723, and much less so than the same
+number would be for `drums`. Both figures come from synthesised mixtures where
+the true sources were known — not from real records, which have no ground truth
+to correlate against.
 
 ### Known limitations
 
