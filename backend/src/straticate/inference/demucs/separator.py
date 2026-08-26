@@ -56,8 +56,8 @@ by the accumulated weight — the same overlap-add upstream's ``apply_model``
 performs, with the same window, stride, triangular transition and centred
 padding. Since feature 038 that accumulator is on the **host** and only the
 window in flight is on the compute device, so peak VRAM is a function of the
-window rather than of the length of the track. It is
-reimplemented here rather than called so that it can report progress after every window,
+window rather than of the length of the track. It is reimplemented here rather
+than called so that it can report progress after every window,
 check the cancellation token between windows, and run inside
 :func:`asyncio.to_thread`. Every window is one forward pass through a
 42-million-parameter hybrid transformer, so ``chunks_completed / chunks_total``

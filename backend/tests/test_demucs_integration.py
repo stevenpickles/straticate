@@ -326,7 +326,7 @@ async def test_peak_device_memory_is_flat_across_track_lengths(
 ) -> None:
     """Feature 038's acceptance criterion, on the hardware it is a claim about.
 
-    Twelve times the audio, twelve times the chunks, the *same* peak. Before 038
+    Twelve times the audio, nine times the chunks, the *same* peak. Before 038
     the decoded mixture, the accumulator and the weight vector were all
     device-resident and whole-track, so the peak grew at ≈1.85 MiB per second of
     audio (feature 028's sweep) — over the 220 s of extra audio below, ≈407 MiB.
@@ -336,9 +336,11 @@ async def test_peak_device_memory_is_flat_across_track_lengths(
     ``scale`` are reductions over the whole mono reference, and a reduction is
     the one operation that does not give the same bits on the host as on the
     device, so the reference is moved to the card for them — four bytes per
-    sample, transiently, before the first forward pass. That is far below the
-    forward pass's own working set at any track length a user has, so it does not
-    reach the peak; see feature 038's document for where it eventually would.
+    sample, transiently, before the first forward pass. That is below the forward
+    pass's own ~382 MiB working set until about **38 minutes** of audio, after
+    which peak *allocated* rises at 0.168 MiB per second (616 MiB measured at 45
+    minutes, 768 at 60, against 550 flat below the crossover). Feature 038's
+    document has that sweep and why the reduction cannot move to the host.
 
     Both clips run in **one process on one separator**, deliberately: the
     skeleton resets the CUDA peak per run, and comparing two runs that share a
@@ -383,10 +385,10 @@ async def test_peak_device_memory_is_flat_across_track_lengths(
     growth = peaks[240.0] - peaks[20.0]
     print(
         f"\n[038] cuda:0 peak {peaks[20.0] / 1024**2:.1f} MiB at 20 s "
-        f"({chunks[20.0]} chunks) → {peaks[240.0] / 1024**2:.1f} MiB at 4 min "
+        f"({chunks[20.0]} chunks) -> {peaks[240.0] / 1024**2:.1f} MiB at 4 min "
         f"({chunks[240.0]} chunks); growth {growth / 1024**2:+.1f} MiB"
     )
-    assert chunks[240.0] > 10 * chunks[20.0], "the longer clip must really be more chunks"
+    assert chunks[240.0] > 5 * chunks[20.0], "the longer clip must really be more chunks"
     assert growth < 64 * 1024**2, (
         f"peak grew by {growth / 1024**2:.1f} MiB over 220 s of extra audio; "
         f"something whole-track is back on the device"

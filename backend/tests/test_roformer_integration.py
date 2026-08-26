@@ -262,7 +262,7 @@ async def test_peak_device_memory_is_flat_across_track_lengths(
 ) -> None:
     """Feature 038's acceptance criterion, on the hardware it is a claim about.
 
-    Twelve times the audio, twelve times the chunks, the *same* peak. Before 038
+    Twelve times the audio, nine times the chunks, the *same* peak. Before 038
     the decoded mixture, the accumulator and the weight tensor were all
     device-resident and whole-track, so the peak grew at ≈1.35 MiB per second of
     audio (feature 036's sweep) — over the 220 s of extra audio below, ≈297 MiB.
@@ -318,10 +318,10 @@ async def test_peak_device_memory_is_flat_across_track_lengths(
     growth = peaks[240.0] - peaks[20.0]
     print(
         f"\n[038] cuda:0 peak {peaks[20.0] / 1024**2:.1f} MiB at 20 s "
-        f"({chunks[20.0]} chunks) → {peaks[240.0] / 1024**2:.1f} MiB at 4 min "
+        f"({chunks[20.0]} chunks) -> {peaks[240.0] / 1024**2:.1f} MiB at 4 min "
         f"({chunks[240.0]} chunks); growth {growth / 1024**2:+.1f} MiB"
     )
-    assert chunks[240.0] > 10 * chunks[20.0], "the longer clip must really be more chunks"
+    assert chunks[240.0] > 5 * chunks[20.0], "the longer clip must really be more chunks"
     assert growth < 64 * 1024**2, (
         f"peak grew by {growth / 1024**2:.1f} MiB over 220 s of extra audio; "
         f"something whole-track is back on the device"

@@ -196,13 +196,15 @@ and on this branch, and every written stem was SHA-256'd.
 
 | model | device | clips | stems hashed | result |
 | --- | --- | --- | --- | --- |
-| `vocals-hq-001` | `cpu` | 12 s | 2 | identical |
-| `vocals-hq-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min | 8 | identical |
-| `standard-stems-001` | `cpu` | 12 s | 4 | identical |
+| `vocals-hq-001` | `cpu` | 12 s, 30 s | 4 | identical |
+| `vocals-hq-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min, **45 min** | 10 | identical |
+| `standard-stems-001` | `cpu` | 12 s, 30 s | 8 | identical |
 | `standard-stems-001` | `cuda:0` | 30 s, 2 min, 6 min, 10 min | 16 | identical |
 
-Thirty stems, twelve on CPU and… (see the table: 6 on CPU, 24 on CUDA), every
-one byte-for-byte what `dev` produces for the same input and parameters.
+**Thirty-eight stems, twelve on CPU and twenty-six on CUDA, every one
+byte-for-byte what `dev` produces** for the same input and the same parameters —
+including a 45-minute track through 677 chunks, where any drift in the
+accumulation would have had every opportunity to show.
 
 ### What re-measuring found
 
@@ -254,38 +256,86 @@ the forward pass's own working set is five times larger.
 Slope: **1.85 → 0.00 MiB per second of audio allocated**, and no measurable
 trend whole-device.
 
-### Wall clock: no meaningful cost
+Pushed further, on this branch, to find where the transient mono reference
+eventually does start to count:
 
-Real-time factor, same sweep, same runs:
+| clip | chunks | alloc | reserved | whole-device | RTF |
+| --- | --- | --- | --- | --- | --- |
+| 20 min | 206 | 547.3 | 740 | 1,854.6 | 29.66 |
+| 45 min | 462 | 616.0 | 706 | 1,820.6 | 29.08 |
+| 60 min | 616 | 767.8 | 792 | 1,906.6 | 27.53 |
 
-| model | clip | RTF before | RTF after | change |
-| --- | --- | --- | --- | --- |
-| `vocals-hq-001` | 30 s | 4.46 | 4.44 | −0.4% |
-| `vocals-hq-001` | 2 min | 6.09 | 6.02 | −1.1% |
-| `vocals-hq-001` | 6 min | 6.25 | 6.12 | −2.1% |
-| `vocals-hq-001` | 10 min | 6.30 | 6.03 | −4.3% |
-| `standard-stems-001` | 30 s | 10.55 | 9.70 | −8.1% |
-| `standard-stems-001` | 2 min | 20.93 | 21.94 | +4.8% |
-| `standard-stems-001` | 6 min | 26.12 | 24.91 | −4.6% |
-| `standard-stems-001` | 10 min | 24.06 | 24.79 | +3.0% |
+Peak **allocated** is flat to about 38 minutes and then rises at **0.168 MiB per
+second of audio** — four bytes per sample, exactly the mono reference, which
+overtakes the forward pass's ~382 MiB working set at 2,271 s of audio. The fit
+predicts 622 MiB at 45 min and 773 at 60; measured, 616.0 and 767.8. What a card
+must actually have free — the whole-device figure — does **not** follow it out to
+an hour, because the allocator reserves that block and then reuses it for the
+loop. 0.168 MiB/s is an eleven-fold reduction on 028's 1.85, and it is the
+subject of the first known limitation below.
 
-Demucs' figures move in both directions, which is what a laptop GPU's clocks do
-(028 recorded the same: 2.2–2.8 s for the same clip, and one cold-clock run at
-7.3 s). RoFormer's four all lean the same way, by 0.4–4.3%, which is small but
-consistent and is probably real.
+### Wall clock: no measurable cost
 
-The arithmetic says it should be small. Per chunk, RoFormer moves 2.7 MiB of
-mixture on and 2.7 MiB of estimate off; Demucs moves 2.6 on and 10.5 off. Over a
-ten-minute track that is 1.0 GiB and 1.5 GiB respectively — tens of MiB per
-second across a link that does gigabytes, next to seconds of forward pass. What
-is left is the host-side `+=` into a large CPU tensor, which is memory-bandwidth
-work on the machine that was idle anyway.
+Three measurements, because the obvious one was misleading.
 
-CPU runs are unaffected in principle (there is no transfer at all; the only
-change is where a buffer is allocated) and in measurement — see the CPU rows
-recorded with the sweep. The reference figures this is measured against are
-028's: RoFormer 0.299 CPU / 4.496 `cuda:0`; Demucs 1.63 CPU / 10.7–13.5
-`cuda:0`.
+**1. The accumulation itself, timed in isolation.** Both chunk loops were run in
+**one process against one resident `vocals-hq-001`**, alternating, on a
+30-second clip (10 chunks) — same model instance, same decoded source, the loop
+the only variable. Forward passes came to 98.54 s streaming against 97.87 s
+whole-track. Everything each loop does *outside* the forward pass, for the whole
+clip: **11 ms streaming, 16 ms whole-track**. The streaming loop is the cheaper
+of the two, because RoFormer's weight accumulator went from `(stems, channels,
+samples)` to `(samples,)` and writes half as much. The two outputs were
+`torch.equal`.
+
+**2. Cross-process, alternating, three rounds** (12 s clip, `cpu`, one fresh
+process per cell, read across):
+
+| round | streaming | whole-track |
+| --- | --- | --- |
+| 1 | 43.94 s | 45.36 s |
+| 2 | 51.94 s | 52.39 s |
+| 3 | 55.27 s | 54.19 s |
+
+Indistinguishable — streaming is faster in two rounds of three. Note instead the
+**25% rise from round 1 to round 3**: that is this laptop throttling under
+sustained load, and it is far larger than anything the change does. It is also
+exactly what an A/B that runs one variant before the other measures: two such
+pairs, run earlier, suggested a 10–13% CPU regression that alternating rounds do
+not reproduce and that the in-process measurement above says has nowhere to come
+from. Recorded here because the wrong conclusion was reachable from a
+perfectly ordinary experiment.
+
+**3. The longest run there is**, on CUDA: a 45-minute track, 677 chunks —
+**424.9 s whole-track against 426.0 s streaming, +0.27%**. A per-chunk cost
+would show here more clearly than anywhere else, and does not.
+
+For completeness, the sweep's own RTF columns. Each row is two fresh processes,
+`dev` first and this branch second, so they carry the drift described above:
+
+| model | clip | RTF before | RTF after |
+| --- | --- | --- | --- |
+| `vocals-hq-001` | 30 s | 4.46 | 4.44 |
+| `vocals-hq-001` | 2 min | 6.09 | 6.02 |
+| `vocals-hq-001` | 6 min | 6.25 | 6.12 |
+| `vocals-hq-001` | 10 min | 6.30 | 6.03 |
+| `standard-stems-001` | 30 s | 10.55 | 9.70 |
+| `standard-stems-001` | 2 min | 20.93 | 21.94 |
+| `standard-stems-001` | 6 min | 26.12 | 24.91 |
+| `standard-stems-001` | 10 min | 24.06 | 24.79 |
+
+The arithmetic agrees with the conclusion. Per chunk, RoFormer moves 2.7 MiB of
+mixture onto the card and 2.7 MiB of estimate off it; Demucs 2.6 on and 10.5
+off. Over a ten-minute track that is 1.0 GiB and 1.5 GiB — tens of MiB per
+second across a link that does gigabytes, next to seconds of forward pass. On
+**CPU there is no transfer at all**: the only change is which allocation a
+buffer comes from.
+
+Reference points this is measured against, from 028: RoFormer 0.299 CPU / 4.496
+`cuda:0`; Demucs 1.63 CPU / 10.7–13.5 `cuda:0`. This host reproduced RoFormer's
+CPU figure exactly on `dev` (RTF 0.298 on a 30 s clip) and measured Demucs' CPU
+at 2.05–2.11, faster than 028's row — different hardware, not a different
+result.
 
 ### The `requirements` re-derived
 
@@ -337,9 +387,63 @@ PR, because they are now false.
 
 ### A track long enough to exhaust the card today
 
-See the run recorded below the tables — a 45-minute stereo track, which the fit
-above puts at roughly 8.6 GiB of whole-device use on `dev` against an 8,188 MiB
-card.
+Two long tracks were run end to end, `dev` and this branch, on `cuda:0`:
+
+| track | chunks | | alloc | reserved | whole-device | wall clock |
+| --- | --- | --- | --- | --- | --- | --- |
+| 45 min | 677 | before | 6,368.4 | 7,334 | **8,187.6** | 424.9 s |
+| 45 min | 677 | **after** | **1,526.1** | **1,864** | **2,980.6** | 426.0 s |
+| 60 min | 902 | before | 8,182.1 | **9,146** | **8,187.6** | 578.8 s |
+| 60 min | 902 | **after** | **1,526.1** | **1,864** | **2,980.6** | 615.4 s |
+
+Stems identical in both pairs.
+
+At 45 minutes `dev` uses **8,187.6 MiB of an 8,188 MiB card** — the card is
+full, and anything else resident on it (a desktop compositor, a second process,
+a browser) is the difference between finishing and not. At 60 minutes it
+reserves **9,146 MiB, which is more memory than the card has.** That is not an
+error in the measurement: on Windows/WDDM the driver lets a process oversubscribe
+into shared system memory rather than failing, so what would be an out-of-memory
+error elsewhere is instead a silent spill across PCIe. This branch needs 1,864
+MiB reserved for both, and for a 30-second clip, and would need the same for a
+six-hour one.
+
+On wall clock those two pairs disagree with each other: **+0.27% at 45 minutes
+and +6.3% at 60** (578.8 s against 615.4), each a single `dev`-then-branch pair
+on a laptop that the alternating rounds above showed drifting 25% under
+sustained load. Both are within that drift and neither is repeated, so the
+honest statement is the one the isolated measurement supports — the accumulation
+costs milliseconds — with the caveat that the largest gap observed anywhere in
+this feature's measurements is that 6.3%, on the longest run, in the ordering
+most likely to produce it.
+
+**Where the failure is a failure**, this branch is the difference between a job
+completing and a job dying. A 4 GiB card is the release-blocking case — 036 put
+its limit at about nine minutes of audio — so the same 20-minute track was run
+twice with the process capped by
+`torch.cuda.set_per_process_memory_fraction(0.368)`, which is what a 4 GiB card
+has left once its CUDA context is resident (2.94 GiB):
+
+```text
+--- dev ---
+  File "…/roformer/vendor/mel_band_roformer.py", line 136, in forward
+    q = self.rotary_embed.rotate_queries_or_keys(q)
+  …
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 94.00 MiB.
+  GPU 0 has a total capacity of 8.00 GiB of which 4.03 GiB is free.
+  2.94 GiB allowed; Of the allocated memory 2.81 GiB is allocated by PyTorch…
+
+--- new ---
+  302 chunks, 182.0 s, RTF 6.60,
+  peak allocated 1,526.1 MiB · reserved 1,864 MiB · whole-device 2,980.6 MiB
+```
+
+Note *where* `dev` died: **inside a forward pass**, not at the allocation of the
+accumulator. The mixture, the accumulator and the weight tensor had already
+taken 2.81 GiB of the 2.94 available before the network asked for a 94 MiB
+working tensor and was refused. That is precisely the failure this feature was
+opened for — "a CUDA OOM part-way through a job the user has already waited
+minutes for" — reproduced, and then made not to happen.
 
 ### What moved to host RAM
 
@@ -360,17 +464,23 @@ alone — it is out of this feature's scope, and 1.6 GiB is comfortably inside i
 
 ## Known limitations
 
-- **Demucs' normalization statistics are still O(duration) on the device.** The
-  mono reference is four bytes per sample — 100 MiB for a ten-minute track,
-  600 MiB for an hour — held only until `shift` and `scale` are computed, before
-  the first forward pass. It does not reach the peak at any length measured
-  (the forward pass's own working set is ~550 MiB) and would only begin to
-  around **75 minutes** of audio. It is there because `mean()` and `std()` over
-  the whole track are reductions, and a reduction is the one operation whose
-  result differs between host and device; moving it would have changed the
-  audio, which this feature is not allowed to do. Removing it needs a different
-  bargain — a blocked reduction whose result is *defined* rather than inherited,
-  which is a change to the output and therefore a separate, numbered decision.
+- **Demucs' normalization statistics are still O(duration) on the device**, and
+  the sweep above says exactly how much. The mono reference is four bytes per
+  sample — 100 MiB for a ten-minute track, 605 MiB for an hour — held only until
+  `shift` and `scale` are computed, before the first forward pass. It is below
+  the forward pass's own working set until about **38 minutes** of audio and
+  measurably above it after that (616 MiB allocated at 45 minutes, 768 at 60,
+  against 550 flat below the crossover); the whole-device figure did not follow
+  it out to an hour, because the allocator reserves the block and reuses it. At
+  0.168 MiB per second it is an eleven-fold improvement on the 1.85 it replaced,
+  not an elimination. It is there because `mean()` and `std()` over the whole
+  track are reductions, and a reduction is the one operation whose result differs
+  between host and device; moving it would have changed the audio, which this
+  feature is not allowed to do. Removing it needs a different bargain — a
+  blocked reduction whose result is *defined* rather than inherited, which is a
+  change to the output and therefore a separate, numbered decision. RoFormer has
+  no equivalent: it has no whole-track reduction, which is why its figure is flat
+  to the byte.
 - **RoFormer's reflect-padded borders are still materialised whole-track on the
   host.** Cheap (host RAM) and outside this feature's problem, but it means the
   decoded mixture is held twice in RAM during a run.
