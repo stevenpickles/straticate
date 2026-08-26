@@ -7,7 +7,8 @@ PR: #60
 
 ## Objective
 
-Stop `FakeSeparator` stalling the backend's event loop while it filters a chunk.
+Stop `FakeSeparator` stalling the backend's event loop while it filters a chunk
+-- and, after review, stop the mono fold doing the same thing on its own path.
 
 ## Result, up front
 
@@ -32,8 +33,14 @@ So the unit of work is a **block of frames**, not a chunk. `_filter_block` is
 dispatched with `asyncio.to_thread` once per `FILTER_BLOCK_FRAMES` (1024 frames,
 ~23 ms of audio, ~1 ms of compute), and it is the *return* to the event loop
 between blocks — not the GIL's preemption during one — that gets requests served.
-That is the same shape as `stereo.apply_stereo_handling_async`, one module away,
-which already awaits one thread hop per fold block.
+`stereo.apply_stereo_handling_async`, one module away, already awaited one
+thread hop per fold block — and **that turned out to be the second half of this
+feature rather than its precedent.** Its block was `1 << 19` frames, 512x the
+one chosen here and 120.9 ms of GIL-holding work, so by the argument above it
+was the same defect on the `mono` path. Review caught the citation; the constant
+is resized here under a granted scope extension. *Splitting into blocks is not
+the property that matters; the size of a block is.* See **The same defect on the
+mono path**.
 
 The four shapes, measured against a standalone asyncio server with one TCP
 connection per sample, over six chunks of the real per-chunk workload:
