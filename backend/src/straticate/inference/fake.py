@@ -56,6 +56,75 @@ Cost note: the fake holds the decoded source plus every stem in memory
 (roughly ``(1 + stem_count) x`` the decoded size) and does its arithmetic in
 pure Python. That is fine for a local development tool on song-length input;
 a real separator (feature 026) will stream and use the GPU.
+
+.. _fake-threading:
+
+Threading — and why one thread hop per chunk is not the fix
+-----------------------------------------------------------
+
+Cheap per sample is not cheap per chunk. Filtering one five-second chunk into
+four stems is 1.8 M multiply-adds, which is roughly a quarter of a second on a
+quiet machine and grows in proportion to how busy that machine is. Run inline
+on the event loop — as it was until feature 045 — that is a span in which the
+backend serves nothing: not REST, not the feature 013 WebSocket hub, not the
+progress of the very job doing the work. Feature 044 measured it at 0.37 s,
+3.4 s and 8.1 s per chunk at 1x, 4.5x and 17x CPU contention, and it was the
+cause behind three Playwright "flakes".
+
+The obvious repair is the one
+:class:`~straticate.inference.torch_separator.TorchSeparator` uses: hand the
+chunk to :func:`asyncio.to_thread`. **Measured, it barely helps** — a health
+probe on a fresh connection during a real job went from a 271 ms 95th
+percentile to 266 ms. Torch's pattern works because torch's kernels *release
+the GIL*; this module's arithmetic is pure Python and holds it. A thread that
+holds the GIL for 250 ms leaves the loop as unserved as one that never left it,
+because the loop needs the GIL to answer anything, and an interpreter that
+hands it back every 5 ms (``sys.getswitchinterval``) still loses badly to a
+compute thread when the waiter is a selector that has to be woken first.
+
+So the unit of work is a **block of frames**, not a chunk: :func:`_filter_block`
+is dispatched with :func:`asyncio.to_thread` once per
+:data:`FILTER_BLOCK_FRAMES`, and it is the *return* to the event loop between
+blocks — not the GIL's preemption during one — that gets requests served.
+
+:func:`straticate.inference.stereo.apply_stereo_handling_async` has the same
+shape, and it is worth being precise about why, because **its shape was not
+enough**. It awaited one thread hop per fold block long before this feature —
+but its block was ``1 << 19`` frames, twelve seconds of audio and 120.9 ms of
+GIL-holding work, because feature 041 sized it for memory and cancellation and
+had no reason to think about the loop. Structurally identical, and by the
+argument above still the defect. Feature 045 resized it to
+:data:`~straticate.inference.stereo.FOLD_BLOCK_FRAMES` = ``1 << 12`` by the same
+rule this constant uses. **Splitting into blocks is not the property that
+matters; the size of a block is.**
+
+Measured against a standalone server with one TCP connection per sample, over
+six chunks of the real per-chunk workload:
+
+=====================  ==============  ==============
+work shape             during-job p50  during-job p95
+=====================  ==============  ==============
+inline (before)        1 183 ms        1 183 ms
+one thread per chunk   81 ms           130 ms
+blocks on the loop     16 ms           72 ms
+**blocks in threads**  **16 ms**       **29 ms**
+=====================  ==============  ==============
+
+— against an idle p95 of 27 ms on the same client. Blocking on the loop
+(``await asyncio.sleep(0)`` between blocks) is the same size of unit and is
+still two to three times worse, because a request needs several loop passes to
+accept, read and answer, and it only gets one per block.
+
+The chunk *loop* stays on the event loop: cancellation checks, run bookkeeping
+and the progress callback are where they always were, so a caller still
+receives progress on the loop and cancellation is still observed at a chunk
+boundary (ARCHITECTURE.md §7). Blocking changes only how long the loop waits,
+never what it is told.
+
+Splitting a chunk into blocks cannot change the audio, for the reason chunking
+cannot: each :class:`_CombFilter` carries its state across whatever boundaries
+it is given, which ``test_output_is_independent_of_the_chunk_length`` already
+pins.
 """
 
 from __future__ import annotations
@@ -69,6 +138,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import Final
 
 from straticate.audio.ffmpeg import DEFAULT_FFMPEG_TIMEOUT_SECONDS, FFmpegTimeout
 from straticate.errors import ApplicationError
@@ -147,6 +217,36 @@ DEFAULT_MODEL_LOAD_SECONDS = 0.1
 
 DEFAULT_FADE_SECONDS = 0.01
 """Fade applied to both ends of every stem during ``post_processing``."""
+
+FILTER_BLOCK_FRAMES: Final = 1024
+"""Frames filtered per thread hop — how often the event loop gets its turn back.
+
+About 23 ms of 44.1 kHz audio, and ~1 ms of compute for a four-stem stereo job
+on a quiet machine. It bounds **latency**, and nothing else: the chunk is what
+sizes progress granularity and cancellation, and neither moves with this.
+
+Chosen by measurement, not by feel. Feature 045 ran the 044 probe against the
+same job at four block sizes and read off the during-job 95th percentile:
+
+============  =======================
+block frames  during-job p95
+============  =======================
+8192          53 ms
+4096          41 ms
+2048          28 ms
+**1024**      **20 ms** (idle: 18 ms)
+============  =======================
+
+1024 is where it reaches the idle band, so that is the size. No smaller block
+was probed, because there was nothing left for one to buy.
+
+What it costs the engine is, on this hardware, **not resolvable above the
+noise**: a 60 s four-stem job, quiet and in process, five runs each, came out at
+a median 4.12 s filtering inline and 4.38 s in 1024-frame blocks, with ranges of
+3.66-4.15 s and 3.66-4.46 s that overlap almost entirely. A separate whole-job
+measurement including the simulated per-chunk delay put it at 4.25 s against
+4.33 s. So: a few percent at most, and possibly none.
+"""
 
 _DIRECT_WEIGHT = 0.6
 _REFLECT_WEIGHT = 0.4
@@ -554,10 +654,16 @@ class FakeSeparator:
             chunk_started = time.monotonic()
             start = index * chunk_frames
             stop = min(start + chunk_frames, frames)
-            planes = [plane[start:stop] for plane in source.channels]
-            for stem_index, stem_filters in enumerate(filters):
-                for channel_index, comb in enumerate(stem_filters):
-                    stems[stem_index][channel_index].extend(comb.process(planes[channel_index]))
+            # Off the event loop, a block of frames at a time (feature 045).
+            # One hop for the whole chunk is *not* enough — this arithmetic is
+            # pure Python and holds the GIL, so a 250 ms chunk in a thread
+            # leaves the loop as unserved as a 250 ms chunk on it. The
+            # measurements are under :ref:`Threading <fake-threading>`.
+            for block_start in range(start, stop, FILTER_BLOCK_FRAMES):
+                block_stop = min(block_start + FILTER_BLOCK_FRAMES, stop)
+                await asyncio.to_thread(
+                    _filter_block, source.channels, filters, stems, block_start, block_stop
+                )
             # Awaited even at 0.0: it yields to the event loop, so a cancel
             # request lands before the next chunk and progress is observable.
             await asyncio.sleep(self._chunk_delay_seconds)
@@ -642,6 +748,32 @@ class FakeSeparator:
         )
 
 
+def _filter_block(
+    channels: tuple[array[int], ...],
+    filters: list[list[_CombFilter]],
+    stems: list[list[array[int]]],
+    start: int,
+    stop: int,
+) -> None:
+    """Filter frames ``[start, stop)`` of every channel into every stem.
+
+    The blocking span of the chunk loop, and the whole reason this is a
+    module-level function rather than three nested loops inline:
+    :meth:`FakeSeparator._run_chunks` hands it to :func:`asyncio.to_thread`,
+    once per :data:`FILTER_BLOCK_FRAMES`. It appends to ``stems`` and advances
+    each filter's carried state, so it is called in order and never
+    concurrently with itself.
+
+    Nothing else reads ``stems`` while a block is in flight — the loop awaits
+    this call before touching them again — so the worker thread owns them for
+    its duration.
+    """
+    planes = [plane[start:stop] for plane in channels]
+    for stem_index, stem_filters in enumerate(filters):
+        for channel_index, comb in enumerate(stem_filters):
+            stems[stem_index][channel_index].extend(comb.process(planes[channel_index]))
+
+
 def _announce(stage_callback: StageCallback | None, stage: JobState) -> None:
     if stage_callback is not None:
         stage_callback(stage)
@@ -699,6 +831,7 @@ __all__ = [
     "FAKE_SEPARATOR_INFOS",
     "FAKE_STANDARD_INFO",
     "FAKE_VOCALS_INFO",
+    "FILTER_BLOCK_FRAMES",
     "FakeDeviceProfile",
     "FakeSeparator",
     "fake_separator_info",
