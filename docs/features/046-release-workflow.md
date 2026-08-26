@@ -1,9 +1,9 @@
 # [046] Release workflow and release-process corrections
 
 Branch: `046-release-workflow`
-Status: PR OPEN
+Status: MERGED
 Dependencies: 043
-PR: #… (when open)
+PR: #65
 
 ## Objective
 
