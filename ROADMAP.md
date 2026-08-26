@@ -46,7 +46,7 @@ actually deliver rather than left asserting something unreachable.
 | 4-stem separation | **done** — 028, Demucs |
 | Capability-driven mode selection | **done** — 010 derives modes from the catalog; 026 honours `Model.capabilities` at device resolution |
 | Bounded VRAM | **038** — blocking; peak currently grows with track length |
-| Production build | **042** — the backend serves the built frontend, one process |
+| Production build | **done** — 042; `uvicorn straticate.main:app` serves API and SPA on one port |
 | Release preparation | **043** — CHANGELOG, version bump, manual `dev → main` tag |
 
 **The gap this milestone ships with, stated plainly:** the `vocals` mode has only
@@ -211,8 +211,9 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |
-| 042 | Production build (backend serves frontend)   | PR OPEN | 003, 024   | `042-production-build` | #53 |
+| 042 | Production build (backend serves frontend)   | MERGED  | 003, 024   | `042-production-build` | #53 |
 | 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
+| 044 | Playwright tier stability under load         | PLANNED | 030        | | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
