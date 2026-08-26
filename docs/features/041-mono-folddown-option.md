@@ -19,16 +19,21 @@ mix has near-independent channels (**full-band L/R correlation +0.23**, against
 against −27.0 dBFS R). Demucs is trained on MUSDB18, where bass is essentially
 always centred.
 
-**Folding the input to mono fixes it**, verified on the same track, same model,
-same settings:
+**Folding the input to mono recovers it**, verified on the same track, same
+model, same settings:
 
 | | stereo (as released) | mono fold-down |
 | --- | --- | --- |
 | bass rms | −65.7 dBFS | **−32.6 dBFS** |
 | bass peak | 0.0054 | **0.2377** |
 
-33 dB, with the other stems unaffected. `htdemucs_ft` was tested and does **not**
-help (its bass specialist gives −66.2 dBFS), so this is the fix that works.
+33 dB. `htdemucs_ft` was tested and does **not** help (its bass specialist gives
+−66.2 dBFS), so this is the change that works.
+
+028 added "with the other three stems unaffected", and this feature's own
+measurement makes that claim, and the word *fixes*, weaker than they look — see
+*Two things worth being honest about* below. 028's known-limitations section now
+carries a pointer to the same correction.
 
 ## The question this feature had to answer
 
