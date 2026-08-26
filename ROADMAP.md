@@ -213,7 +213,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 038 | Streaming overlap-add (bounded VRAM)         | MERGED  | 026, 028, 039 | `038-streaming-overlap-add` | #55 |
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
-| 041 | Mono fold-down for wide-stereo material      | PR OPEN | 028        | `041-mono-folddown-option` | #… |
+| 041 | Mono fold-down for wide-stereo material      | PR OPEN | 028        | `041-mono-folddown-option` | #57 |
 | 042 | Production build (backend serves frontend)   | MERGED  | 003, 024   | `042-production-build` | #53 |
 | 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
 | 044 | Playwright tier stability under load         | PR OPEN | 030        | `044-e2e-stability` | #58 |
