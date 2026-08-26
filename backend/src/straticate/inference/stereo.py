@@ -88,16 +88,48 @@ from straticate.inference.pcm import INT16_MAX, PcmAudio
 from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.jobs import StereoHandling
 
-FOLD_BLOCK_FRAMES: Final = 1 << 19
-"""Frames folded per unit of work -- about 12 s of 44.1 kHz audio.
+FOLD_BLOCK_FRAMES: Final = 1 << 12
+"""Frames folded per unit of work -- about 93 ms of 44.1 kHz audio.
 
-Two things are sized by this and they pull the same way, which is why one
-constant serves both. It bounds the **transient** cost of the fold: only one
-block's worth of intermediate Python objects is ever alive, so peak memory is a
-little over a megabyte however long the track is. And it bounds how long
-cancellation can go unobserved, because the token is checked between blocks --
-roughly 0.14 s at the measured rate. Smaller would buy nothing a user could
-perceive and would pay another thread hop for it.
+**Three** things are sized by this, and the third is what feature 045 corrected.
+It bounds the transient cost of the fold: only one block's worth of intermediate
+Python objects is ever alive, so peak memory is flat however long the track is.
+It bounds how long cancellation can go unobserved, because the token is checked
+between blocks. And it bounds **how long the event loop waits for its turn**,
+because each block is one :func:`asyncio.to_thread` hop of pure Python that
+holds the GIL for its whole duration (see
+:ref:`the fake separator's Threading section <fake-threading>`, which has the
+measurements and the reason a thread hop alone does not help).
+
+This was ``1 << 19`` -- 524 288 frames, 12 s of audio -- sized by the first two
+bounds alone, which were feature 041's concerns. Feature 044 then measured what
+a blocked loop costs, and by 045's own definition the old value was the same
+defect this pair of features exists to remove: **120.9 ms of GIL-holding work
+per block** (median, 181 s track, 16 blocks), so a mono job stalled the backend
+sixteen times for a tenth of a second each -- and by the 5-17x contention 044
+measured on a busy developer machine, for whole seconds each.
+
+Measured, folding a 181 s track, median per block over three runs:
+
+============  ==============  ==========
+block frames  per block       whole fold
+============  ==============  ==========
+524288 (old)  120.85 ms       1.85 s
+131072        26.89 ms        1.69 s
+32768         6.64 ms         1.68 s
+8192          1.64 ms         1.70 s
+**4096**      **0.80 ms**     **1.69 s**
+2048          0.40 ms         1.70 s
+============  ==============  ==========
+
+The whole-fold column is the answer to 041's reasoning that a smaller block
+"would pay another thread hop for it": across a 256x range of block sizes the
+fold costs the same 1.69 s, and the *largest* block is the slowest of the set.
+The hops are free at this scale, so the size is set by the latency owed to the
+loop and nothing else. 4096 is ~1 ms, matching
+:data:`straticate.inference.fake.FILTER_BLOCK_FRAMES`, which was chosen by
+probing until a request served during a job landed in the same band as one
+served while idle.
 """
 
 
@@ -148,6 +180,18 @@ async def apply_stereo_handling_async(
     long-running step in both separators -- ``_run_chunks``, ``_encode`` --
     checks the token per unit of work, and so does this one.
 
+    **And the loop waits for exactly one block, so a block has to be short.**
+    That is feature 045's correction, and the reasoning above is why it was
+    needed: a per-block hop was chosen here to bound *cancellation*, and a
+    12-second block bounds cancellation perfectly well while holding the GIL for
+    120.9 ms at a time. Nothing served a request for the length of each of those
+    hops, sixteen times over a three-minute track -- the same defect 044 measured
+    in the fake separator's chunk loop, on the ``mono`` path, in a function that
+    already looked like the fix. :data:`FOLD_BLOCK_FRAMES` is now sized by the
+    latency owed to the loop, which is the tightest of the three bounds it
+    serves; measured, that took a mono job's during-job 95th percentile from
+    64.0 ms to 17.8 ms against an idle 17.4 ms.
+
     The identity paths never reach a thread at all: no hop, no copy, nothing.
 
     Raises:
@@ -179,7 +223,9 @@ def fold_blocks(source: PcmAudio, *, block_frames: int = FOLD_BLOCK_FRAMES) -> I
     :func:`straticate.inference.torch_audio.tensor_to_pcm` has always produced
     for that sample. See this module's docstring.
 
-    **Blocking is not an optimisation here, it is the memory bound.** Feeding
+    **Blocking is not an optimisation here, it is the memory bound** -- and,
+    since feature 045, the event loop's latency bound too; see
+    :data:`FOLD_BLOCK_FRAMES`, which is what sets the size. Feeding
     ``array("h", ...)`` a list comprehension builds one Python ``int`` object
     per frame before the array exists: measured at **44.3 bytes per frame**
     against **2.12** for the same expression as a generator, which at 90 minutes

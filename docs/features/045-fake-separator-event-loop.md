@@ -222,6 +222,106 @@ the simulated per-chunk delay (median of three) put it at 4.25 s before against
 4.33 s after. The defensible statement is "a few percent at most, and possibly
 none" — not the clean 15% the contaminated run appeared to show.
 
+## The same defect on the mono path — `FOLD_BLOCK_FRAMES`
+
+**Scope extension, granted by the coordinator after review of PR #60.** The
+first draft of `fake.py`'s *Threading* section cited
+`stereo.apply_stereo_handling_async` as the precedent it was following. The
+reviewer checked the precedent, and it was the defect: structurally the right
+shape — one `asyncio.to_thread` per block — but `FOLD_BLOCK_FRAMES` was
+`1 << 19`, **512x** the block this feature had just chosen for the chunk loop.
+
+That is the lesson worth carrying: **splitting into blocks is not the property
+that matters; the size of a block is.** Feature 041 sized the constant for the
+two bounds it cared about — transient memory and cancellation latency — and 12
+seconds of audio satisfies both. It also holds the GIL for a tenth of a second,
+so a job that asked for `stereo_handling: "mono"` stalled the backend sixteen
+times on a three-minute track, immediately after decode. 044's Playwright stall
+was still reachable, with 045's fix in place, by ticking one checkbox in the UI.
+
+Measured, folding a 181 s track, median per block over three runs:
+
+| block frames | per block | whole fold |
+| --- | --- | --- |
+| 524288 (`1 << 19`, old) | **120.85 ms** | 1.85 s |
+| 131072 | 26.89 ms | 1.69 s |
+| 32768 | 6.64 ms | 1.68 s |
+| 8192 | 1.64 ms | 1.70 s |
+| **4096 (`1 << 12`, new)** | **0.80 ms** | 1.69 s |
+| 2048 | 0.40 ms | 1.70 s |
+
+The right-hand column answers 041's stated reason for not going smaller — that it
+"would buy nothing a user could perceive and would pay another thread hop for
+it". Across a **256x** range the fold costs the same 1.69 s, and the largest
+block is the slowest of the set. The hops are free at this scale. 4096 is ~1 ms,
+matching `FILTER_BLOCK_FRAMES`, and both constants now say in their docstrings
+that the size is set by the latency owed to the event loop.
+
+### The probe on a mono job
+
+Same harness, `stereo_handling: "mono"`, 181 s of audio:
+
+| hogs | slowdown | phase | idle p95 | during p95 | during max | samples > 100 ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 1.0x | before | 16.9 ms | **64.0 ms** | 126.5 ms | 2 |
+| 0 | 1.1x | **after** | 17.4 ms | **17.8 ms** | 46.7 ms | **0** |
+| 11 | 2.4x | before | 17.5 ms | **141.1 ms** | 238.6 ms | 15 |
+| 11 | 2.2x | **after** | 18.0 ms | **19.0 ms** | 60.4 ms | **0** |
+
+Inside the idle band at both levels, which is more than the chunk loop manages
+above 2x — because the fold is a smaller total workload, so the block size is the
+only thing setting its latency.
+
+### 041's guarantees, carried forward rather than assumed
+
+Every one re-measured against the new constant, not reasoned about:
+
+- **Audio bit-identical.** SHA-256 of the folded plane, at block sizes
+  `1 << 19`, `1 << 12`, 1, 3, 4095 and 4097, and through both the sync and async
+  drivers, over three sources: a 14-frame adversarial case (every rounding tie,
+  both rails, `-32768` twice), 45 s and 181 s of decorrelated full-scale random.
+  **Identical in all cases.** 041's own
+  `test_the_block_size_does_not_change_a_single_sample` also passes unchanged, as
+  do all 20 tests in `test_stereo_handling.py`.
+- **Memory flat, and 12x lower.** Transient peak minus the result plane:
+
+  | track | old (`1 << 19`) | new (`1 << 12`) |
+  | --- | --- | --- |
+  | 45 s | 2.98 MB | **0.26 MB** |
+  | 91 s | 3.09 MB | **0.27 MB** |
+  | 181 s | 3.66 MB | **0.25 MB** |
+
+  The old column reproduces 041's 3.15 / 3.22 / 3.80 MB. The new one is flat
+  rather than merely bounded — the residual drift with length is gone, because
+  what was drifting was one block's intermediates.
+- **Throughput unchanged.** 181 s track, median of three: 1.95 s old against
+  1.97 s new, runs `[1.93, 2.01, 1.95]` and `[1.97, 1.95, 1.98]`.
+- **Cancellation improved**, as a side effect. Request-to-raise latency, seven
+  trials at staggered offsets into a 181 s fold: median **41.4 ms → 1.25 ms**,
+  max **140.5 ms → 1.91 ms**. 041's docstring estimated 0.14 s; the measured old
+  tail agrees with it.
+
+### The new test, and its mutation
+
+`test_no_single_fold_hop_occupies_the_loop_for_long` times each block from
+inside a recording wrapper around `fold_blocks` — the async fold awaits one
+thread hop per block, so the longest block *is* the longest wait it imposes —
+and asserts no hop is more than a quarter of the whole fold. Relative for the
+same reason the chunk test's tolerance is relative.
+
+Mutation, the constant put back to `1 << 19`:
+
+```text
+E  AssertionError: one fold hop held the event loop for 38.1 ms of a 38.1 ms
+   fold (1 hops) — a job that asked for the mono fold stalls the backend for
+   that long, as many times
+FAILED test_no_single_fold_hop_occupies_the_loop_for_long
+1 failed, 3 passed
+```
+
+"1 hops" is the whole finding in three characters: at the old size a
+four-second fixture folds in a single uninterruptible hand-over.
+
 ## `run.last_chunk_seconds` and `_RunState`
 
 Checked, as the brief asked, and the answer is **the semantics are unchanged and
@@ -271,13 +371,18 @@ the progress callback lands at the very next chunk boundary — `chunks_complete
 - `backend/src/straticate/inference/fake.py` — `FILTER_BLOCK_FRAMES`,
   `_filter_block`, the dispatch in `_run_chunks`, and the *Threading* section of
   the module docstring
-- `backend/tests/test_inference_fake_event_loop.py` — new
+- `backend/src/straticate/inference/stereo.py` — `FOLD_BLOCK_FRAMES` resized
+  from `1 << 19` to `1 << 12`, and the three docstrings that explain what sizes
+  it. Scope extension granted after review; see *The same defect on the mono
+  path*
+- `backend/tests/test_inference_event_loop.py` — new (both paths)
 - `docs/features/045-fake-separator-event-loop.md`, `ROADMAP.md`
 
 ## Required tests, and the mutation that proves them
 
-Three tests, deliberately different in kind: two structural and timing-free (so
-they cannot be flaky), one behavioural (the form the brief asks for).
+Four tests, deliberately different in kind: three structural or near-structural
+(so they cannot be flaky), one behavioural (the form the brief asks for). The
+fourth covers the mono fold and is described in its own section above.
 
 **Every one was run against the unfixed code.** The mutation replaces only the
 loop body, so the module still imports and the tests fail on their own merits
@@ -307,14 +412,20 @@ brief pointed at and the shape that measurably does not fix the stall.
 E  AssertionError: the largest unit of filtering was 44100 frames against a
    1024-frame block: the event loop waits that long for its turn, however many
    threads the work is handed to
+E  AssertionError: the event loop was unavailable for 32.8 ms (p99; peak
+   41.9 ms) during the chunk loop, against a mean chunk of 62.7 ms — the
+   per-chunk filtering is blocking the loop
 FAILED test_the_loop_gets_its_turn_back_between_blocks_within_a_chunk
-1 failed, 2 passed
+FAILED test_the_loop_stays_responsive_while_chunks_are_filtered
+2 failed, 2 passed
 ```
 
-That is exactly why the third test exists: "off the loop" and "the loop stayed
-responsive to a spinning waiter" both pass for a version whose external latency
-is unimproved, and only the block-size assertion catches it. Both mutations were
-reverted; `git diff` carries no trace of them.
+The block-size assertion is the one that has always caught this, and it is why
+that test exists: "off the loop" passes for a version whose external latency is
+unimproved. The behavioural test catches it *now* but did not in the first
+draft — narrowing the ticker to its window (see below) sharpened its p99 enough
+to see the difference, which is a second reason that change was worth making.
+All mutations were reverted; `git diff` carries no trace of them.
 
 ## Acceptance criteria
 
@@ -347,28 +458,56 @@ reverted; `git diff` carries no trace of them.
 
 1. **`TorchSeparator`'s pattern is not portable to pure-Python work.** This is
    the finding worth carrying forward: `asyncio.to_thread` buys responsiveness
-   only when the callee releases the GIL. Anything in this codebase that offloads
-   pure-Python compute in one hop has the same problem — `stereo.fold_blocks`
-   already blocks for this reason (0.14 s per block), and future work should
-   size its blocks by the latency it owes the loop, not only by memory. A
-   reviewer reading `_run_chunks` and asking "why not one `to_thread` like the
-   torch skeleton?" will find the measurement in the module docstring rather
-   than an opinion.
-2. **A measurement harness that spawns processes needs a marker, not just a
+   only when the callee releases the GIL, and *blocking* it buys responsiveness
+   only if the blocks are short. A reviewer reading `_run_chunks` and asking "why
+   not one `to_thread` like the torch skeleton?" will find the measurement in the
+   module docstring rather than an opinion.
+
+   An earlier draft of this document deferred `stereo.fold_blocks` to a future
+   feature on exactly this reasoning. That was wrong to defer and it is fixed
+   here: the two per-sample pure-Python spans in `inference/` are now both sized
+   by the latency they owe the loop.
+2. **Two smaller GIL-holding spans remain, measured and left alone.** A sweep of
+   every `to_thread` / `run_in_executor` in `src/` turned up two more, and an
+   earlier draft of this note claimed there were none — corrected here, because
+   an unverified "sweep found nothing" is worth less than nothing:
+
+   | span | where it runs | 45 s stereo | 181 s stereo |
+   | --- | --- | --- | --- |
+   | `pcm._planar_from_interleaved` | **on the event loop** | 6.6 ms | 27.7 ms |
+   | `pcm.interleave`, inside `write_wav` | worker thread | 9.1 ms | 34.2 ms |
+
+   Both are C-level `array` slicing rather than Python loops — about 100x cheaper
+   per sample than the two spans this feature fixed — and both run **once per
+   job** rather than per chunk or per block. Against 120.9 ms sixteen times and
+   250 ms twelve times, they are a different order of problem. They are also
+   plainly the same *class*, they scale with track length, and
+   `_planar_from_interleaved` is on the loop with no thread at all, so on very
+   long material they will eventually be worth a number. Reported rather than
+   fixed, which is the rule this feature exists because 044 followed.
+3. **A measurement harness that spawns processes needs a marker, not just a
    cleanup path.** The leak above cost three runs and produced a confident wrong
    answer before it was caught. The generalisable part: a `finally` protects
    against your code failing, not against your process being killed, so anything
    that starts background load should be findable and killable by something it
    stamped on itself.
-3. **Not touched, and deliberately.** `_apply_fades` also runs on the loop, but
+4. **An instrument should collect what it reads.** Review measured the first
+   `LoopTicker` collecting **101 299 samples (~11 MB)** to read the 3 351 inside
+   the window it asserts on — 97% of it gathered during the ffmpeg decode, at the
+   cost of a pegged core, and growing with a fixture length the test's own
+   failure message invites you to increase. It now records only while armed by
+   the `separating` stage callback: **2 728 samples, ~64 KB**, independent of the
+   decode. It also made the behavioural test strictly sharper — see the mutation
+   record.
+5. **Not touched, and deliberately.** `_apply_fades` also runs on the loop, but
    it is ~3.5 k iterations once per job (sub-millisecond) rather than per chunk.
    `chunk_seconds` / `chunk_delay_seconds` remain constructor keyword arguments
    with no `config.py` exposure — 044 established that and the brief puts it out
    of scope. `frontend/e2e/**` and `playwright.config.ts` are untouched.
-4. **044's third acceptance criterion is now deliverable.** 044 marked "the tier
+6. **044's third acceptance criterion is now deliverable.** 044 marked "the tier
    passes repeatedly under deliberate contention" **not met**, saying it "becomes
    deliverable when the stall is fixed". The stall is fixed; re-running that
    criterion is 044's ledger to close, not this feature's, and no E2E file was
    touched here.
-5. **`StemPlayer` cannot recover from a failed result fetch** (044's finding 2)
+7. **`StemPlayer` cannot recover from a failed result fetch** (044's finding 2)
    is still open and still needs its own number.

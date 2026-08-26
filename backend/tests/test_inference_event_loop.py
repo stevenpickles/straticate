@@ -1,4 +1,4 @@
-"""Feature 045: the fake separator's chunk loop must not occupy the event loop.
+"""Feature 045: pure-Python audio work must not occupy the event loop.
 
 Feature 044 diagnosed a stall that had been read as Playwright flakiness for
 three waves: ``FakeSeparator._run_chunks`` filtered every chunk inline, and the
@@ -7,26 +7,35 @@ length of a chunk the backend served nothing — not REST, not the feature 013
 WebSocket hub, not the progress of the job doing the filtering. It measured
 0.37 s per chunk on a quiet machine and 8.1 s at 17x CPU contention.
 
-Three tests, deliberately different in kind. Two are **structural and
-timing-free**, so they can never be flaky and between them pin the whole
-mechanism: the filtering happens on a thread that is not the loop's, and it is
-handed over in units no larger than :data:`FILTER_BLOCK_FRAMES`. Both halves are
-load-bearing — feature 045 measured that a thread hop *per chunk*, which is what
+**There are two such places, and this module covers both.** The chunk loop is
+one; :func:`straticate.inference.stereo.apply_stereo_handling_async` is the
+other, and its 12-second fold block was the same defect on the ``mono`` path —
+120.9 ms of GIL-holding work per hop, sixteen times over a three-minute track.
+Both are sized by the same rule now: a block is about a millisecond, because a
+millisecond is what the event loop can be asked to wait.
+
+Three of these tests are **structural or near-structural** and pin the
+mechanism: the filtering happens on a thread that is not the loop's; it is
+handed over in units no larger than :data:`FILTER_BLOCK_FRAMES`; and no single
+fold hop is a meaningful share of the fold. The unit-size half is load-bearing —
+feature 045 measured that a thread hop *per chunk*, which is what
 :class:`~straticate.inference.torch_separator.TorchSeparator` does, leaves the
 stall almost exactly where it was (a 271 ms 95th percentile became 266 ms),
 because pure-Python arithmetic holds the GIL for the whole hop. It is the return
-to the loop between blocks that serves requests.
+to the loop between blocks that serves requests, so a test that only asks
+"did it leave the loop?" passes for a version that is no better.
 
-The third is the **behavioural** form the feature brief asks for: something cheap
-is awaited on the loop throughout a real separation, and the loop is required to
-have stayed responsive while chunks were being filtered. It measures itself
-against *this machine's* chunk time rather than against a constant, because both
-the stall and the tolerance scale with how busy the machine is — a fixed
-millisecond budget would be either meaningless on a fast host or flaky on a
-loaded one.
+The fourth is the **behavioural** form the feature brief asks for: something
+cheap is awaited on the loop throughout a real separation, and the loop is
+required to have stayed responsive while chunks were being filtered. It measures
+itself against *this machine's* chunk time rather than against a constant,
+because both the stall and the tolerance scale with how busy the machine is — a
+fixed millisecond budget would be either meaningless on a fast host or flaky on
+a loaded one. For the same reason the fold test compares one hop against the
+whole fold rather than against a number of milliseconds.
 
-All three fail against the pre-045 code; the mutation output is recorded in
-``docs/features/045-fake-separator-event-loop.md``.
+Every one fails against the code it was written for; the mutation output is
+recorded in ``docs/features/045-fake-separator-event-loop.md``.
 """
 
 import asyncio
@@ -45,9 +54,12 @@ from straticate.inference import (
     SeparatorInfo,
 )
 from straticate.inference import fake as fake_module
+from straticate.inference import stereo as stereo_module
 from straticate.inference.fake import FILTER_BLOCK_FRAMES
+from straticate.inference.pcm import PcmAudio
+from straticate.inference.stereo import FOLD_BLOCK_FRAMES, apply_stereo_handling_async
 from straticate.jobs import CancellationToken
-from straticate.schemas.jobs import JobState, SeparationConfiguration
+from straticate.schemas.jobs import JobState, SeparationConfiguration, StereoHandling
 from tests.audio_fixtures import write_tone_wav
 
 JOB_ID = "01JOB000000000000000000000"
@@ -105,30 +117,49 @@ class LoopTicker:
     """Something cheap awaited on the event loop, recording how long it waited.
 
     Each iteration yields with ``asyncio.sleep(0)`` and records how long it took
-    to be scheduled again, stamped so the caller can look at one stage's window.
-    A *timed* sleep would measure the platform's timer granularity as much as
-    the loop's health — 15.6 ms of it on Windows, comparable to a chunk at this
-    fixture size — whereas a bare yield goes straight through the ready queue
-    and is limited only by whether the loop is running at all.
+    to be scheduled again. A *timed* sleep would measure the platform's timer
+    granularity as much as the loop's health — 15.6 ms of it on Windows,
+    comparable to a chunk at this fixture size — whereas a bare yield goes
+    straight through the ready queue and is limited only by whether the loop is
+    running at all.
+
+    It records **only while armed**, and drops everything else as it arrives.
+    An earlier version stamped every sample and filtered at the end, which on
+    the three-second fixture collected ~101 000 samples to read 3 300 of them:
+    97% of the memory, and all of the CPU behind it, spent on the ffmpeg decode
+    that runs before the window opens. That cost scales with the fixture, and
+    this test's own failure message suggests lengthening the fixture.
     """
 
     def __init__(self) -> None:
-        self.gaps: list[tuple[float, float]] = []
+        self.gaps: list[float] = []
+        self._armed = False
+        self._previous = 0.0
         self._stop = asyncio.Event()
 
     async def run(self) -> None:
-        previous = time.perf_counter()
+        self._previous = time.perf_counter()
         while not self._stop.is_set():
             await asyncio.sleep(0)
             now = time.perf_counter()
-            self.gaps.append((now, now - previous))
-            previous = now
+            if self._armed:
+                self.gaps.append(now - self._previous)
+            self._previous = now
+
+    def arm(self) -> None:
+        """Begin recording. The first gap is measured from this call."""
+        self._previous = time.perf_counter()
+        self._armed = True
+
+    def disarm(self) -> None:
+        """Stop recording, keeping what was collected."""
+        self._armed = False
 
     def stop(self) -> None:
         self._stop.set()
 
-    def worst_between(self, start: float, end: float) -> tuple[float, float]:
-        """The 99th percentile and the maximum wait inside ``[start, end]``.
+    def worst(self) -> tuple[float, float]:
+        """The 99th percentile and the maximum wait recorded while armed.
 
         The assertion is on the percentile rather than the maximum because the
         maximum measures the *host*: on a machine oversubscribed several times
@@ -140,24 +171,25 @@ class LoopTicker:
         sample at a full chunk, so the percentile catches it just as surely and
         does not fail for the host's reasons.
         """
-        window = sorted(gap for stamp, gap in self.gaps if start <= stamp <= end)
-        assert window, "the ticker never ran inside the window"
+        window = sorted(self.gaps)
+        assert window, "the ticker recorded nothing — was it ever armed?"
         index = min(len(window) - 1, int(0.99 * len(window)))
         return window[index], window[-1]
 
 
-class StageWindow:
-    """Records when the ``separating`` stage began and ended."""
+class SeparatingWindow:
+    """A stage callback that arms a ticker for the ``separating`` stage only."""
 
-    def __init__(self) -> None:
-        self.start: float | None = None
-        self.end: float | None = None
+    def __init__(self, ticker: LoopTicker) -> None:
+        self._ticker = ticker
+        self.seen = False
 
     def __call__(self, stage: JobState) -> None:
         if stage is JobState.SEPARATING:
-            self.start = time.perf_counter()
-        elif self.start is not None and self.end is None:
-            self.end = time.perf_counter()
+            self.seen = True
+            self._ticker.arm()
+        elif self.seen:
+            self._ticker.disarm()
 
 
 def record_filter_calls(monkeypatch: pytest.MonkeyPatch) -> tuple[list[int], set[int]]:
@@ -249,14 +281,14 @@ async def test_the_loop_stays_responsive_while_chunks_are_filtered(tmp_path: Pat
     # the loop throughout, and the loop required to have kept answering it.
     separator = make_separator()
     ticker = LoopTicker()
-    window = StageWindow()
+    window = SeparatingWindow(ticker)
     ticking = asyncio.create_task(ticker.run())
 
     await separate(tmp_path, separator, stage_callback=window)
     ticker.stop()
     await ticking
 
-    assert window.start is not None and window.end is not None
+    assert window.seen, "the separating stage was never announced"
     stats = separator.runtime_stats()
     assert stats is not None
     chunk_seconds = stats.processing.mean_chunk_seconds
@@ -271,10 +303,91 @@ async def test_the_loop_stays_responsive_while_chunks_are_filtered(tmp_path: Pat
         "test to be able to see a stall; lengthen the fixture"
     )
 
-    worst, peak = ticker.worst_between(window.start, window.end)
+    worst, peak = ticker.worst()
     assert worst < STALL_FRACTION * chunk_seconds, (
         f"the event loop was unavailable for {worst * 1000:.1f} ms (p99; peak "
         f"{peak * 1000:.1f} ms) during the chunk loop, against a mean chunk of "
         f"{chunk_seconds * 1000:.1f} ms — the per-chunk filtering is blocking "
         "the loop"
+    )
+
+
+# -- the mono fold ----------------------------------------------------------
+
+
+FOLD_SECONDS = 4.0
+"""Fixture length for the fold. Enough audio for many blocks at the shipped size.
+
+Chosen so the test's own premise is visible: at ``FOLD_BLOCK_FRAMES`` this is
+tens of blocks, and at the ``1 << 19`` the constant used to be it is a single
+one — which is exactly the state the assertion below rejects.
+"""
+
+FOLD_HOP_FRACTION = 0.25
+"""Share of the whole fold that one thread hop may account for.
+
+Relative, for the reason the chunk test's tolerance is relative: the absolute
+number is a property of the machine, but "one hop is a quarter of the work" is a
+property of the code. Before the constant was resized a four-second fixture
+folded in **one** hop — a share of 1.0 — and a three-minute track in sixteen, at
+120.9 ms each. After, a hop is ~0.5% of the fold.
+"""
+
+
+def wide_stereo(seconds: float, sample_rate: int = 44100) -> PcmAudio:
+    """Two decorrelated channels of full-scale audio — the fold's real input.
+
+    Deterministic and cheap to build: the fold's cost is per frame and does not
+    care what the samples are, but the values still cross zero, hit both rails
+    and land on odd sums, so a rounding change would show up as a different
+    result rather than as a lucky match.
+    """
+    frames = int(seconds * sample_rate)
+    left = array("h", ((index * 37) % 65536 - 32768 for index in range(frames)))
+    right = array("h", ((index * 53) % 65536 - 32768 for index in range(frames)))
+    return PcmAudio(sample_rate=sample_rate, channels=(left, right))
+
+
+async def test_no_single_fold_hop_occupies_the_loop_for_long(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # ``apply_stereo_handling_async`` awaits one ``asyncio.to_thread`` per block
+    # that ``fold_blocks`` yields, so the longest block *is* the longest wait it
+    # imposes on the event loop. Timing them from inside the generator measures
+    # the hop as the loop experiences it, and counting them ties the timing to
+    # the async path rather than to the iterator in isolation.
+    hops: list[float] = []
+    sizes: list[int] = []
+    original = stereo_module.fold_blocks
+
+    def recording(source: PcmAudio, **kwargs: Any) -> Any:
+        blocks = original(source, **kwargs)
+        while True:
+            started = time.perf_counter()
+            block = next(blocks, None)
+            if block is None:
+                return
+            hops.append(time.perf_counter() - started)
+            sizes.append(len(block))
+            yield block
+
+    monkeypatch.setattr(stereo_module, "fold_blocks", recording)
+
+    source = wide_stereo(FOLD_SECONDS)
+    folded = await apply_stereo_handling_async(source, StereoHandling.MONO, CancellationToken())
+
+    assert folded.channel_count == 1
+    assert folded.frame_count == source.frame_count
+    assert sum(sizes) == source.frame_count, "every frame must be folded exactly once"
+    assert max(sizes) <= FOLD_BLOCK_FRAMES
+
+    total = sum(hops)
+    assert total > 0.005, (
+        f"the whole fold took {total * 1000:.1f} ms — too little work for this "
+        "test to be able to see a stall; lengthen the fixture"
+    )
+    assert max(hops) < FOLD_HOP_FRACTION * total, (
+        f"one fold hop held the event loop for {max(hops) * 1000:.1f} ms of a "
+        f"{total * 1000:.1f} ms fold ({len(hops)} hops) — a job that asked for "
+        "the mono fold stalls the backend for that long, as many times"
     )

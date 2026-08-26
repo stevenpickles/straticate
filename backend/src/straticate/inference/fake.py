@@ -85,11 +85,21 @@ compute thread when the waiter is a selector that has to be woken first.
 So the unit of work is a **block of frames**, not a chunk: :func:`_filter_block`
 is dispatched with :func:`asyncio.to_thread` once per
 :data:`FILTER_BLOCK_FRAMES`, and it is the *return* to the event loop between
-blocks — not the GIL's preemption during one — that gets requests served. The
-same shape as :func:`straticate.inference.stereo.apply_stereo_handling_async`,
-which awaits one thread hop per fold block for the same reason. Measured
-against a standalone server with one TCP connection per sample, over six chunks
-of the real per-chunk workload:
+blocks — not the GIL's preemption during one — that gets requests served.
+
+:func:`straticate.inference.stereo.apply_stereo_handling_async` has the same
+shape, and it is worth being precise about why, because **its shape was not
+enough**. It awaited one thread hop per fold block long before this feature —
+but its block was ``1 << 19`` frames, twelve seconds of audio and 120.9 ms of
+GIL-holding work, because feature 041 sized it for memory and cancellation and
+had no reason to think about the loop. Structurally identical, and by the
+argument above still the defect. Feature 045 resized it to
+:data:`~straticate.inference.stereo.FOLD_BLOCK_FRAMES` = ``1 << 12`` by the same
+rule this constant uses. **Splitting into blocks is not the property that
+matters; the size of a block is.**
+
+Measured against a standalone server with one TCP connection per sample, over
+six chunks of the real per-chunk workload:
 
 =====================  ==============  ==============
 work shape             during-job p50  during-job p95
