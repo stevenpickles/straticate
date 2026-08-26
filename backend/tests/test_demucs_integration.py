@@ -315,3 +315,81 @@ async def test_cuda_runtime_stats_report_real_memory(
     # NVML is optional (ARCHITECTURE.md §12): present or absent, both are legal.
     assert device.utilization is None or 0.0 <= device.utilization <= 1.0
     assert device.temperature_celsius is None or device.temperature_celsius > 0.0
+
+
+@pytest.mark.gpu
+async def test_peak_device_memory_is_flat_across_track_lengths(
+    catalog: ModelCatalog,
+    installed_weights: Path,
+    parameters: DemucsParameters,
+    tmp_path: Path,
+) -> None:
+    """Feature 038's acceptance criterion, on the hardware it is a claim about.
+
+    Twelve times the audio, nine times the chunks, the *same* peak. Before 038
+    the decoded mixture, the accumulator and the weight vector were all
+    device-resident and whole-track, so the peak grew at ≈1.85 MiB per second of
+    audio (feature 028's sweep) — over the 220 s of extra audio below, ≈407 MiB.
+    The tolerance is a small fraction of that.
+
+    It is not *quite* zero here and the reason is worth knowing: ``shift`` and
+    ``scale`` are reductions over the whole mono reference, and a reduction is
+    the one operation that does not give the same bits on the host as on the
+    device, so the reference is moved to the card for them — four bytes per
+    sample, transiently, before the first forward pass. That is below the forward
+    pass's own ~382 MiB working set until about **38 minutes** of audio, after
+    which peak *allocated* rises at 0.168 MiB per second (616 MiB measured at 45
+    minutes, 768 at 60, against 550 flat below the crossover). Feature 038's
+    document has that sweep and why the reduction cannot move to the host.
+
+    Both clips run in **one process on one separator**, deliberately: the
+    skeleton resets the CUDA peak per run, and comparing two runs that share a
+    resident network is what isolates the part of the peak that scales.
+
+    On a GPU host, run this with ``uv run --no-sync`` or it will not be a GPU
+    run — see DEVELOPMENT.md, *PyTorch and CUDA*.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("no CUDA device is available")
+
+    separator = DemucsSeparator(
+        separator_info_from_model(catalog.get_model(MODEL_ID)),
+        weights_file=installed_weights,
+        parameters=parameters,
+    )
+    peaks: dict[float, int] = {}
+    chunks: dict[float, int] = {}
+    for seconds in (20.0, 240.0):
+        reports: list[SeparationProgress] = []
+        source = write_tone_wav(
+            tmp_path / f"clip-{seconds:.0f}.wav", seconds=seconds, channels=2, sample_rate=44100
+        )
+        await separator.separate(
+            source,
+            SeparationConfiguration(
+                audio_id="01AUDIO0000000000000000000",
+                mode_id="standard_stems",
+                quality_id="balanced",
+                device_id="cuda:0",
+            ),
+            reports.append,
+            CancellationToken(),
+            job_id=JOB_ID,
+            output_dir=tmp_path / f"stems-{seconds:.0f}",
+        )
+        stats = separator.runtime_stats()
+        assert stats is not None and stats.device is not None
+        peaks[seconds] = stats.device.memory_peak_bytes
+        chunks[seconds] = reports[-1].chunks_total
+
+    growth = peaks[240.0] - peaks[20.0]
+    print(
+        f"\n[038] cuda:0 peak {peaks[20.0] / 1024**2:.1f} MiB at 20 s "
+        f"({chunks[20.0]} chunks) -> {peaks[240.0] / 1024**2:.1f} MiB at 4 min "
+        f"({chunks[240.0]} chunks); growth {growth / 1024**2:+.1f} MiB"
+    )
+    assert chunks[240.0] > 5 * chunks[20.0], "the longer clip must really be more chunks"
+    assert growth < 64 * 1024**2, (
+        f"peak grew by {growth / 1024**2:.1f} MiB over 220 s of extra audio; "
+        f"something whole-track is back on the device"
+    )

@@ -25,7 +25,9 @@ autocast) and stem assembly (a residual computed by subtraction, versus the
 network's own sources mapped onto advertised names). Everything else — run-state
 lifecycle, stage sequencing, decode plumbing, device placement, the CUDA peak
 reset, cleanup and RTF — is here, once. The PCM bridge is one module further
-out, in :mod:`straticate.inference.torch_audio`: this class never touches it,
+out, in :mod:`straticate.inference.torch_audio`, and the host-resident
+overlap-add buffer feature 038 added is beside it in
+:mod:`straticate.inference.torch_overlap_add`: this class never touches either,
 only the two subclasses do, inside their holes.
 
 Adding a third architecture is therefore those two methods, a parameters
@@ -251,12 +253,14 @@ class TorchSeparator(ABC):
     ) -> Tensor:
         """The chunked loop over the mixture. **The extension point.**
 
-        This is one of the two methods a backend implements, and the one
-        **feature 038 (streaming overlap-add, bounded VRAM) will work inside**.
-        It is deliberately given the whole loop rather than a per-chunk callback:
-        038's job is to change how the accumulator is held — today it is
-        whole-track and its peak grows linearly with the length of the input —
-        and that is a decision about the loop, not about a chunk.
+        This is one of the two methods a backend implements, and it is
+        deliberately given the whole loop rather than a per-chunk callback:
+        feature 038's job was to change how the accumulator is held, and that is
+        a decision about the loop rather than about a chunk. It now holds the
+        accumulator on the **host**, through
+        :class:`~straticate.inference.torch_overlap_add.HostOverlapAdd`, which
+        both backends stream into and which a third would too — the shared piece
+        of 038 is that class, not another layer of loop.
 
         Runs in a worker thread (:meth:`_separate` dispatches it with
         :func:`asyncio.to_thread`), so it may block, and its callbacks arrive off

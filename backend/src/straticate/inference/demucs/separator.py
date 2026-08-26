@@ -54,7 +54,10 @@ Stages, all of them real work this separator actually performs:
 by a triangular envelope and summed into an accumulator that is finally divided
 by the accumulated weight — the same overlap-add upstream's ``apply_model``
 performs, with the same window, stride, triangular transition and centred
-padding, reimplemented here so that it can report progress after every window,
+padding. Since feature 038 that accumulator is on the **host** and only the
+window in flight is on the compute device, so peak VRAM is a function of the
+window rather than of the length of the track. It is reimplemented here rather
+than called so that it can report progress after every window,
 check the cancellation token between windows, and run inside
 :func:`asyncio.to_thread`. Every window is one forward pass through a
 42-million-parameter hybrid transformer, so ``chunks_completed / chunks_total``
@@ -101,6 +104,7 @@ from straticate.inference.model_errors import (
 )
 from straticate.inference.pcm import PcmAudio
 from straticate.inference.torch_audio import pcm_to_tensor, tensor_to_pcm, to_source_channels
+from straticate.inference.torch_overlap_add import HostOverlapAdd
 from straticate.inference.torch_separator import RunState, TorchSeparator
 from straticate.jobs.cancellation import CancellationToken
 
@@ -208,8 +212,9 @@ class DemucsParameters:
         the forward pass allocates the same working set whatever this is.
         Measured on a 60 s clip, an RTX 4060 and this checkpoint: 88 200 samples
         peaked at 660.6 MiB and 343 980 at 661.7 MiB — a 1 MiB difference for
-        3.6x the wall clock (40 forward passes instead of 11). What *does* move
-        the peak is the length of the track (feature 038).
+        3.6x the wall clock (40 forward passes instead of 11). The length of the
+        track used to move the peak instead; since feature 038 streamed the
+        overlap-add onto the host, nothing much moves it at all.
         """
         return self.training_samples if self.chunk_samples is None else self.chunk_samples
 
@@ -362,7 +367,7 @@ class DemucsSeparator(TorchSeparator):
         cancellation_token: CancellationToken,
         device: torch.device,
     ) -> Tensor:
-        """The chunked overlap-add loop. Runs in a worker thread.
+        """The chunked overlap-add loop, streamed. Runs in a worker thread.
 
         Returns the per-source estimates as a ``(sources, channels, samples)``
         float tensor on the CPU, in the **network's** source order — the
@@ -373,39 +378,49 @@ class DemucsSeparator(TorchSeparator):
         ``demucs.api.Separator.separate_tensor`` does and what the model expects
         to see.
 
-        **Every whole-track step here is in place, deliberately.** The mixture
-        and the output accumulator are resident on the device for the length of
-        the run, so each full-length temporary is another
-        ``sources x channels x samples x 4`` bytes — 1.4 MiB per second of audio
-        for the accumulator alone. Written with ordinary operators
-        (``normalized = (mixture - shift) / scale``, then
-        ``estimates = accumulator / weights``, then ``* scale``, then
-        ``+ shift``) the peak grew at **5.85 MiB per second of audio**,
-        measured on an RTX 4060; in place it is **1.85**, and a ten-minute
-        track's peak allocation fell from 4,023 MiB to 1,662 MiB. That does not
-        make the peak independent of the track — it cannot, while the
-        accumulator is whole-track; that is feature 038's problem — but it cuts
-        the slope by more than a factor of three, which decides whether a 4 GiB
-        card finishes a ten-minute file. The figures are in
-        ``docs/features/028-demucs-four-stem.md``.
+        **Nothing whole-track is on the compute device** (feature 038), with one
+        deliberate and bounded exception below. The decoded mixture stays on the
+        host and one window at a time is copied across; the estimate comes
+        straight back into a
+        :class:`~straticate.inference.torch_overlap_add.HostOverlapAdd`, which
+        holds the sum and the weight. Feature 028 had already cut the slope from
+        5.85 to 1.85 MiB per second of audio by writing every whole-track step in
+        place, and a ten-minute track's peak allocation from 4,023 MiB to
+        1,662 MiB — but it could not make the peak *independent* of the track
+        while the accumulator was device-resident. It is not any more, so the
+        in-place discipline now applies to host tensors, where it costs RAM
+        rather than VRAM, and the peak on the card is a function of the window.
+
+        **The exception is the normalization statistics, and it is why they are
+        computed the way they are.** ``shift`` and ``scale`` are reductions over
+        the *whole* mono reference, and a reduction is exactly the operation that
+        is not bit-identical between a CPU cascade sum and a CUDA tree reduction
+        — measured here, ``reference.mean()`` differs by 2 ULP across the two.
+        Feature 038's constraint is bit-identical output, so the reduction stays
+        on the device and the mono reference is moved there for it: **four bytes
+        per sample, transiently**, freed before the first forward pass. The
+        mixdown that produces it (``mean`` over two channels — one addition and
+        one halving per sample, in the only order there is) *is* element-wise and
+        so is computed on the host. The window is then normalized on the device
+        rather than the track, which is the same arithmetic per element and
+        keeps the zero padding past the ends of the track zero, exactly as
+        normalizing the track before cutting it did.
 
         See
         :meth:`straticate.inference.torch_separator.TorchSeparator._run_chunks`
-        for the contract this keeps — and note that it is the method feature 038
-        will work inside.
+        for the contract this keeps.
         """
         parameters = self._parameters
         window = parameters.window_samples
         stride = parameters.stride_samples
 
-        mixture = pcm_to_tensor(source, parameters.audio_channels).to(device)
+        mixture = pcm_to_tensor(source, parameters.audio_channels)
         channels, frames = mixture.shape[0], mixture.shape[-1]
 
-        reference = mixture.mean(dim=0)
+        reference = mixture.mean(dim=0).to(device)
         shift = reference.mean()
         scale = reference.std() + NORMALIZATION_EPSILON
         del reference
-        mixture.sub_(shift).div_(scale)
 
         chunks_total = max(1, math.ceil(frames / stride))
         run.chunks_total = chunks_total
@@ -414,20 +429,18 @@ class DemucsSeparator(TorchSeparator):
 
         envelope = _transition_window(window, parameters.transition_power, device)
         sources = len(parameters.sources)
-        accumulator = torch.zeros((sources, channels, frames), dtype=torch.float32, device=device)
-        weights = torch.zeros(frames, dtype=torch.float32, device=device)
+        accumulator = HostOverlapAdd((sources, channels, frames), frames)
 
         for index, offset in enumerate(range(0, frames, stride), start=1):
             cancellation_token.raise_if_cancelled()
             chunk_started = time.monotonic()
             length = min(window, frames - offset)
-            part = _centred_window(mixture, offset, length, window)
+            part = _centred_window(mixture, offset, length, window, device, shift, scale)
 
             estimate = _center_trim(self._forward(part), length)
 
             faded = envelope[:length]
-            accumulator[..., offset : offset + length] += estimate * faded
-            weights[offset : offset + length] += faded
+            accumulator.add(offset, estimate * faded, faded)
 
             run.last_chunk_seconds = time.monotonic() - chunk_started
             run.chunk_seconds_total += run.last_chunk_seconds
@@ -440,9 +453,9 @@ class DemucsSeparator(TorchSeparator):
         # strictly positive, so the divisor is never zero; the clamp is
         # upstream's ``assert sum_weight.min() > 0`` restated as a guard rather
         # than as a crash.
-        accumulator.div_(weights.clamp(min=NORMALIZATION_EPSILON))
-        accumulator.mul_(scale).add_(shift)
-        return accumulator.detach().to("cpu", dtype=torch.float32)
+        estimates = accumulator.resolve(minimum_weight=NORMALIZATION_EPSILON)
+        estimates.mul_(scale.to("cpu")).add_(shift.to("cpu"))
+        return estimates.detach().to("cpu", dtype=torch.float32)
 
     def _forward(self, part: Tensor) -> Tensor:
         """One forward pass, returned as ``(sources, channels, samples)``.
@@ -981,14 +994,41 @@ def _transition_window(window: int, power: float, device: torch.device) -> Tenso
     return (envelope / envelope.max()) ** power
 
 
-def _centred_window(mixture: Tensor, offset: int, length: int, target: int) -> Tensor:
-    """``target`` samples covering ``mixture[..., offset : offset + length]``.
+def _centred_window(
+    mixture: Tensor,
+    offset: int,
+    length: int,
+    target: int,
+    device: torch.device,
+    shift: Tensor,
+    scale: Tensor,
+) -> Tensor:
+    """``target`` normalized samples covering ``mixture[..., offset : offset + length]``.
 
     The extra context is taken **from the surrounding audio** where there is any,
     centred on the requested span, and zero-padded only past the ends of the
     track — which is upstream's ``TensorChunk.padded``. It matters for the final
     window of a track: filling the tail with real preceding audio rather than
     silence is what keeps the model from hearing an artificial edge there.
+
+    ``mixture`` is the **raw** decoded audio on the host (feature 038); this is
+    where a window of it crosses onto the compute device, and the only place
+    that happens. The three steps are then in the order the whole-track version
+    used, which is what makes them bit-identical to it: cut, normalize, pad. Cut
+    and pad only move values about. ``(x - shift) / scale`` is element-wise, so
+    applying it to a window gives that window's samples exactly the values
+    applying it to the track gave them — and doing it *before* the padding is
+    what keeps the samples past the ends of the track at zero rather than at
+    ``-shift / scale``.
+
+    The **first** of the two normalization steps is written out of place on
+    purpose: ``Tensor.to`` returns *self* when the tensor is already on the
+    target device, so on a CPU run an in-place ``sub_`` here would rewrite the
+    caller's decoded mixture, and every later overlapping window would then see
+    audio that had been normalized twice — silently wrong stems, with nothing
+    anywhere reporting a problem. ``sub`` allocates, which breaks the aliasing;
+    ``div_`` on *its* result is then safe and saves the second window-sized
+    allocation, because that result is nobody else's tensor.
     """
     total = int(mixture.shape[-1])
     delta = target - length
@@ -996,7 +1036,8 @@ def _centred_window(mixture: Tensor, offset: int, length: int, target: int) -> T
     end = start + target
     first = max(0, start)
     last = min(total, end)
-    return torch.nn.functional.pad(mixture[..., first:last], (first - start, end - last))
+    part = mixture[..., first:last].to(device).sub(shift).div_(scale)
+    return torch.nn.functional.pad(part, (first - start, end - last))
 
 
 def _center_trim(tensor: Tensor, length: int) -> Tensor:

@@ -49,9 +49,14 @@ class ModelRequirements(BaseModel):
     ``recommended_vram_mb`` is the comfortable figure: a full-length track on a
     card that is also driving a display. Both are measured **whole-device**
     peaks, because the CUDA context and the caching allocator's reservation are
-    part of what a card must have free, not only the tensors. Both also depend
-    on the model's chunking and on how long the track is, so the feature
-    document that sets them records the parameters they were measured at.
+    part of what a card must have free, not only the tensors. Both depend on the
+    model's chunking, and both **may** still depend on how long the track is:
+    feature 038 streamed the overlap-add onto the host, which removed that
+    dependence entirely for Mel-Band RoFormer, but an architecture that reduces
+    over the whole track keeps a residual term — Demucs' normalization
+    statistics do, above about 38 minutes of audio. So the feature document that
+    sets these records the parameters they were measured at, **and the track
+    lengths**, which is why 038 measured out to 90 minutes rather than 10.
     """
 
     recommended_vram_mb: int | None = Field(

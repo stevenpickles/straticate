@@ -45,7 +45,7 @@ actually deliver rather than left asserting something unreachable.
 | HQ vocal separation | **done** — 026, Mel-Band RoFormer |
 | 4-stem separation | **done** — 028, Demucs |
 | Capability-driven mode selection | **done** — 010 derives modes from the catalog; 026 honours `Model.capabilities` at device resolution |
-| Bounded VRAM | **038** — blocking; peak currently grows with track length |
+| Bounded VRAM | **done** — 038 streams the overlap-add onto the host. RoFormer's peak is flat *to the byte* at any length (1,526 MiB allocated, 2,981 whole-device, from 30 s to 60 min); Demucs' is flat to ~38 min and then rises 24× more slowly than before. Host RAM, not VRAM, now limits track length |
 | Production build | **done** — 042; `uvicorn straticate.main:app` serves API and SPA on one port |
 | Release preparation | **043** — CHANGELOG, version bump, manual `dev → main` tag |
 
@@ -119,7 +119,10 @@ second of audio, reaching 2,343 MiB on a 10-minute track), and what a card must
 have free is roughly twice the allocated figure once the CUDA context and the
 allocator's reservation are counted — 4,213 MiB for that track. The corrected
 entry is `recommended_vram_mb: 6144` with a new `minimum_vram_mb: 4096` floor;
-036's document carries the method and the full sweeps.
+036's document carries the method and the full sweeps. **Feature 038 has since
+superseded both figures**: streaming the overlap-add onto the host made the peak
+flat with track length, and the entry now reads `recommended_vram_mb: 4096` /
+`minimum_vram_mb: 4096` — see 038's document for the before-and-after sweep.
 
 
 ### M1 — fake-separator end-to-end
@@ -207,7 +210,7 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 035 | First-run model install affordance (UI)      | MERGED  | 025, 032   | `035-install-affordance` | #41 |
 | 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
 | 037 | Model management UI (install/remove/browse)  | MERGED  | 025, 035   | `037-model-management-ui` | #44 |
-| 038 | Streaming overlap-add (bounded VRAM)         | PLANNED | 026        | | |
+| 038 | Streaming overlap-add (bounded VRAM)         | PR OPEN | 026, 028, 039 | `038-streaming-overlap-add` | #55 |
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
 | 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |
