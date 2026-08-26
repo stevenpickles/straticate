@@ -270,7 +270,7 @@ open questions.
 | 043 | Release preparation for v0.1.0               | MERGED  | 038, 042   | `043-release-preparation` | #62 |
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
-| 046 | Release workflow and release-process corrections | PR OPEN | 043        | `046-release-workflow` | — |
+| 046 | Release workflow and release-process corrections | MERGED  | 043        | `046-release-workflow` | #65 |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,

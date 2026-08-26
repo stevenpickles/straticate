@@ -34,9 +34,17 @@ See §3 of [ARCHITECTURE.md](ARCHITECTURE.md). Backend code lives in
 - Permanent branches: `main` (releases only) and `dev` (integration).
 - **Never push directly to `main` or `dev`.** Never force-push or delete them.
 - **Every feature PR targets `dev`.** Feature branches never target `main`.
+- **Exception: a release branch.** During a release, `release/vX.Y.Z` exists
+  and work aimed at that release branches from it and PRs back into it, still
+  as a numbered feature. It is not a licence to push directly — the same rules
+  apply, only the base changes. Unless your assignment names a release branch,
+  your base is `dev`.
 - Work happens on numbered feature branches: `NNN-short-description`, branched
   from up-to-date `dev`. Numbers are zero-padded, sequential, never reused.
-- PR titles: `[NNN] Feature Name`. Squash merge.
+- PR titles: `[NNN] Feature Name`. Squash merge. The one PR that does **not**
+  squash is the release PR `release/vX.Y.Z` → `main`, which rebase-merges; it
+  is the project owner's to open and merge, never an agent's. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#release-process).
 
 ## Your assignment
 
