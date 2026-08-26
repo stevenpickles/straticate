@@ -233,7 +233,25 @@ Three things. **None of them is a code defect**, and none was fixed here.
 
 ## Known limitations
 
-- **Nothing here was tested on Linux or macOS.** The clean run is one clone on
+- **CI took about half an hour to start on this PR, because GitHub Actions was
+  in a major outage.** Recorded because the delay looked at first like a fault
+  in the branch and was not. Actions went into a **major outage at 2026-08-26
+  15:11 UTC** (a database primary failover, then upstream Vitess issues,
+  mitigated by throttling). PR #62 was opened at 17:00 UTC and for roughly
+  thirty minutes received **zero** check runs — `check-runs` on its head SHA
+  returned `total_count: 0`, nothing queued or waiting, the workflow `active`,
+  and closing and reopening the PR (which normally re-fires `pull_request`)
+  changed nothing. The throttled queue then burned down and all three jobs
+  dispatched normally. If this happens again: check `githubstatus.com` before
+  suspecting the workflow file.
+
+  While it was unclear, every gate CI runs was run locally, **including the
+  Playwright `e2e` tier** that `AGENTS.md`'s quality bar does not list. That was
+  worth doing anyway — but it does not substitute for CI, because the one thing
+  only CI covers is **Ubuntu**, and everything measured in this document is
+  Windows.
+
+- **Nothing here was tested on Linux or macOS** by hand. The clean run is one clone on
   one Windows 11 host. The README's commands are platform-neutral and CI builds
   and tests both toolchains on Ubuntu on every PR, but "followed the README from
   a clean checkout" is a claim about **Windows** in this document, and it should
