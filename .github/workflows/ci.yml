@@ -1,10 +1,16 @@
 name: CI
 
+# `release/**` is here so that work on a release branch is verified the same way
+# work on `dev` is. Without it a PR into `release/vX.Y.Z` reports no checks at
+# all, and the release branch's content would first be tested by the release PR
+# into `main` — the last moment anyone wants to discover a problem. Tags are
+# deliberately absent: the tag push publishes the release (`release.yml`) and
+# points at a commit this pipeline has already passed on.
 on:
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, 'release/**']
   push:
-    branches: [dev, main]
+    branches: [dev, main, 'release/**']
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

@@ -1,0 +1,76 @@
+name: Release
+
+# Formal releases are cut by pushing an annotated tag to `main`; nothing else
+# publishes one. `ci.yml` deliberately keeps its `push` trigger to branches, so
+# the tag push runs this workflow alone — the merge that put the commit on
+# `main` already ran the full pipeline against exactly this tree.
+on:
+  push:
+    tags:
+      - 'v*'
+
+# `gh release create` writes to the Releases API. Nothing else here needs a
+# token, so the job is otherwise read-only.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      # Full history and tags: the guards below need the tag *object* (to prove
+      # it is annotated) and `main` (to prove the commit is released code, not
+      # something tagged off a feature branch by accident).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # CONTRIBUTING.md requires an annotated tag. A lightweight tag carries no
+      # tagger, message or date, so the release would silently lose the
+      # provenance the process exists to record. `git cat-file -t` answers
+      # "tag" for an annotated tag and "commit" for a lightweight one.
+      - name: The tag is annotated
+        run: |
+          kind=$(git cat-file -t "$GITHUB_REF_NAME")
+          if [ "$kind" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag ($kind). Releases are cut from annotated tags: git tag -a $GITHUB_REF_NAME -m 'Straticate $GITHUB_REF_NAME'"
+            exit 1
+          fi
+          git for-each-ref "refs/tags/$GITHUB_REF_NAME" \
+            --format='tagger: %(taggername) %(taggerdate:iso)%0amessage: %(contents:subject)'
+
+      # Release PRs into `main` are rebase-merged, so `main` accumulates the
+      # commits rather than one squashed blob — which means "reachable from
+      # main" is the honest test, and it still admits a tag placed on an
+      # earlier released commit. A tag pushed anywhere else stops here before
+      # anything is published.
+      - name: The tagged commit is on main
+        run: |
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not reachable from origin/main. Only commits merged into main are released."
+            exit 1
+          fi
+
+      # Reads CHANGELOG.md, refuses to continue unless the tag, the packaged
+      # version and the changelog heading are the same version, and writes the
+      # section body out as the release notes. See the script's docstring.
+      - name: Assemble the release notes
+        run: python .github/scripts/release_notes.py --tag "$GITHUB_REF_NAME" --output "$RUNNER_TEMP/notes.md"
+
+      # `--verify-tag` refuses to invent a tag if the ref somehow is not there,
+      # so the release can only ever describe a tag that already exists.
+      # Deliberately no built assets: Straticate is run from a checkout
+      # (README.md), there is no published package or binary, and a release
+      # carrying an unbuildable or stale artifact would be worse than one
+      # carrying none. Add them here when there is something to ship.
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Straticate $GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag
+          echo "::notice::Published $GITHUB_REF_NAME"
