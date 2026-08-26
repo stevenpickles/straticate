@@ -44,11 +44,39 @@ cd backend && uv sync --extra torch && uv run python -m straticate
 Then open **<http://127.0.0.1:8000>**. The same process serves the interface and
 the API; nothing else needs to be running.
 
-`--extra torch` installs PyTorch, which the real separation models need. It is
-the CPU build; installing a CUDA build is one documented command and changes
-nothing else (see [DEVELOPMENT.md](DEVELOPMENT.md), *PyTorch and CUDA*). Model
+`--extra torch` installs PyTorch, which the real separation models need. Model
 weights are not bundled either: the app shows you each model's licence terms and
 downloads only the one you choose, the first time you ask for a separation.
+
+### If you have an NVIDIA GPU, do this too
+
+The commands above install the **CPU build** of PyTorch. That is deliberate — it
+keeps CI lean and is the right default on macOS and Windows — but it is slow:
+Vocal Isolation runs at roughly 0.3x real time on CPU, about **ten minutes** for
+a three-minute track, against **well under a minute** on a GPU (~40 s on an
+RTX 4060 Laptop).
+
+Swap that one wheel. Nothing else changes — no code, no settings, no API. Device
+detection starts reporting your GPU and jobs resolve to it automatically:
+
+```bash
+cd backend && uv pip install --reinstall-package torch \
+  --index-url https://download.pytorch.org/whl/cu130 torch
+```
+
+**Then drop `uv sync --extra torch` from the command you start the app with.**
+`uv sync` re-pins `torch` from the lock file, which puts the CPU build back — so
+after the swap, the every-time command is just:
+
+```bash
+cd backend && uv run python -m straticate
+```
+
+If `uv` reports that it cannot find `torch`, you need a different `cuNNN` index,
+not a different flag: `cu130` carries a `torch 2.13.0` wheel for Linux and
+Windows, and other indexes may not. See [DEVELOPMENT.md](DEVELOPMENT.md),
+*PyTorch and CUDA*, for how to choose one and why this is a separate command
+rather than a flag on the first.
 
 `STRATICATE_HOST`, `STRATICATE_PORT` and the rest of the settings are documented
 in `backend/src/straticate/config.py`. Straticate binds to loopback and has no
