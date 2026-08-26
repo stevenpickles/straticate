@@ -210,13 +210,13 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 | 035 | First-run model install affordance (UI)      | MERGED  | 025, 032   | `035-install-affordance` | #41 |
 | 036 | GPU validation follow-ups                    | MERGED  | 026, 029   | `036-gpu-validation-followups` | #42 |
 | 037 | Model management UI (install/remove/browse)  | MERGED  | 025, 035   | `037-model-management-ui` | #44 |
-| 038 | Streaming overlap-add (bounded VRAM)         | PR OPEN | 026, 028, 039 | `038-streaming-overlap-add` | #55 |
+| 038 | Streaming overlap-add (bounded VRAM)         | MERGED  | 026, 028, 039 | `038-streaming-overlap-add` | #55 |
 | 039 | Shared separator skeleton (de-duplicate)     | MERGED  | 026, 028   | `039-shared-separator-skeleton` | #48 |
 | 040 | Free-disk-space endpoint for installs        | MERGED  | 025, 037   | `040-free-disk-space-endpoint` | #49 |
-| 041 | Mono fold-down for wide-stereo material      | PLANNED | 028        | | |
+| 041 | Mono fold-down for wide-stereo material      | IN PROGRESS | 028    | `041-mono-folddown-option` | |
 | 042 | Production build (backend serves frontend)   | MERGED  | 003, 024   | `042-production-build` | #53 |
 | 043 | Release preparation for v0.1.0               | PLANNED | 038, 042   | | |
-| 044 | Playwright tier stability under load         | PLANNED | 030        | | |
+| 044 | Playwright tier stability under load         | IN PROGRESS | 030    | `044-e2e-stability` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
