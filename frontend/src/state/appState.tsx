@@ -9,7 +9,8 @@ import {
   type Dispatch,
   type ReactNode,
 } from 'react'
-import type { AudioFile, SeparationMode } from '../api/types'
+import { DEFAULT_STEREO_HANDLING } from '../api/jobs'
+import type { AudioFile, SeparationMode, StereoHandling } from '../api/types'
 
 /** The phases of the product workflow, in order. */
 export type WorkflowPhase =
@@ -88,6 +89,15 @@ export interface ConfigureState {
   readonly modeId: string | null
   /** ID of the selected quality tier within the selected mode. */
   readonly qualityId: string | null
+  /**
+   * What to do with the input's stereo image before separating (feature 041).
+   *
+   * Unlike `modeId`/`qualityId` this is **not** a catalog value: it is a
+   * statement about the user's own recording, so it is independent of which
+   * mode or tier is selected and survives changing either. It resets with the
+   * upload, because the next file is a different recording.
+   */
+  readonly stereoHandling: StereoHandling
   /** State of the create-job request. */
   readonly create: JobCreateState
 }
@@ -176,6 +186,14 @@ export type AppAction =
       readonly qualityId: string
     }
   | {
+      /**
+       * The user chose how their audio's stereo image should be treated.
+       * Independent of the catalog, so it is never validated against it.
+       */
+      readonly type: 'configure/stereoHandlingSelected'
+      readonly stereoHandling: StereoHandling
+    }
+  | {
       /** A create-job request is in flight (blocks a second submission). */
       readonly type: 'configure/createStarted'
     }
@@ -219,6 +237,7 @@ export const initialConfigureState: ConfigureState = {
   modes: { status: 'idle' },
   modeId: null,
   qualityId: null,
+  stereoHandling: DEFAULT_STEREO_HANDLING,
   create: { status: 'idle' },
 }
 
@@ -292,6 +311,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           modes: { status: 'loaded', modes: action.modes },
           modeId: mode?.id ?? null,
           qualityId: firstQualityId(mode),
+          // Carried across, not reset: the catalog has nothing to say about
+          // the user's own recording, and a retry of the catalog fetch must
+          // not silently undo a choice they already made.
+          stereoHandling: state.configure.stereoHandling,
           create: { status: 'idle' },
         },
       }
@@ -301,6 +324,12 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         configure: {
           ...initialConfigureState,
+          // Carried across for the same reason as `modesLoaded`: a failed
+          // catalog *fetch* says nothing about the user's recording. Without
+          // this, choosing the fold, leaving the step and coming back to a
+          // failed reload silently reverts it to `as_is` — and the retry that
+          // succeeds shows "Keep stereo" with no indication it changed.
+          stereoHandling: state.configure.stereoHandling,
           modes: {
             status: 'error',
             code: action.code,
@@ -342,6 +371,14 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         configure: { ...state.configure, qualityId: option.id },
       }
     }
+    case 'configure/stereoHandlingSelected':
+      return {
+        ...state,
+        configure: {
+          ...state.configure,
+          stereoHandling: action.stereoHandling,
+        },
+      }
     case 'configure/createStarted':
       return {
         ...state,

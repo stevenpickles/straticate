@@ -39,6 +39,7 @@ export type ComputeDevice = components['schemas']['ComputeDevice']
 export type JobState = components['schemas']['JobState']
 export type SeparationConfiguration =
   components['schemas']['SeparationConfiguration']
+export type StereoHandling = components['schemas']['StereoHandling']
 export type Job = components['schemas']['Job']
 export type Stem = components['schemas']['Stem']
 export type SeparationResultMetrics =

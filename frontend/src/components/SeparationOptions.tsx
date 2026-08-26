@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { ApiError } from '../api/client'
-import { createJob } from '../api/jobs'
+import { STEREO_HANDLING_OPTIONS, createJob } from '../api/jobs'
 import { listSeparationModes } from '../api/modes'
 import { formatFileSize } from '../format'
 import { useAppDispatch, useAppState } from '../state/appState'
@@ -140,8 +140,13 @@ export function SeparationOptions() {
     }
   }, [loadModes])
 
-  const { modes, modeId, qualityId, create } = configure
+  const { modes, modeId, qualityId, stereoHandling, create } = configure
   const audioId = upload.status === 'uploaded' ? upload.file.id : null
+  // Both stereo-handling values are documented as identical no-ops on a
+  // single-channel source, so offering the choice there would promise an
+  // effect that cannot happen (the fold's note says it recovers a stem).
+  const sourceIsMono =
+    upload.status === 'uploaded' && upload.file.metadata.channels < 2
   const selectedMode =
     modes.status === 'loaded'
       ? modes.modes.find((mode) => mode.id === modeId)
@@ -246,7 +251,15 @@ export function SeparationOptions() {
     dispatch({ type: 'configure/createStarted' })
     // `device_id` is deliberately omitted: the backend picks the best
     // device and echoes the resolved one on the job it returns.
-    createJob({ audio_id: audioId, mode_id: modeId, quality_id: qualityId })
+    // `stereo_handling` is *always* sent, even at its default: it changes the
+    // user's audio, so the request should say what was asked for rather than
+    // leave it to a server default the browser cannot see.
+    createJob({
+      audio_id: audioId,
+      mode_id: modeId,
+      quality_id: qualityId,
+      stereo_handling: stereoHandling,
+    })
       .then((job) => {
         jobDispatch({ type: 'job/track', job })
         dispatch({ type: 'configure/createSucceeded' })
@@ -372,6 +385,55 @@ export function SeparationOptions() {
               })}
             </fieldset>
           )}
+
+          <fieldset className="separation-options-group">
+            <legend className="separation-options-legend">Stereo</legend>
+            {/*
+              Not a model parameter and not tuning: a statement about the
+              user's own recording (ARCHITECTURE.md §1, and the argument in
+              docs/features/041-mono-folddown-option.md). Nothing here is
+              detected or applied on the user's behalf — the app never quietly
+              alters someone's audio.
+            */}
+            {sourceIsMono && (
+              <p className="separation-option-note separation-option-note-only">
+                This recording is already mono, so there is nothing to fold.
+              </p>
+            )}
+            {!sourceIsMono &&
+              STEREO_HANDLING_OPTIONS.map((option) => {
+                const noteId = `${optionId('stereo', option.id)}-note`
+                return (
+                  <div className="separation-option" key={option.id}>
+                    <input
+                      type="radio"
+                      id={optionId('stereo', option.id)}
+                      name="separation-stereo"
+                      value={option.id}
+                      checked={option.id === stereoHandling}
+                      // Outside the label, so the choice's own name stays its
+                      // accessible name and the explanation is a description.
+                      aria-describedby={noteId}
+                      onChange={() => {
+                        dispatch({
+                          type: 'configure/stereoHandlingSelected',
+                          stereoHandling: option.id,
+                        })
+                      }}
+                    />
+                    <label
+                      className="separation-option-label"
+                      htmlFor={optionId('stereo', option.id)}
+                    >
+                      {option.label}
+                    </label>
+                    <p className="separation-option-note" id={noteId}>
+                      {option.note}
+                    </p>
+                  </div>
+                )
+              })}
+          </fieldset>
 
           {/*
             The terms of the model this tier runs, where the tier is chosen —

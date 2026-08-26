@@ -31,6 +31,7 @@ from straticate.schemas.jobs import (
     SeparationResult,
     SeparationResultMetrics,
     Stem,
+    StereoHandling,
 )
 from straticate.schemas.models import (
     Model,
@@ -80,6 +81,7 @@ __all__ = [
     "SeparationResultMetrics",
     "Stem",
     "StemName",
+    "StereoHandling",
     "StorageReport",
     "VersionInfo",
     "WebSocketEvent",

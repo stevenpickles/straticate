@@ -411,11 +411,14 @@ Create request (`SeparationConfiguration`):
   "audio_id": "01ABC...",
   "mode_id": "vocals",
   "quality_id": "high_quality",
-  "device_id": "cuda:0"
+  "device_id": "cuda:0",
+  "stereo_handling": "as_is"
 }
 ```
 
 `device_id` optional — backend picks the best device by default.
+
+`stereo_handling` optional, `"as_is"` by default — see *Stereo handling* below.
 
 `Job`:
 
@@ -423,7 +426,7 @@ Create request (`SeparationConfiguration`):
 {
   "id": "01JOB...",
   "audio_id": "01ABC...",
-  "configuration": { "audio_id": "01ABC...", "mode_id": "vocals", "quality_id": "high_quality", "device_id": "cuda:0" },
+  "configuration": { "audio_id": "01ABC...", "mode_id": "vocals", "quality_id": "high_quality", "device_id": "cuda:0", "stereo_handling": "as_is" },
   "model_id": "vocals-hq-001",
   "state": "separating",
   "progress": 0.65,
@@ -444,6 +447,28 @@ resolves the compute device — the request's `device_id`, or the backend's
 preferred device when the request omitted it — and records *that* on the job.
 So `Job.configuration.device_id` is never null in a response or an event, even
 though the create request's field is optional.
+
+**`stereo_handling` says what to do with the input's stereo image** before it
+is separated, and is a statement about the *user's audio* rather than an
+inference parameter (ARCHITECTURE.md §1; the argument is in
+`docs/features/041-mono-folddown-option.md`).
+
+| value | effect |
+| --- | --- |
+| `as_is` | **Default.** The decoded mixture is separated untouched — bit-for-bit the behaviour before feature 041 |
+| `mono` | The mixture is folded to `(L + R) / 2` before separating. Every stem then comes back with **one channel**, and each `Stem.channels` says so |
+
+It is never applied unasked and never inferred from the audio: a server does not
+detect a wide stereo mix and quietly correct it. A mono source is unaffected by
+either value. Omitting the field is exactly equivalent to sending `"as_is"`, so
+a client written before this feature is unchanged; the field is always present
+on a `Job`'s echoed `configuration`.
+
+**This holds on every backend**, including the development fixtures a server
+started with `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` offers. A job that asks
+for `"mono"` and is answered `201` really was folded, whatever ran it — a fake
+separator's audio is a placeholder, but what it reports about its own behaviour
+is not.
 
 **`GET /jobs` returns jobs in submission order (oldest first)** — the order the
 backend accepted them, which is also the order they run in (the queue is FIFO
