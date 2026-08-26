@@ -89,7 +89,7 @@ from straticate.inference.pcm import (
     decode_to_pcm,
     write_wav,
 )
-from straticate.inference.stereo import apply_stereo_handling
+from straticate.inference.stereo import apply_stereo_handling_async
 from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.jobs import (
     JobState,
@@ -430,14 +430,14 @@ class FakeSeparator:
             _announce(stage_callback, JobState.DECODING)
             source = await self._decode(input_path)
             # The job's stereo-handling choice (feature 041), at the same point
-            # and through the same pure function as the real separators. This
+            # and through the same function as the real separators. This
             # engine's *audio* is a placeholder, but what it reports about its
             # own behaviour must be true: a job that asked for the fold and got
             # two-channel stems back would be the application lying about what
             # it did, which is exactly what feature 032 exists to prevent. The
             # default is identity, so nothing that does not ask for it changes.
-            source = await asyncio.to_thread(
-                apply_stereo_handling, source, configuration.stereo_handling
+            source = await apply_stereo_handling_async(
+                source, configuration.stereo_handling, cancellation_token
             )
             cancellation_token.raise_if_cancelled()
 

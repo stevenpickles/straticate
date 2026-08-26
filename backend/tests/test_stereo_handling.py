@@ -14,6 +14,7 @@ belongs to the integration tier, not to a suite that runs with no GPU, no
 network and a ~22 000-parameter stand-in whose audio is meaningless by design.
 """
 
+import asyncio
 import hashlib
 from array import array
 from pathlib import Path
@@ -22,7 +23,13 @@ from typing import Any
 import pytest
 
 from straticate.inference.pcm import PcmAudio
-from straticate.inference.stereo import apply_stereo_handling
+from straticate.inference.stereo import (
+    FOLD_BLOCK_FRAMES,
+    apply_stereo_handling,
+    apply_stereo_handling_async,
+    fold_blocks,
+)
+from straticate.jobs.cancellation import CancellationToken, JobCancelled
 from straticate.schemas.jobs import SeparationConfiguration, StereoHandling
 from tests.audio_fixtures import read_wav, write_tone_wav
 
@@ -35,6 +42,11 @@ def pcm(*planes: list[int], sample_rate: int = SAMPLE_RATE) -> PcmAudio:
 
 def samples(audio: PcmAudio, channel: int = 0) -> list[int]:
     return list(audio.channels[channel])
+
+
+def ramp(frames: int) -> list[int]:
+    """A deterministic full-scale sawtooth of ``frames`` in-range 16-bit samples."""
+    return [(index % 65535) - 32767 for index in range(frames)]
 
 
 # --------------------------------------------------------------------------
@@ -80,10 +92,17 @@ def test_mono_folds_two_channels_to_their_mean() -> None:
 def test_mono_rounds_to_nearest_rather_than_flooring() -> None:
     """The half-LSB that separates a mean from an integer division.
 
-    ``(1 + 2) // 2`` is ``1`` and ``(-1 + -2) // 2`` is ``-2``: a floor biases
-    every odd-sum frame downwards, which on a full track is a DC offset. The
-    module goes through the shared float bridge precisely so the project's one
-    rounding rule applies here too.
+    ``(1 + 2) // 2`` is ``1``: a floor biases every odd-sum frame downwards,
+    which on a full track is a DC offset. The module does **not** cross the
+    float bridge to avoid that -- it deliberately cannot, because every
+    separator has to be able to call it and torch is optional (see
+    :mod:`straticate.inference.stereo`). It rounds in integers instead, ties to
+    even, which is the same rule
+    :func:`straticate.inference.torch_audio.tensor_to_pcm` applies to every stem.
+
+    This test is why that rewrite was safe: the first integer draft biased
+    *even negative* sums downwards (a sum of ``-2`` giving ``-2`` where the mean
+    is ``-1``) and this caught it.
     """
     folded = apply_stereo_handling(pcm([1, -1, 3], [2, -2, 4]), StereoHandling.MONO)
     assert samples(folded) == [2, -2, 4]
@@ -257,3 +276,120 @@ async def test_a_folded_roformer_run_still_reconstructs_its_mixture(
     # Quantization happens once, at the end, so a two-stem sum reconstructs the
     # mixture to within a rounding step — not a fresh error per stem.
     assert max(abs(one - other) for one, other in zip(total, mixture, strict=True)) <= 2
+
+
+# --------------------------------------------------------------------------
+# Long tracks: bounded memory, and a Cancel button that works
+# --------------------------------------------------------------------------
+
+
+def test_the_block_size_does_not_change_a_single_sample() -> None:
+    """Blocking is a memory and cancellation bound, never a change of result.
+
+    The fold is per-frame arithmetic, so the block boundary must be invisible.
+    Sizes are chosen to land mid-frame, exactly on the end, and past it.
+    """
+    left = [900, -1200, 30000, -32768, 5, -5, 32767, 1]
+    right = [-300, 400, 10000, -32768, 6, -6, 32767, 2]
+    expected = samples(apply_stereo_handling(pcm(left, right), StereoHandling.MONO))
+    for block in (1, 2, 3, 7, 8, 9, 1000):
+        folded = array("h")
+        for chunk in fold_blocks(pcm(left, right), block_frames=block):
+            folded.extend(chunk)
+        assert list(folded) == expected, f"block_frames={block} changed the result"
+
+
+def test_no_intermediate_grows_with_the_length_of_the_track() -> None:
+    """The medium finding, asserted rather than described.
+
+    ``array("h", [ ... ])`` builds one Python ``int`` per frame before the array
+    exists -- measured at 44.3 bytes/frame, which is ~10.5 GB of heap on the
+    90-minute material feature 038 measured out to, for a track that separates
+    fine untouched. Everything the fold allocates except the result is bounded
+    by one block, so doubling the track must not double the overhead.
+    """
+    import tracemalloc
+
+    def overhead(frames: int) -> int:
+        source = pcm(ramp(frames), [1] * frames)
+        tracemalloc.start()
+        tracemalloc.reset_peak()
+        apply_stereo_handling(source, StereoHandling.MONO)
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        return peak - frames * 2  # minus the result plane, which is inherent
+
+    small = overhead(FOLD_BLOCK_FRAMES * 2)
+    large = overhead(FOLD_BLOCK_FRAMES * 4)
+    # Twice the audio, and the non-result overhead must stay flat rather than
+    # double. Generous bound: this is a shape assertion, not a byte count.
+    assert large < small * 1.5, f"overhead grew with length: {small} -> {large}"
+
+    # Flat is necessary but not sufficient: a *list* built per block is also
+    # flat, and still costs 44.3 bytes per frame of the block (~23 MB here)
+    # against ~2 for a generator. Bound it in absolute terms as well, or the
+    # one-character change the review asked for could be reverted unnoticed.
+    budget = FOLD_BLOCK_FRAMES * 12
+    assert large < budget, (
+        f"one block's intermediates cost {large} bytes, over the {budget} budget — "
+        "is the comprehension inside array('h', ...) a list rather than a generator?"
+    )
+
+
+async def test_a_long_fold_observes_cancellation_between_blocks() -> None:
+    """Cancel must not be ignored for the length of the fold.
+
+    The pure-Python fold is ~0.77 s per minute of audio, so a single
+    uninterruptible thread hop would leave a 90-minute job reporting
+    ``decoding`` and refusing to stop for over a minute. The token is checked
+    per block instead, exactly as ``_run_chunks`` and ``_encode`` do.
+    """
+    frames = FOLD_BLOCK_FRAMES * 3
+    source = pcm(ramp(frames), [1] * frames)
+    token = CancellationToken()
+    token.cancel()
+
+    with pytest.raises(JobCancelled):
+        await apply_stereo_handling_async(source, StereoHandling.MONO, token)
+
+
+async def test_cancelling_part_way_through_a_fold_stops_it() -> None:
+    """Cancellation arriving mid-fold is observed at the next block."""
+    frames = FOLD_BLOCK_FRAMES * 4
+    source = pcm(ramp(frames), [1] * frames)
+    token = CancellationToken()
+
+    async def cancel_soon() -> None:
+        await asyncio.sleep(0)
+        token.cancel()
+
+    with pytest.raises(JobCancelled):
+        await asyncio.gather(
+            apply_stereo_handling_async(source, StereoHandling.MONO, token), cancel_soon()
+        )
+
+
+async def test_the_default_never_reaches_a_worker_thread() -> None:
+    """``as_is`` costs nothing at all -- no hop, no copy, not even a check."""
+    source = pcm([1, 2, 3], [4, 5, 6])
+    token = CancellationToken()
+    token.cancel()
+    # Cancelled token and all: the identity path returns before it could look.
+    assert await apply_stereo_handling_async(source, StereoHandling.AS_IS, token) is source
+
+    mono = pcm([1, 2, 3])
+    assert await apply_stereo_handling_async(mono, StereoHandling.MONO, token) is mono
+
+
+async def test_the_async_fold_returns_exactly_what_the_sync_one_does() -> None:
+    """One transform, two drivers."""
+    frames = FOLD_BLOCK_FRAMES + 1234
+    source = pcm(ramp(frames), [7] * frames)
+    both = (
+        samples(apply_stereo_handling(source, StereoHandling.MONO)),
+        samples(
+            await apply_stereo_handling_async(source, StereoHandling.MONO, CancellationToken())
+        ),
+    )
+    assert both[0] == both[1]
+    assert len(both[0]) == frames

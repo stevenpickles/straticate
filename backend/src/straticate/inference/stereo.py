@@ -46,12 +46,21 @@ had to come back out from behind it. It is now the same function on every
 backend, and the contract in ``docs/contracts/rest-api.md`` is true everywhere
 rather than true-with-an-asterisk.
 
-The cost of leaving the bridge is real and was measured, not estimated: **3.9 s**
-for a 2:43 track (7.19 M frames), against milliseconds in torch. That is paid
-only when a user explicitly asks for the fold -- the default returns without
-touching a sample -- it runs in a worker thread, and it sits beside a separation
-that takes tens of seconds on a GPU and minutes on a CPU. A correct contract on
-every backend is worth more than three seconds on an opt-in path.
+The cost of leaving the bridge is real and was measured, not estimated: **2.1 s**
+for a 2:43 track (7.19 M frames), or 0.77 s per minute of audio, against
+milliseconds in torch. That is paid only when a user explicitly asks for the
+fold -- the default returns without touching a sample -- it runs in a worker
+thread, and it sits beside a separation that takes tens of seconds on a GPU and
+minutes on a CPU. A correct contract on every backend is worth more than two
+seconds on an opt-in path.
+
+What that path *does* owe is the long-track discipline feature 038 established,
+and the first draft of this module did not pay it: it built the whole result as
+one Python list (44.3 bytes per frame -- about 10.5 GB on a 90-minute track),
+copied every channel in full, and ran as one uninterruptible thread hop. All
+three are the same mistake -- treating the track as a single unit -- and
+:func:`fold_blocks` is the single fix. See its docstring and
+:func:`apply_stereo_handling_async`.
 
 Rounding, and why it is stated rather than left to a float
 ----------------------------------------------------------
@@ -69,15 +78,36 @@ way float error happened to fall.
 
 from __future__ import annotations
 
+import asyncio
 from array import array
+from collections.abc import Iterator
 from operator import add
+from typing import Final
 
 from straticate.inference.pcm import INT16_MAX, PcmAudio
+from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.jobs import StereoHandling
+
+FOLD_BLOCK_FRAMES: Final = 1 << 19
+"""Frames folded per unit of work -- about 12 s of 44.1 kHz audio.
+
+Two things are sized by this and they pull the same way, which is why one
+constant serves both. It bounds the **transient** cost of the fold: only one
+block's worth of intermediate Python objects is ever alive, so peak memory is a
+little over a megabyte however long the track is. And it bounds how long
+cancellation can go unobserved, because the token is checked between blocks --
+roughly 0.14 s at the measured rate. Smaller would buy nothing a user could
+perceive and would pay another thread hop for it.
+"""
 
 
 def apply_stereo_handling(source: PcmAudio, handling: StereoHandling) -> PcmAudio:
     """Return ``source`` with ``handling`` applied to its stereo image.
+
+    Synchronous and whole-track. A separator wants
+    :func:`apply_stereo_handling_async` instead, which does the same work in
+    cancellable blocks; this is the plain definition the tests pin and the one
+    to read when asking what the transform *is*.
 
     Args:
         source: The decoded mixture.
@@ -93,38 +123,94 @@ def apply_stereo_handling(source: PcmAudio, handling: StereoHandling) -> PcmAudi
         channel is likewise returned unchanged, because folding it would be a
         copy with nothing to fold.
     """
-    if handling is StereoHandling.AS_IS or source.channel_count < 2:
+    if _is_identity(source, handling):
         return source
-    return PcmAudio(sample_rate=source.sample_rate, channels=(_fold(source),))
+    plane: array[int] = array("h")
+    for block in fold_blocks(source):
+        plane.extend(block)
+    return PcmAudio(sample_rate=source.sample_rate, channels=(plane,))
 
 
-def _fold(source: PcmAudio) -> array[int]:
-    """Average ``source``'s channels into one plane of 16-bit samples.
+async def apply_stereo_handling_async(
+    source: PcmAudio,
+    handling: StereoHandling,
+    cancellation_token: CancellationToken,
+) -> PcmAudio:
+    """:func:`apply_stereo_handling`, off the event loop and cancellable.
+
+    **This is what a separator calls.** The fold is pure Python over every
+    sample of the track (see this module's docstring), which the measurement
+    puts at roughly 0.69 s per minute of audio -- a minute or more on the long
+    material feature 038 made survivable. Handing that to a single
+    :func:`asyncio.to_thread` would make it exactly the kind of step this
+    project does not ship: one where the user presses Cancel, the job goes on
+    saying ``decoding``, and nothing happens for a minute or two. Every other
+    long-running step in both separators -- ``_run_chunks``, ``_encode`` --
+    checks the token per unit of work, and so does this one.
+
+    The identity paths never reach a thread at all: no hop, no copy, nothing.
+
+    Raises:
+        JobCancelled: Cancellation was observed at a block boundary.
+    """
+    if _is_identity(source, handling):
+        return source
+    plane: array[int] = array("h")
+    blocks = fold_blocks(source)
+    while True:
+        cancellation_token.raise_if_cancelled()
+        block = await asyncio.to_thread(next, blocks, None)
+        if block is None:
+            return PcmAudio(sample_rate=source.sample_rate, channels=(plane,))
+        plane.extend(block)
+
+
+def _is_identity(source: PcmAudio, handling: StereoHandling) -> bool:
+    """Whether ``handling`` leaves ``source`` untouched, so it can be returned as-is."""
+    return handling is StereoHandling.AS_IS or source.channel_count < 2
+
+
+def fold_blocks(source: PcmAudio, *, block_frames: int = FOLD_BLOCK_FRAMES) -> Iterator[array[int]]:
+    """Yield ``source``'s channels averaged into one plane, ``block_frames`` at a time.
 
     Ties round to even and the result is clamped to the symmetric 16-bit range
     the rest of the pipeline uses, so ``-32768`` folded with itself yields
     ``-32767`` exactly as
     :func:`straticate.inference.torch_audio.tensor_to_pcm` has always produced
     for that sample. See this module's docstring.
+
+    **Blocking is not an optimisation here, it is the memory bound.** Feeding
+    ``array("h", ...)`` a list comprehension builds one Python ``int`` object
+    per frame before the array exists: measured at **44.3 bytes per frame**
+    against **2.12** for the same expression as a generator, which at 90 minutes
+    of audio -- the length feature 038 measured out to -- is the difference
+    between ~10.5 GB of Python heap and a rounding error. A generator alone
+    fixes that; blocking additionally keeps every intermediate slice small, so
+    nothing here is proportional to the length of the track except the result.
     """
     planes = source.channels
     count = len(planes)
     frames = source.frame_count
-    totals = (
-        map(add, planes[0][:frames], planes[1][:frames])
-        if count == 2
-        else map(sum, zip(*(plane[:frames] for plane in planes), strict=True))
-    )
-    return array(
-        "h",
-        [
-            -INT16_MAX if value < -INT16_MAX else INT16_MAX if value > INT16_MAX else value
-            for base, rest in (divmod(total, count) for total in totals)
-            for value in (
-                base + 1 if (rest * 2 > count or (rest * 2 == count and base & 1)) else base,
-            )
-        ],
-    )
+    for start in range(0, frames, block_frames):
+        stop = min(start + block_frames, frames)
+        # Slices are per block and therefore small. Slicing the *whole* plane
+        # here -- even the no-op ``plane[:frames]`` when the planes are already
+        # equal length, which is what ``PcmAudio`` documents -- copied every
+        # channel in full for nothing: ~950 MB on a 90-minute stereo track.
+        if count == 2:
+            totals = map(add, planes[0][start:stop], planes[1][start:stop])
+        else:
+            totals = map(sum, zip(*(plane[start:stop] for plane in planes), strict=True))
+        yield array(
+            "h",
+            (
+                -INT16_MAX if value < -INT16_MAX else INT16_MAX if value > INT16_MAX else value
+                for base, rest in (divmod(total, count) for total in totals)
+                for value in (
+                    base + 1 if (rest * 2 > count or (rest * 2 == count and base & 1)) else base,
+                )
+            ),
+        )
 
 
-__all__ = ["apply_stereo_handling"]
+__all__ = ["FOLD_BLOCK_FRAMES", "apply_stereo_handling", "apply_stereo_handling_async"]

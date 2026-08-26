@@ -75,7 +75,7 @@ from straticate.inference.pcm import (
     decode_to_pcm,
     write_wav,
 )
-from straticate.inference.stereo import apply_stereo_handling
+from straticate.inference.stereo import apply_stereo_handling_async
 from straticate.inference.torch_device import device_stats, reset_peak_memory, resolve_torch_device
 from straticate.jobs.cancellation import CancellationToken
 from straticate.schemas.jobs import (
@@ -352,9 +352,11 @@ class TorchSeparator(ABC):
             # the chunk loop, the residual arithmetic in ``_finish_stems`` and
             # the encoded stems all agree about what was separated. The default
             # is identity, so an existing job is untouched — literally the same
-            # object, not an equal one.
-            source = await asyncio.to_thread(
-                apply_stereo_handling, source, configuration.stereo_handling
+            # object, not an equal one, and no thread hop either. A fold that
+            # *was* asked for runs in cancellable blocks, because on long
+            # material it is a minute of pure-Python work.
+            source = await apply_stereo_handling_async(
+                source, configuration.stereo_handling, cancellation_token
             )
             cancellation_token.raise_if_cancelled()
 

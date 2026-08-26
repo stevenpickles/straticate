@@ -177,6 +177,12 @@ path must be. Three of the four folded stems moved by **one** int16 count
 (`bass` 7,789 → 7,788, `vocals` 15,704 → 15,705, `other` 14,903 → 14,902),
 which is exactly the 1-LSB tie difference predicted above and nothing else.
 
+It was then re-run a **third** time, after the block rewrite below, and came
+back **identical in every field** — same rms to four decimals, same peaks, same
+int16 counts. Blocking is per-frame arithmetic reorganised, so that was the
+expectation; it is recorded because the tie-break was also expected not to move
+anything and moved three stems.
+
 `tests/test_stereo_handling.py` additionally asserts that the fold *is* the mid
 component of the mid/side pair, which is what keeps the shipped `mono` path and
 the `k = 0.00` row the same transform rather than two that happen to agree.
@@ -412,12 +418,59 @@ its *self-description* still has to be true.
 
 So the fold came back out from behind the bridge and is now plain integer
 arithmetic that every backend calls. The cost was measured rather than
-estimated: **3.9 s** for this 2:43 track (7.19 M frames), against milliseconds
-in torch. It is paid only when a user explicitly asks for the fold — the default
-returns the very object it was given without touching a sample — it runs in a
-worker thread, and it sits beside a separation that takes tens of seconds on a
-GPU and minutes on a CPU. A contract that is true on every backend is worth
-more than three seconds on an opt-in path.
+estimated: **2.1 s** for this 2:43 track (7.19 M frames), or **0.77 s per minute
+of audio**, against milliseconds in torch. It is paid only when a user
+explicitly asks for the fold — the default returns the very object it was given
+without touching a sample — it runs in a worker thread, and it sits beside a
+separation that takes tens of seconds on a GPU and minutes on a CPU. A contract
+that is true on every backend is worth more than two seconds on an opt-in path.
+
+### Long tracks: the discipline the pure-Python path has to keep
+
+Leaving torch put the fold on the pure-Python path, and a second review found it
+had arrived there without the constraints feature 038 spent a whole feature
+establishing. Three symptoms, one cause — the fold treated the track as one
+unit — and one fix: it now works in **blocks of 524,288 frames** (about 12 s of
+audio), which bounds memory and cancellation latency with the same constant.
+
+**Memory.** `array("h", [ ... ])` builds one Python `int` per frame *before* the
+array exists. Measured with `tracemalloc`: **44.3 bytes per frame**, against
+2.12 for the identical expression as a generator. On the 90 minutes 038
+deliberately measured out to that is ~10.5 GB of Python heap in a worker
+thread — a `MemoryError` or an OOM kill on ordinary hardware, **for a track that
+separates fine with `as_is`**. 038 published fits saying 8 GiB covers ~39
+minutes; handing a user an OOM for asking to fold would have made a liar of
+them. Now every intermediate is bounded by one block, and only the result grows
+with the track:
+
+| track | peak | of which the result plane | overhead |
+| --- | --- | --- | --- |
+| 11 s | 3.1 MB | 1.0 MB | 2.11 MB |
+| 45 s | 7.2 MB | 4.0 MB | 3.15 MB |
+| 91 s | 11.2 MB | 8.0 MB | 3.22 MB |
+| 181 s | 19.8 MB | 16.0 MB | 3.80 MB |
+
+The overhead column is the one that matters: it is **flat**. A 90-minute fold is
+the 476 MB result plane plus about 3 MB, where the rejected shape would have
+been 10.5 GB.
+
+**Full-plane copies.** `planes[0][:frames]` allocated a complete copy of every
+channel even when `frames == len(plane)`, which is the normal case —
+`PcmAudio` documents all planes as equal length. About 950 MB on a 90-minute
+stereo track, for nothing. Blocking removed it: slices are per block and
+therefore small.
+
+**Cancellation.** A single `asyncio.to_thread(apply_stereo_handling, ...)` is
+one uninterruptible hop, so a cancelled 90-minute fold would be ignored for over
+a minute while the job still reported `decoding` and the WebSocket showed
+nothing moving — a Cancel button that does nothing, which this project has been
+careful about everywhere else. Every other long-running step in both separators
+checks the token per unit of work, and `apply_stereo_handling_async` now does
+too, between blocks (~0.14 s). The identity paths never reach a thread at all.
+
+`apply_stereo_handling` remains as the plain synchronous definition the tests
+pin; `apply_stereo_handling_async` is what a separator calls. A test asserts the
+two agree, and that the block size changes no sample.
 
 **Two things fell out of doing it in integers, and both are improvements.**
 
@@ -484,11 +537,17 @@ real.
 
 ## Known limitations
 
-- **The fold costs ~3.9 s of CPU on a 2:43 track**, in a worker thread, because
-  it is deliberately not torch (see above). Longer material scales linearly. If
-  that ever matters, the fix is a fast path *inside* `apply_stereo_handling`
-  when torch happens to be importable — not moving the function back behind the
-  bridge, which is what caused the contract to be false in the first place.
+- **The fold costs ~0.77 s of CPU per minute of audio**, in a worker thread,
+  because it is deliberately not torch (see above) — about 69 s on a 90-minute
+  track, against a separation of many minutes. Memory is bounded and
+  cancellation is prompt, but the *time* is linear and real. If it ever matters,
+  the fix is a fast path *inside* `apply_stereo_handling` when torch happens to
+  be importable — not moving the function back behind the bridge, which is what
+  made the contract false in the first place.
+- **No test covers a `channels: 1` stem through `StemPlayer` or `ExportPanel`.**
+  Review swept export/transcode, zip bundling, the Web Audio engine and the size
+  and duration arithmetic and found no hardcoded stereo assumption anywhere, so
+  this is missing coverage rather than a known defect. Cheap follow-up.
 - **No detection, so the user has to know to look.** This is the honest gap.
   Someone separating an early stereo record gets a near-silent stem, and nothing
   on screen connects that to the control that fixes it. The follow-up is
