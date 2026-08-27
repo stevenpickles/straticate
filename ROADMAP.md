@@ -271,6 +271,7 @@ open questions.
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 | 046 | Release workflow and release-process corrections | MERGED  | 043        | `046-release-workflow` | #65 |
+| 047 | Release workflow: ask GitHub whether the tag is annotated | PR OPEN | 046        | `hotfix/release-workflow-annotated-tag` | — |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,

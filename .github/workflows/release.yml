@@ -28,17 +28,28 @@ jobs:
 
       # CONTRIBUTING.md requires an annotated tag. A lightweight tag carries no
       # tagger, message or date, so the release would silently lose the
-      # provenance the process exists to record. `git cat-file -t` answers
-      # "tag" for an annotated tag and "commit" for a lightweight one.
+      # provenance the process exists to record.
+      #
+      # This asks GitHub what the remote stores, and deliberately does NOT ask
+      # the checkout. When `actions/checkout` checks out a tag ref it writes
+      # `refs/tags/<tag>` pointing straight at the **commit**, discarding the
+      # annotation -- so `git cat-file -t` answers "commit" on the runner for
+      # every tag, annotated or not, and a guard built on it can never pass.
+      # That is not hypothetical: it is how this step failed v0.1.0's first
+      # real run against a correctly annotated tag. The API reports the object
+      # the remote actually holds, which is what the rule is about.
       - name: The tag is annotated
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          kind=$(git cat-file -t "$GITHUB_REF_NAME")
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.type + " " + .object.sha')
+          kind=${ref%% *}
+          sha=${ref##* }
           if [ "$kind" != tag ]; then
             echo "::error::$GITHUB_REF_NAME is a lightweight tag ($kind). Releases are cut from annotated tags: git tag -a $GITHUB_REF_NAME -m 'Straticate $GITHUB_REF_NAME'"
             exit 1
           fi
-          git for-each-ref "refs/tags/$GITHUB_REF_NAME" \
-            --format='tagger: %(taggername) %(taggerdate:iso)%0amessage: %(contents:subject)'
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '"tagger: " + .tagger.name + " " + .tagger.date + " | message: " + .message'
 
       # Release PRs into `main` are rebase-merged, so `main` accumulates the
       # commits rather than one squashed blob — which means "reachable from
