@@ -396,6 +396,41 @@ export class Workflow {
   }
 
   /**
+   * The track strip. Since feature 051 it carries the window as data —
+   * `data-zoom` and `data-scroll-seconds` — which is what lets a spec assert
+   * in seconds of audio about a view that is no longer the whole file.
+   */
+  get strip(): Locator {
+    return this.player.locator('.stem-timeline-tracks')
+  }
+
+  /** The ruler's tick labels, left to right. */
+  get ticks(): Locator {
+    return this.player.locator('.stem-timeline-tick')
+  }
+
+  get zoomIn(): Locator {
+    return this.player.getByRole('button', { name: 'Zoom in' })
+  }
+
+  get zoomOut(): Locator {
+    return this.player.getByRole('button', { name: 'Zoom out' })
+  }
+
+  get zoomFit(): Locator {
+    return this.player.getByRole('button', { name: 'Zoom to fit' })
+  }
+
+  /** The window the timeline is showing, in seconds of audio. */
+  async window(): Promise<{ zoom: number; scrollSeconds: number }> {
+    const zoom = await this.strip.getAttribute('data-zoom')
+    const scrollSeconds = await this.strip.getAttribute('data-scroll-seconds')
+    expect(zoom, 'the strip reports its zoom').not.toBeNull()
+    expect(scrollSeconds, 'the strip reports its scroll').not.toBeNull()
+    return { zoom: Number(zoom), scrollSeconds: Number(scrollSeconds) }
+  }
+
+  /**
    * Click the timeline `fraction` of the way along it — the gesture a user
    * makes to jump somewhere, and the one that must produce exactly one seek.
    *

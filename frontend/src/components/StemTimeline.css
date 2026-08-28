@@ -246,3 +246,79 @@
   cursor: default;
   opacity: 0.5;
 }
+
+/* 051: zoom & pan */
+
+/*
+ * The three zoom controls in the corner cell. They share the toolbar's row
+ * with the scroll thumb's height, so they are small on purpose: the cell is
+ * the ruler plus the thumb tall and nothing may overflow it, for the same
+ * reason a lane header may not (feature 050, note 11).
+ */
+.stem-timeline-zoom {
+  min-width: 1.5rem;
+  flex: none;
+  padding: 0 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--color-text);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.25rem;
+  cursor: pointer;
+}
+
+.stem-timeline-zoom:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.stem-timeline-zoom:disabled {
+  color: var(--color-text-muted);
+  cursor: default;
+  opacity: 0.5;
+}
+
+.stem-timeline-zoom-fit {
+  font-size: 0.65rem;
+}
+
+/*
+ * The scroll thumb's track. There is no `overflow-x` anywhere in the timeline
+ * — the canvases are the size of the viewport rather than the size of the
+ * file, so the browser has nothing to scroll — which is why the window's
+ * position is drawn rather than delegated.
+ */
+.stem-timeline-scrollbar {
+  position: relative;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.stem-timeline-scroll-thumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  min-width: 8px;
+  background-color: var(--color-text-muted);
+  border-radius: 999px;
+  opacity: 0.4;
+  cursor: grab;
+  touch-action: none;
+}
+
+.stem-timeline-scroll-thumb:hover,
+.stem-timeline-scroll-thumb:active {
+  opacity: 0.7;
+}
+
+/*
+ * A tick close enough to the right edge that its label would be clipped hangs
+ * to the left of its mark instead, which is what the fitted view's final label
+ * (`1:00` on a minute-long mix) needs to be readable at all.
+ */
+.stem-timeline-tick-flush {
+  padding-right: 0.2rem;
+  padding-left: 0;
+  border-right: 1px solid var(--color-border);
+  border-left: none;
+  translate: -100%;
+}

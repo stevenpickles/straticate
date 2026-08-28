@@ -10,15 +10,43 @@
  * ```text
  * .stem-timeline
  * ├── .stem-timeline-headers        one row per stem, aligned to the lanes
- * │   ├── .stem-timeline-toolbar      corner cell   → 051: zoom controls
+ * │   ├── .stem-timeline-toolbar      corner cell: zoom in/out/fit (051)
  * │   └── .stem-timeline-lane-header  name, status, Mute/Solo,
  * │                                   .stem-timeline-lane-fader (054)
  * └── .stem-timeline-tracks         the strip; its width is the viewport
  *     ├── .stem-timeline-ruler        tick labels   → 053: loop-region drag
+ *     ├── .stem-timeline-scrollbar    the scroll thumb (051)
  *     ├── .stem-timeline-lanes        one canvas per stem
  *     ├── .stem-timeline-playhead     transform-moved div
  *     └── .stem-timeline-surface      role="slider" → 052: audible scrub
  * ```
+ *
+ * ## Zoom and pan (feature 051)
+ *
+ * The window is `useTimelineGeometry`'s and nothing here writes it directly:
+ * Ctrl+wheel, the toolbar's three buttons, `+`/`-` on the focused surface, a
+ * plain or shifted wheel, the scroll thumb and the playhead's own auto-follow
+ * all go through that hook's named movements, which clamp. Four consequences
+ * are worth knowing before changing any of them:
+ *
+ * - **The wheel listener is native and non-passive.** React's synthetic
+ *   `onWheel` is registered passively, so `preventDefault` inside it is
+ *   ignored and Ctrl+wheel zooms the *browser* instead of the timeline. The
+ *   listener is therefore attached by hand to the track strip, and removed
+ *   with it.
+ * - **There is no `overflow-x`.** The canvases are viewport-sized rather than
+ *   file-sized (see `TimelineLane`), so there is nothing for the browser to
+ *   scroll; `.stem-timeline-scrollbar` is a thumb whose width and offset
+ *   mirror the window, dragged with the same synchronously-cleared-ref idiom
+ *   as the seek gesture.
+ * - **Buttons and keys zoom about the playhead** when it is on screen, and
+ *   about the middle of the window when it is not — the point the user is
+ *   looking at in each case. A wheel zoom anchors on the cursor instead.
+ * - **Auto-follow is a page flip, and it never fights a pan.** It moves only
+ *   when the *position* has changed and left the window, so panning away from
+ *   a paused playhead stays where it was put; when playback then carries the
+ *   playhead out of view the window jumps so it reappears just inside the left
+ *   edge, which is one flip per window rather than a repaint every frame.
  *
  * ## The invariants it inherits from feature 023
  *
@@ -49,7 +77,9 @@
 
 import {
   useCallback,
+  useEffect,
   useRef,
+  useState,
   type KeyboardEvent,
   type PointerEvent,
 } from 'react'
@@ -57,19 +87,35 @@ import type { StemLoadStatus, StemPlayerEngine } from '../audio/engine'
 import { formatDuration } from '../format'
 import { LANE_HEIGHT_PX, TimelineLane } from './TimelineLane'
 import { TimelineRuler } from './TimelineRuler'
-import { xToTime, timeToX } from './timelineGeometry'
+import {
+  maxZoom,
+  pxPerSecond,
+  visibleSeconds,
+  xToTime,
+  timeToX,
+} from './timelineGeometry'
 import { useTimelineGeometry } from './useTimelineGeometry'
-import { useWaveformPeaks } from './useWaveformPeaks'
+import { useWaveformPeaks, useWaveformTiles } from './useWaveformPeaks'
 import './StemTimeline.css'
 
 /** Height of the time ruler, in CSS pixels. */
 const RULER_HEIGHT_PX = 22
+
+/** Height of the scroll thumb's track, in CSS pixels. */
+const SCROLLBAR_HEIGHT_PX = 10
 
 /** Seconds an arrow key moves the playhead. */
 const FINE_STEP_SECONDS = 1
 
 /** Seconds a shifted arrow key moves the playhead. */
 const COARSE_STEP_SECONDS = 5
+
+/**
+ * Where auto-follow puts the playhead when it has to flip the window: a tenth
+ * of the way in, so the flip leaves most of the window ahead of the audio and
+ * a little of what was just heard behind it.
+ */
+const FOLLOW_MARGIN = 0.1
 
 /** One stem, as the timeline needs to see it. */
 export interface StemTimelineStem {
@@ -165,12 +211,37 @@ export function StemTimeline({
   onToggleSolo,
   onSetLevel,
 }: StemTimelineProps) {
-  const { viewport, devicePixelRatio, trackRef } =
-    useTimelineGeometry(durationSeconds)
+  const {
+    viewport,
+    devicePixelRatio,
+    trackRef,
+    zoomIn,
+    zoomOut,
+    zoomToFit,
+    panBy,
+    scrollTo,
+  } = useTimelineGeometry(durationSeconds)
+  const loaded = stems.filter((stem) => stem.status === 'loaded')
   const peaks = useWaveformPeaks(
     engine,
-    stems.filter((stem) => stem.status === 'loaded').map((stem) => stem.name),
+    loaded.map((stem) => stem.name),
   )
+  const tiles = useWaveformTiles(engine, loaded, viewport)
+
+  /** The playhead's offset on the strip, which may be off either end of it. */
+  const playheadOffsetX = timeToX(viewport, positionSeconds)
+
+  /**
+   * What a control with no cursor position of its own zooms about: the
+   * playhead while it is on screen, the middle of the window otherwise.
+   */
+  const zoomAnchorX =
+    playheadOffsetX >= 0 && playheadOffsetX <= viewport.widthPx
+      ? playheadOffsetX
+      : viewport.widthPx / 2
+
+  const canZoomIn = viewport.zoom < maxZoom(durationSeconds)
+  const canZoomOut = viewport.zoom > 1
 
   /**
    * The live gesture's position, or `null` when no pointer is down. A ref
@@ -241,8 +312,171 @@ export function StemTimeline({
     onScrubCancel()
   }, [onScrubCancel])
 
+  // -------------------------------------------------------------------------
+  // Zoom and pan
+  // -------------------------------------------------------------------------
+
+  /**
+   * The track strip, once it is mounted. State rather than a ref because the
+   * wheel listener has to be attached to it in an effect, and an effect cannot
+   * be woken by a ref changing.
+   */
+  const [tracks, setTracks] = useState<HTMLElement | null>(null)
+
+  const attachTracks = useCallback(
+    (element: HTMLDivElement | null) => {
+      trackRef(element)
+      setTracks(element)
+    },
+    [trackRef],
+  )
+
+  const handleWheel = useCallback(
+    (event: WheelEvent, element: HTMLElement) => {
+      if (viewport.durationSeconds <= 0 || viewport.widthPx <= 0) {
+        return
+      }
+      if (event.ctrlKey || event.metaKey) {
+        // The gesture the platform reserves for zooming — and the reason this
+        // listener is registered non-passively, since letting it through
+        // zooms the whole page instead.
+        event.preventDefault()
+        const anchorX = event.clientX - element.getBoundingClientRect().left
+        if (event.deltaY < 0) {
+          zoomIn(anchorX)
+        } else if (event.deltaY > 0) {
+          zoomOut(anchorX)
+        }
+        return
+      }
+      if (viewport.zoom <= 1) {
+        // Nothing to pan: the whole file is already on screen, so the wheel
+        // belongs to the page.
+        return
+      }
+      const scale = pxPerSecond(viewport)
+      // A trackpad's horizontal delta if it sent one — a shifted wheel usually
+      // arrives that way already — and its vertical delta otherwise, because
+      // the only axis this timeline has is time.
+      const deltaPx = event.deltaX === 0 ? event.deltaY : event.deltaX
+      if (scale <= 0 || deltaPx === 0) {
+        return
+      }
+      event.preventDefault()
+      panBy(deltaPx / scale)
+    },
+    [viewport, zoomIn, zoomOut, panBy],
+  )
+
+  // The handler is held in a ref so the listener below is attached once per
+  // element rather than re-attached on every viewport change.
+  const wheelHandler = useRef(handleWheel)
+  useEffect(() => {
+    wheelHandler.current = handleWheel
+  }, [handleWheel])
+
+  useEffect(() => {
+    if (tracks === null) {
+      return
+    }
+    const listener = (event: WheelEvent): void => {
+      wheelHandler.current(event, tracks)
+    }
+    tracks.addEventListener('wheel', listener, { passive: false })
+    return () => {
+      tracks.removeEventListener('wheel', listener)
+    }
+  }, [tracks])
+
+  /**
+   * Where the scroll thumb was grabbed, or `null` when it is not being
+   * dragged. The same ref idiom as the seek gesture — cleared synchronously on
+   * release — though scrolling is not seeking, so this one is free to act on
+   * every move.
+   */
+  const thumbDrag = useRef<{ pointerX: number; scrollSeconds: number } | null>(
+    null,
+  )
+
+  const beginThumbDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (viewport.durationSeconds <= 0 || viewport.widthPx <= 0) {
+        return
+      }
+      thumbDrag.current = {
+        pointerX: event.clientX,
+        scrollSeconds: viewport.scrollSeconds,
+      }
+      const thumb = event.currentTarget
+      if (typeof thumb.setPointerCapture === 'function') {
+        try {
+          thumb.setPointerCapture(event.pointerId)
+        } catch {
+          // Same as the seek surface: the drag still works, it just stops
+          // tracking once the pointer leaves the element.
+        }
+      }
+    },
+    [viewport],
+  )
+
+  const updateThumbDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      const start = thumbDrag.current
+      if (start === null) {
+        return
+      }
+      // The thumb's track spans the whole file across the strip's width, so a
+      // pixel of travel is always the same number of seconds whatever the zoom.
+      const secondsPerPx = viewport.durationSeconds / viewport.widthPx
+      scrollTo(
+        start.scrollSeconds + (event.clientX - start.pointerX) * secondsPerPx,
+      )
+    },
+    [viewport, scrollTo],
+  )
+
+  const endThumbDrag = useCallback(() => {
+    thumbDrag.current = null
+  }, [])
+
+  /**
+   * Keep a moving playhead in view, and only a moving one. The position has to
+   * have *changed* for this to fire, so a pan that leaves the playhead behind
+   * is left alone until playback next carries it out of the window.
+   */
+  const followedPosition = useRef(positionSeconds)
+  useEffect(() => {
+    const previous = followedPosition.current
+    followedPosition.current = positionSeconds
+    if (positionSeconds === previous || viewport.zoom <= 1) {
+      return
+    }
+    const visible = visibleSeconds(viewport)
+    if (
+      positionSeconds >= viewport.scrollSeconds &&
+      positionSeconds <= viewport.scrollSeconds + visible
+    ) {
+      return
+    }
+    scrollTo(positionSeconds - visible * FOLLOW_MARGIN)
+  }, [positionSeconds, viewport, scrollTo])
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
+      // Zoom is a view control, not a transport one: it works while the stems
+      // are still decoding, which is when a user is most likely to be looking
+      // around the picture rather than driving it.
+      if (event.key === '+' || event.key === '=') {
+        event.preventDefault()
+        zoomIn(zoomAnchorX)
+        return
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault()
+        zoomOut(zoomAnchorX)
+        return
+      }
       if (!ready) {
         return
       }
@@ -277,23 +511,75 @@ export function StemTimeline({
         default:
       }
     },
-    [ready, positionSeconds, durationSeconds, onSeek, onTogglePlayback],
+    [
+      ready,
+      positionSeconds,
+      durationSeconds,
+      onSeek,
+      onTogglePlayback,
+      zoomIn,
+      zoomOut,
+      zoomAnchorX,
+    ],
   )
 
-  const playheadX = clamp(
-    timeToX(viewport, positionSeconds),
-    0,
-    viewport.widthPx,
-  )
+  const playheadX = clamp(playheadOffsetX, 0, viewport.widthPx)
+
+  /** The thumb mirrors the window: how much of the file, and how far in. */
+  const windowFraction =
+    viewport.durationSeconds > 0
+      ? visibleSeconds(viewport) / viewport.durationSeconds
+      : 1
+  const scrollFraction =
+    viewport.durationSeconds > 0
+      ? viewport.scrollSeconds / viewport.durationSeconds
+      : 0
 
   return (
     <div className="stem-timeline">
       <div className="stem-timeline-headers">
-        {/* Corner cell, aligned with the ruler: feature 051's toolbar. */}
+        {/*
+          Corner cell, as tall as the ruler and the scroll thumb together so
+          the header column and the lane column stay aligned to the pixel.
+        */}
         <div
           className="stem-timeline-toolbar"
-          style={{ height: `${String(RULER_HEIGHT_PX)}px` }}
-        />
+          style={{
+            height: `${String(RULER_HEIGHT_PX + SCROLLBAR_HEIGHT_PX)}px`,
+          }}
+        >
+          <button
+            type="button"
+            className="stem-timeline-zoom"
+            aria-label="Zoom out"
+            disabled={!canZoomOut}
+            onClick={() => {
+              zoomOut(zoomAnchorX)
+            }}
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="stem-timeline-zoom"
+            aria-label="Zoom in"
+            disabled={!canZoomIn}
+            onClick={() => {
+              zoomIn(zoomAnchorX)
+            }}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="stem-timeline-zoom stem-timeline-zoom-fit"
+            aria-label="Zoom to fit"
+            disabled={!canZoomOut}
+            onClick={zoomToFit}
+          >
+            Fit
+          </button>
+        </div>
         {stems.map((stem) => (
           <div
             className="stem-timeline-lane-header"
@@ -352,12 +638,43 @@ export function StemTimeline({
         ))}
       </div>
 
-      <div className="stem-timeline-tracks" ref={trackRef}>
+      {/*
+        The window is on the strip itself as data, because it is what the
+        ruler, the lanes, the thumb and every seek are derived from — one
+        attribute pair that says which seconds are on screen.
+      */}
+      <div
+        className="stem-timeline-tracks"
+        ref={attachTracks}
+        data-zoom={String(Math.round(viewport.zoom * 1000) / 1000)}
+        data-scroll-seconds={String(
+          Math.round(viewport.scrollSeconds * 1000) / 1000,
+        )}
+      >
         <div
           className="stem-timeline-ruler-row"
           style={{ height: `${String(RULER_HEIGHT_PX)}px` }}
         >
           <TimelineRuler viewport={viewport} />
+        </div>
+
+        <div
+          aria-hidden="true"
+          className="stem-timeline-scrollbar"
+          style={{ height: `${String(SCROLLBAR_HEIGHT_PX)}px` }}
+        >
+          <div
+            className="stem-timeline-scroll-thumb"
+            data-testid="stem-timeline-scroll-thumb"
+            style={{
+              left: `${String(scrollFraction * 100)}%`,
+              width: `${String(windowFraction * 100)}%`,
+            }}
+            onPointerDown={beginThumbDrag}
+            onPointerMove={updateThumbDrag}
+            onPointerUp={endThumbDrag}
+            onPointerCancel={endThumbDrag}
+          />
         </div>
 
         <div className="stem-timeline-lanes">
@@ -377,6 +694,7 @@ export function StemTimeline({
                 <TimelineLane
                   name={stem.name}
                   peaks={peaks.get(stem.name) ?? null}
+                  tile={tiles.get(stem.name) ?? null}
                   viewport={viewport}
                   devicePixelRatio={devicePixelRatio}
                   audible={stem.audible}
@@ -405,7 +723,9 @@ export function StemTimeline({
           aria-valuenow={Math.round(positionSeconds * 100) / 100}
           aria-valuetext={`${formatDuration(positionSeconds)} of ${formatDuration(durationSeconds)}`}
           aria-disabled={!ready}
-          style={{ top: `${String(RULER_HEIGHT_PX)}px` }}
+          style={{
+            top: `${String(RULER_HEIGHT_PX + SCROLLBAR_HEIGHT_PX)}px`,
+          }}
           onPointerDown={beginGesture}
           onPointerMove={updateGesture}
           onPointerUp={commitGesture}
