@@ -1180,6 +1180,12 @@ describe('StemPlayer over the real engine', () => {
 
     expect(gains()).toEqual([1, 0.25, 1, 1])
 
+    // The controlled input round-trips through the snapshot: the engine's
+    // synchronous notify is what feeds the value back to the fader.
+    expect(screen.getByRole('slider', { name: 'drums level' })).toHaveValue(
+      '0.25',
+    )
+
     // Mute silences it regardless of the level just set — `level` and
     // `audible` compose the way the engine documents, not the fader alone.
     await userEvent.click(screen.getByRole('button', { name: 'Mute drums' }))

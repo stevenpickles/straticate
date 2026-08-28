@@ -156,13 +156,19 @@ The stash was then restored (`git stash pop`) and the full suite re-run green
      track/thumb rebuild — every engine tested (Chromium, which the E2E tier
      runs against) scales the thumb down with an explicit `height`, so a
      short box reads as a slim fader instead of a clipped full-size one.
-   Rough accounting at a 16 px root: 64 px total − ~6.4 px padding − ~6.4 px
-   of two gaps ≈ 51.2 px for three rows; the label row (~15.4 px) and the
-   Mute/Solo row (~20.9 px, unchanged from 050) leave ~14.3 px, comfortably
-   more than the fader's ~11.2 px. Verified visually by running the full E2E
-   tier in a real Chromium browser (`npm run e2e`, 24/24 green) rather than by
-   guessing — the tier already caught one header-overflow defect during 050
-   for exactly this class of change.
+   Accounting at a 16 px root, measured in a real Chromium (review pass, not
+   estimated): the header box is `border-box`, so the budget is 64 px −
+   2 px border − ~6.4 px padding − ~6.4 px of two gaps ≈ 49.2 px; the three
+   rows measure 15.44 + 20.86 + 11.19 = 47.49 px, leaving **~0.9 px of
+   slack** — it fits at default settings, but only just. At browser root
+   fonts of 17/18/20 px the rem-sized rows outgrow the fixed 64 px box by
+   1/3/7 px; `overflow: hidden` clips the excess symmetrically (fader bottom
+   and label top) and, measured via `elementFromPoint`, the fader stays
+   clickable — the 050-style overlay-swallows-clicks defect cannot recur.
+   The real fix (a taller or rem-relative `LANE_HEIGHT_PX`) lives in
+   `TimelineLane.tsx`, which feature 051 owns this wave; recorded under
+   Known Limitations for 051/055 to pick up. Verified by running the full
+   E2E tier in a real Chromium (`npm run e2e`, 24/24 green).
 
 4. **The zipper-noise ramp is deliberately not implemented.** A real fader
    moving quickly can produce an audible "zipper" artifact from stepped
@@ -186,3 +192,20 @@ The stash was then restored (`git stash pop`) and the full suite re-run green
    matching the engine's own default (`StemEntry.level = 1` in `engine.ts`)
    for the window before a snapshot exists — the same reasoning `audible`'s
    `?? true` default already uses one line above it.
+
+## Known limitations
+
+- **The lane header runs out of vertical headroom above the default root
+  font.** Measured in the review pass: ~0.9 px of slack at a 16 px root; at
+  17/18/20 px browser font settings the rem-sized rows outgrow the fixed
+  64 px `LANE_HEIGHT_PX` by 1/3/7 px and `overflow: hidden` clips the fader's
+  bottom edge and the label's top. The fader remains clickable
+  (`elementFromPoint`-verified). The fix — a taller or rem-relative lane
+  height — belongs to `TimelineLane.tsx`, owned by feature 051 this wave;
+  hand to 051 or 055 if 051 does not absorb it.
+- **The fader's pointer target is ~11 px tall**, under WCAG 2.2 SC 2.5.8's
+  24 px minimum (the user-agent-control exception is arguable since the
+  height is author-set). Keyboard operation is unaffected. A taller lane
+  height would allow a taller target; same owner as above.
+- **The zipper-noise gain ramp is deliberately not implemented** (engine
+  change, small benefit at `step={0.01}` granularity) — see Notes §4.
