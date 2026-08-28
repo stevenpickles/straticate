@@ -70,38 +70,21 @@ loop regions, per-stem level faders — and the one known defect v0.1.0
 shipped with (the unrecoverable result fetch) fixed. Features 048–055;
 decisions and design in the feature docs.
 
-| Requirement | State |
+| Requirement | Feature(s) |
 | --- | --- |
-| Result fetch failure is recoverable in place | **done** — 048 (#72), a "Try again" button refetches the result |
-| Per-stem waveform lanes on a shared time axis (hand-rolled canvas, no new runtime dependency) | **done** — 049 (#71) the peaks/geometry/engine seam, 050 (#74) the visible lanes; frontend still depends on exactly `react`/`react-dom` |
-| Click/drag seek preserving the one-seek-per-gesture contract | **done** — 050 (#74); the timeline itself is the `role="slider"` seek control |
-| Horizontal zoom + pan, keyboard transport, accessible seek control | **done** — 050 (#74) keyboard transport and the accessible control, 051 (#78) Ctrl+wheel zoom anchored at the cursor, toolbar/keyboard zoom anchored at the playhead, pan by wheel and scroll thumb, high-res tiles past base resolution |
-| Audible Audacity-style scrub preview | **done** — 052 (#82); throwaway preview grains respect mute/solo/level and never rebuild the transport graph mid-drag |
-| Loop / A-B region playback, sample-accurate across stems | **done** — 053 (#80); ruler drag, shift-drag, edge handles and transport buttons all reach one native loop set on every stem before one shared `start()`; a region is a trap, not a fence |
-| Per-stem volume faders over the existing `setLevel` | **done** — 054 (#76); one fader per stem in the lane header, independent of mute/solo |
-| CHANGELOG, version `0.2.0`, clean-clone verification | **done** — 055; see below |
+| Result fetch failure is recoverable in place | 048 |
+| Per-stem waveform lanes on a shared time axis (hand-rolled canvas, no new runtime dependency) | 049, 050 |
+| Click/drag seek preserving the one-seek-per-gesture contract | 050 |
+| Horizontal zoom + pan, keyboard transport, accessible seek control | 050, 051 |
+| Audible Audacity-style scrub preview | 052 |
+| Loop / A-B region playback, sample-accurate across stems | 053 |
+| Per-stem volume faders over the existing `setLevel` | 054 |
+| CHANGELOG, version `0.2.0`, clean-clone verification | 055 |
 
-**M4 is complete: every requirement above is met.** What remains is the
-project owner's, per `CONTRIBUTING.md`'s release process: the release branch
-`release/v0.2.0` cut from `dev`, the release PR `release/v0.2.0 → main`, its
-rebase-merge, and the annotated tag `v0.2.0`. Feature 055 prepares `dev` for
-that release and stops there — it does not create the release branch, open
-the release PR, merge anything, or tag, mirroring 043's precedent for v0.1.0
-exactly.
-
-## Current state (2026-08-29)
+## Current state (2026-08-27)
 
 **M1, M2 and M3 are met and v0.1.0 is released** (tag `v0.1.0`, PR #66,
-hotfix #69). **M4 is met and `dev` is prepared for the v0.2.0 release** —
-every feature 048–054 is merged, and 055 is the release preparation itself:
-`CHANGELOG.md` carries a `[0.2.0]` entry written from this ledger,
-`backend/pyproject.toml` is at `0.2.0`, and the workflow (including the new
-timeline surface) was verified from a clean clone. **What is left is the
-project owner's**, per `CONTRIBUTING.md`'s release process: the release
-branch `release/v0.2.0`, the release PR `release/v0.2.0 → main`, its
-rebase-merge, and the annotated tag `v0.2.0`. Feature 055 does not create,
-merge or tag anything. Details in
-`docs/features/055-release-preparation-v0.2.0.md`.
+hotfix #69). **M4 (v0.2.0) is defined and in progress** — features 048–055.
 
 The remainder of this section is the v0.1.0 state as recorded at release.
 
@@ -215,7 +198,7 @@ The first three are things the release ships *with*, recorded in
   Inspect step permanently reading "Something went wrong. Please try again."
   with no control that tries again. Found and quantified by **044** (finding 2)
   and deliberately not fixed there. The smallest real defect in the release and
-  the cheapest to fix. **Fixed by feature 048 (#72).**
+  the cheapest to fix. **Now feature 048.**
 - **Nothing prunes job outputs, exports or uploads.** 021, 022, 024 and 040 each
   recorded it and none of them owns it: disk use grows with every job forever,
   deleting an uploaded file leaves its stems behind, and the free-space warning
@@ -314,14 +297,14 @@ The first three are things the release ships *with*, recorded in
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 | 046 | Release workflow and release-process corrections | MERGED  | 043        | `046-release-workflow` | #65 |
 | 047 | Release workflow: ask GitHub whether the tag is annotated | MERGED | 046        | `hotfix/release-workflow-annotated-tag` | #69 |
-| 048 | Stem player recovers from a failed result fetch | MERGED  | 023        | `048-result-fetch-retry` | #72 |
-| 049 | Waveform foundation (peaks, geometry, engine seam) | MERGED  | 023        | `049-waveform-foundation` | #71 |
-| 050 | Stem timeline with per-stem waveform lanes   | MERGED  | 049        | `050-stem-timeline-lanes` | #74 |
-| 051 | Timeline zoom and pan                        | MERGED  | 050        | `051-timeline-zoom-pan` | #78 |
-| 052 | Audible scrub preview                        | MERGED  | 050, 053   | `052-scrub-preview` | #82 |
-| 053 | Loop / A-B region playback                   | MERGED  | 050, 051   | `053-loop-region` | #80 |
-| 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |
-| 055 | Release preparation for v0.2.0               | MERGED  | 048–054    | `055-release-preparation-v0.2.0` | #84 |
+| 048 | Stem player recovers from a failed result fetch | READY | 023        | `048-result-fetch-retry` | |
+| 049 | Waveform foundation (peaks, geometry, engine seam) | READY | 023        | `049-waveform-foundation` | |
+| 050 | Stem timeline with per-stem waveform lanes   | PLANNED | 049        | `050-stem-timeline-lanes` | |
+| 051 | Timeline zoom and pan                        | PLANNED | 050        | `051-timeline-zoom-pan` | |
+| 052 | Audible scrub preview                        | PLANNED | 050        | `052-scrub-preview` | |
+| 053 | Loop / A-B region playback                   | PLANNED | 050        | `053-loop-region` | |
+| 054 | Per-stem level faders                        | PLANNED | 050        | `054-stem-level-faders` | |
+| 055 | Release preparation for v0.2.0               | PLANNED | 048–054    | `055-release-preparation-v0.2.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
@@ -356,8 +339,6 @@ graph LR
   023 --> 048 & 049
   049 --> 050
   050 --> 051 & 052 & 053 & 054
-  051 --> 053
-  053 --> 052
   048 & 051 & 052 & 053 & 054 --> 055
 ```
 
