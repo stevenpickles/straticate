@@ -19,6 +19,7 @@ import {
 import type { Job, SeparationResult, Stem } from '../api/types'
 import {
   createStemAudioEngine,
+  type LoopRegion,
   type StemEngineSnapshot,
   type StemPlayerEngine,
   type StemSource,
@@ -252,6 +253,8 @@ class FakeEngine implements StemPlayerEngine {
   readonly muteToggles: string[] = []
   readonly soloToggles: string[] = []
   readonly levelSets: { name: string; value: number }[] = []
+  /** Every loop commit, in order: a region, or `null` for a clear. */
+  readonly loopRegions: (LoopRegion | null)[] = []
   disposeCount = 0
   time = 0
 
@@ -261,6 +264,7 @@ class FakeEngine implements StemPlayerEngine {
     stems: [],
     playing: false,
     durationSeconds: 0,
+    loopRegion: null,
     error: null,
   }
 
@@ -303,6 +307,22 @@ class FakeEngine implements StemPlayerEngine {
 
   setLevel = (name: string, value: number): void => {
     this.levelSets.push({ name, value })
+  }
+
+  /**
+   * Records the commit *and* publishes it, exactly as the real engine's
+   * synchronous notify does — the badge and the overlay both read the region
+   * back out of the snapshot rather than from the call.
+   */
+  setLoopRegion = (startSeconds: number, endSeconds: number): void => {
+    const region = { start: startSeconds, end: endSeconds }
+    this.loopRegions.push(region)
+    this.update({ loopRegion: region })
+  }
+
+  clearLoopRegion = (): void => {
+    this.loopRegions.push(null)
+    this.update({ loopRegion: null })
   }
 
   currentTime = (): number => this.time
@@ -1151,9 +1171,136 @@ describe('StemPlayer level faders (feature 054)', () => {
   })
 })
 
+describe('StemPlayer loop region (feature 053)', () => {
+  /** The three transport loop controls. */
+  function loopButton(name: string): HTMLElement {
+    return screen.getByRole('button', { name })
+  }
+
+  /** The badge's text, or `null` when no region is set. */
+  function badge(): string | null {
+    return (
+      document.querySelector('.stem-player-loop-badge')?.textContent ?? null
+    )
+  }
+
+  it('renders the region from the snapshot, formatted', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    expect(badge()).toBeNull()
+
+    act(() => {
+      engine.update({ loopRegion: { start: 12, end: 34 } })
+    })
+
+    expect(badge()).toBe('Loop 0:12 – 0:34')
+    // A live region, so a screen reader hears the loop it did not watch being
+    // drawn — and it is mounted whether or not there is a region to announce.
+    expect(document.querySelector('.stem-player-loop-status')).toHaveAttribute(
+      'aria-live',
+      'polite',
+    )
+  })
+
+  it('marks the loop start at the playhead, running to the end of the mix', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    dragTimeline(20)
+
+    await userEvent.click(loopButton('Loop start'))
+
+    expect(engine.loopRegions).toHaveLength(1)
+    expect(engine.loopRegions[0]?.start).toBeCloseTo(20, 6)
+    expect(engine.loopRegions[0]?.end).toBe(STEM_SECONDS)
+    expect(badge()).toBe('Loop 0:20 – 1:00')
+  })
+
+  it('marks the loop end at the playhead, keeping a start that is behind it', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    dragTimeline(20)
+    await userEvent.click(loopButton('Loop start'))
+    dragTimeline(40)
+
+    await userEvent.click(loopButton('Loop end'))
+
+    expect(engine.loopRegions).toHaveLength(2)
+    expect(engine.loopRegions[1]?.start).toBeCloseTo(20, 6)
+    expect(engine.loopRegions[1]?.end).toBeCloseTo(40, 6)
+    expect(badge()).toBe('Loop 0:20 – 0:40')
+  })
+
+  it('falls back to the start of the mix for a loop end with no region', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    dragTimeline(30)
+
+    await userEvent.click(loopButton('Loop end'))
+
+    expect(engine.loopRegions[0]?.start).toBe(0)
+    expect(engine.loopRegions[0]?.end).toBeCloseTo(30, 6)
+  })
+
+  it('widens rather than swapping when the edges would cross', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    dragTimeline(20)
+    await userEvent.click(loopButton('Loop start'))
+    // The playhead moves *past* the region's end, and the user asks for a new
+    // start there: the end the region had is no longer usable, so the region
+    // runs to the end of the mix rather than quietly moving the edge the user
+    // did not touch.
+    dragTimeline(50)
+    act(() => {
+      engine.update({ loopRegion: { start: 20, end: 40 } })
+    })
+
+    await userEvent.click(loopButton('Loop start'))
+
+    expect(engine.loopRegions[1]?.start).toBeCloseTo(50, 6)
+    expect(engine.loopRegions[1]?.end).toBe(STEM_SECONDS)
+  })
+
+  it('offers Clear loop only when there is one, and clears it', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    expect(loopButton('Clear loop')).toBeDisabled()
+
+    await userEvent.click(loopButton('Loop start'))
+    expect(loopButton('Clear loop')).toBeEnabled()
+
+    await userEvent.click(loopButton('Clear loop'))
+
+    expect(engine.loopRegions.at(-1)).toBeNull()
+    expect(badge()).toBeNull()
+    expect(loopButton('Clear loop')).toBeDisabled()
+  })
+
+  it('leaves the loop controls disabled until the stems are ready', async () => {
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    renderPlayer(new FakeEngine())
+    await screen.findByText('Decoding stems…')
+
+    expect(screen.getByRole('button', { name: 'Loop start' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Loop end' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Clear loop' })).toBeDisabled()
+  })
+
+  it('drags a region on the ruler, straight through to the engine', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const ruler = screen.getByTestId('stem-timeline-ruler-row')
+
+    fireEvent.pointerDown(ruler, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(ruler, { clientX: xFor(35), pointerId: 1 })
+    fireEvent.pointerUp(ruler, { pointerId: 1 })
+
+    expect(engine.loopRegions).toHaveLength(1)
+    expect(engine.loopRegions[0]?.start).toBeCloseTo(10, 6)
+    expect(engine.loopRegions[0]?.end).toBeCloseTo(35, 6)
+    expect(badge()).toBe('Loop 0:10 – 0:35')
+    // The drag committed a region, not a seek.
+    expect(engine.seeks).toEqual([])
+  })
+})
+
 // ---------------------------------------------------------------------------
-// Against the real engine, with a fake AudioContext underneath: the mute and
-// solo *semantics* the user actually experiences, end to end through the UI.
+// Against the real engine, with a fake AudioContext underneath: the mute,
+// solo and loop *semantics* the user actually experiences, end to end through
+// the UI.
 // ---------------------------------------------------------------------------
 
 describe('StemPlayer over the real engine', () => {
@@ -1241,6 +1388,37 @@ describe('StemPlayer over the real engine', () => {
       new Set([30]),
     )
     expect(screen.getByText('0:30 / 1:00')).toBeInTheDocument()
+  })
+
+  it('loops every stem on the region a ruler drag draws (feature 053)', async () => {
+    await renderReal(fourStemNames)
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    const ruler = screen.getByTestId('stem-timeline-ruler-row')
+
+    fireEvent.pointerDown(ruler, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(ruler, { clientX: xFor(30), pointerId: 1 })
+    fireEvent.pointerUp(ruler, { pointerId: 1 })
+
+    // One rebuilt generation, every stem carrying the same loop boundaries
+    // and one shared start time: that is what "sample-accurate across every
+    // stem" means at the level this test can see.
+    const looping = context.sourcesFrom(4)
+    expect(looping).toHaveLength(4)
+    expect(looping.every((source) => source.loop)).toBe(true)
+    expect(new Set(looping.map((source) => source.started?.when)).size).toBe(1)
+    expect(new Set(looping.map((source) => source.loopStart)).size).toBe(1)
+    expect(new Set(looping.map((source) => source.loopEnd)).size).toBe(1)
+    expect(looping[0]?.loopStart).toBeCloseTo(10, 6)
+    expect(looping[0]?.loopEnd).toBeCloseTo(30, 6)
+    expect(document.querySelector('.stem-player-loop-badge')?.textContent).toBe(
+      'Loop 0:10 – 0:30',
+    )
+
+    // …and the playhead wraps with them: 25 s of raw material into a 10–30 s
+    // loop entered at 0:10 is 0:15.
+    context.currentTime = 35
+    flushFrame()
+    expect(screen.getByText('0:15 / 1:00')).toBeInTheDocument()
   })
 
   it('resumes a suspended context from the play click', async () => {

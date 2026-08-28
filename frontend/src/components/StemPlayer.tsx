@@ -46,6 +46,7 @@ const EMPTY_SNAPSHOT: StemEngineSnapshot = {
   stems: [],
   playing: false,
   durationSeconds: 0,
+  loopRegion: null,
   error: null,
 }
 
@@ -133,7 +134,11 @@ export interface StemPlayerProps {
  * time axis, a playhead, and a timeline that *is* the accessible seek control.
  * What stays here is the state the timeline reports into — the playhead
  * position, and the drag position that overrides it mid-gesture — plus the
- * Play/Pause button and the readout.
+ * Play/Pause button, the readout, and (feature 053) the loop controls: "Loop
+ * start", "Loop end" and "Clear loop", with a badge that names the region.
+ * Those buttons exist because the gesture that draws a region is a pointer
+ * drag over an `aria-hidden` picture; they are the keyboard and screen-reader
+ * path to the same intent, and the badge is the live region that reports it.
  *
  * Playback is an **inspection tool** (ARCHITECTURE.md §13): transport, solo
  * and mute, and nothing that edits audio.
@@ -289,6 +294,22 @@ export function StemPlayer({
     [engine],
   )
 
+  // Batched, like `commitSeek` and unlike `setLevel`: a region set while
+  // playing tears down and rebuilds every source node, so the timeline
+  // commits one call per gesture and the two "Loop …" buttons are one press
+  // each. The engine clamps, and clears rather than setting a degenerate
+  // region — so "start after end" needs no special case here.
+  const setLoopRegion = useCallback(
+    (startSeconds: number, endSeconds: number) => {
+      engine?.setLoopRegion(startSeconds, endSeconds)
+    },
+    [engine],
+  )
+
+  const clearLoopRegion = useCallback(() => {
+    engine?.clearLoopRegion()
+  }, [engine])
+
   // Continuous, deliberately — unlike `commitSeek`, which batches a whole
   // drag into one call because a seek tears down and rebuilds every source
   // node. A level change is a plain gain write (`AudioParam.value`), so there
@@ -357,6 +378,34 @@ export function StemPlayer({
       snapshot.error === null ? null : errorInfo(snapshot.error)
     /** The drag position while a gesture is in flight, the clock otherwise. */
     const position = Math.min(scrubValue ?? currentTime, duration)
+    const loopRegion = snapshot.loopRegion
+
+    /**
+     * "Loop start" means *loop from here*: to the region's own end when that
+     * is still ahead of the playhead, and to the end of the mix otherwise —
+     * which is also what it means with no region yet. "Loop end" is the
+     * mirror image, falling back to the start of the mix. An impossible pair
+     * therefore never reaches the engine as one; it resolves to the widest
+     * region consistent with the edge the user just placed, rather than being
+     * silently swapped (which would move the edge they did *not* touch).
+     */
+    const markLoopStart = (): void => {
+      setLoopRegion(
+        position,
+        loopRegion !== null && loopRegion.end > position
+          ? loopRegion.end
+          : duration,
+      )
+    }
+
+    const markLoopEnd = (): void => {
+      setLoopRegion(
+        loopRegion !== null && loopRegion.start < position
+          ? loopRegion.start
+          : 0,
+        position,
+      )
+    }
 
     // Lane rows come from the *result*, merged with whatever the engine
     // snapshot knows so far: the rows have to exist while the stems are still
@@ -403,6 +452,9 @@ export function StemPlayer({
           onScrub={handleScrub}
           onScrubCancel={cancelScrub}
           onSeek={commitSeek}
+          loopRegion={loopRegion}
+          onSetLoopRegion={setLoopRegion}
+          onClearLoopRegion={clearLoopRegion}
           onTogglePlayback={togglePlayback}
           onToggleMute={toggleMute}
           onToggleSolo={toggleSolo}
@@ -421,6 +473,52 @@ export function StemPlayer({
           <p className="stem-player-time">
             {formatDuration(position)} / {formatDuration(duration)}
           </p>
+
+          {/*
+            The keyboard and screen-reader path to a loop region: the ruler
+            drag that draws one is a pointer gesture on an `aria-hidden`
+            picture, so the transport carries the same three intents as
+            buttons. The badge is the live region that says what came of them.
+          */}
+          <div className="stem-player-loop-controls">
+            <button
+              type="button"
+              className="stem-player-loop"
+              disabled={!ready}
+              onClick={markLoopStart}
+            >
+              Loop start
+            </button>
+            <button
+              type="button"
+              className="stem-player-loop"
+              disabled={!ready}
+              onClick={markLoopEnd}
+            >
+              Loop end
+            </button>
+            <button
+              type="button"
+              className="stem-player-loop"
+              disabled={loopRegion === null}
+              onClick={clearLoopRegion}
+            >
+              Clear loop
+            </button>
+          </div>
+
+          {/*
+            Mounted whether or not there is a region: a live region has to be
+            in the DOM *before* its content changes for the change to be
+            announced.
+          */}
+          <div className="stem-player-loop-status" aria-live="polite">
+            {loopRegion !== null && (
+              <p className="stem-player-loop-badge">
+                {`Loop ${formatDuration(loopRegion.start)} – ${formatDuration(loopRegion.end)}`}
+              </p>
+            )}
+          </div>
         </div>
       </>
     )

@@ -103,8 +103,15 @@
   border-radius: 0.5rem;
 }
 
+/*
+ * The ruler's row is also the loop-region drag surface (053), which is why it
+ * takes a cursor and refuses the browser's own touch panning: a touch drag
+ * along it draws a region rather than scrolling the page away underneath it.
+ */
 .stem-timeline-ruler-row {
   position: relative;
+  cursor: pointer;
+  touch-action: none;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -321,4 +328,52 @@
   border-right: 1px solid var(--color-border);
   border-left: none;
   translate: -100%;
+}
+
+/* 053: loop regions */
+
+/*
+ * The loop band, spanning the ruler and every lane. It is rendered *after* the
+ * seek surface so its handles are above it, and is therefore transparent to
+ * the pointer everywhere else — otherwise it would swallow every click inside
+ * the loop, which is exactly where a user wants to seek.
+ *
+ * `left`/`width` are inline pixels rather than a transform: unlike the
+ * playhead this box changes width as well as position, so there is no
+ * compositor-only version of the same move.
+ */
+.stem-timeline-loop-region {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background-color: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border-right: 1px solid var(--color-accent);
+  border-left: 1px solid var(--color-accent);
+  pointer-events: none;
+}
+
+/*
+ * An 8 px grab strip on each edge, hanging half outside the band so the
+ * pointer finds it slightly before it reaches the boundary.
+ */
+.stem-timeline-loop-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.stem-timeline-loop-handle-start {
+  left: -4px;
+}
+
+.stem-timeline-loop-handle-end {
+  right: -4px;
+}
+
+.stem-timeline-loop-handle:hover {
+  background-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
 }

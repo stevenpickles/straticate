@@ -421,6 +421,47 @@ export class Workflow {
     return this.player.getByRole('button', { name: 'Zoom to fit' })
   }
 
+  /**
+   * The ruler's row. Since feature 053 it is the loop-region control: a drag
+   * across it draws a region, a plain click clears one and seeks.
+   */
+  get ruler(): Locator {
+    return this.player.locator('.stem-timeline-ruler-row')
+  }
+
+  /** The `Loop m:ss – m:ss` badge, absent when there is no region. */
+  get loopBadge(): Locator {
+    return this.player.locator('.stem-player-loop-badge')
+  }
+
+  get clearLoop(): Locator {
+    return this.player.getByRole('button', { name: 'Clear loop' })
+  }
+
+  /**
+   * Drag across the ruler from one fraction of the strip to another — the
+   * gesture that sets a loop region, and the one that must commit exactly one
+   * of them.
+   *
+   * Like {@link Workflow.seekToFraction}, the pixels come from the element's
+   * own box, so the spec asserts in seconds of audio. The intermediate move is
+   * not cosmetic: a press and a release at two points with nothing in between
+   * is a click, and a click on the ruler means the opposite of a drag.
+   */
+  async dragRuler(from: number, to: number): Promise<void> {
+    const box = await this.ruler.boundingBox()
+    expect(box, 'the ruler has been laid out').not.toBeNull()
+    if (box === null) {
+      throw new Error('unreachable')
+    }
+    const y = box.y + box.height / 2
+    await this.page.mouse.move(box.x + box.width * from, y)
+    await this.page.mouse.down()
+    await this.page.mouse.move(box.x + box.width * ((from + to) / 2), y)
+    await this.page.mouse.move(box.x + box.width * to, y)
+    await this.page.mouse.up()
+  }
+
   /** The window the timeline is showing, in seconds of audio. */
   async window(): Promise<{ zoom: number; scrollSeconds: number }> {
     const zoom = await this.strip.getAttribute('data-zoom')
