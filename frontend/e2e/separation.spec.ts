@@ -266,6 +266,26 @@ test.describe.serial('a separation, end to end', () => {
     expect(await workflow.ticks.allTextContents()).toEqual(fittedTicks)
   })
 
+  test('loops a region dragged on the ruler, and clears it again', async () => {
+    // Feature 053. The previous stage left the whole 60 s file on screen, so
+    // a tenth of the strip is 0:06 and four tenths is 0:24 — the badge is
+    // asserted in seconds of audio, with a second of slack either way for the
+    // pixel the drag lands on.
+    expect(await workflow.window()).toEqual({ zoom: 1, scrollSeconds: 0 })
+    await expect(workflow.loopBadge).toHaveCount(0)
+    await expect(workflow.clearLoop).toBeDisabled()
+
+    await workflow.dragRuler(0.1, 0.4)
+
+    await expect(workflow.loopBadge).toHaveText(/^Loop 0:0[5-7] – 0:2[3-5]$/)
+    await expect(workflow.clearLoop).toBeEnabled()
+
+    await workflow.clearLoop.click()
+
+    await expect(workflow.loopBadge).toHaveCount(0)
+    await expect(workflow.clearLoop).toBeDisabled()
+  })
+
   test('exports the stems as a real download', async () => {
     // FLAC by choice: it exercises the format picker, and a lossless encode
     // of four minute-long stems is a fraction of the 24-bit WAV zip to build

@@ -128,17 +128,26 @@ export class FakeSourceNode
 {
   buffer: AudioEngineBuffer | null = null
   onended: ((event: Event) => void) | null = null
+  /** Whether the engine asked this source to loop (feature 053). */
+  loop = false
+  /** Where a wrap lands, as the engine set it before `start()`. */
+  loopStart = 0
+  /** Where playback wraps, as the engine set it before `start()`. */
+  loopEnd = 0
   /** The `start()` call this source received, or `null`. */
   started: ScheduledStart | null = null
   /** How many times `stop()` was called. */
   stopCount = 0
+  /** The `when` of every `stop()` call, in order. */
+  readonly stops: (number | undefined)[] = []
 
   start(when?: number, offset?: number): void {
     this.started = { when, offset }
   }
 
-  stop(): void {
+  stop(when?: number): void {
     this.stopCount += 1
+    this.stops.push(when)
   }
 }
 

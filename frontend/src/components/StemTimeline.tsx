@@ -14,12 +14,32 @@
  * │   └── .stem-timeline-lane-header  name, status, Mute/Solo,
  * │                                   .stem-timeline-lane-fader (054)
  * └── .stem-timeline-tracks         the strip; its width is the viewport
- *     ├── .stem-timeline-ruler        tick labels   → 053: loop-region drag
+ *     ├── .stem-timeline-ruler-row    tick labels; loop-region drag (053)
  *     ├── .stem-timeline-scrollbar    the scroll thumb (051)
  *     ├── .stem-timeline-lanes        one canvas per stem
  *     ├── .stem-timeline-playhead     transform-moved div
- *     └── .stem-timeline-surface      role="slider" → 052: audible scrub
+ *     ├── .stem-timeline-surface      role="slider" → 052: audible scrub
+ *     └── .stem-timeline-loop-region  the loop band and its handles (053)
  * ```
+ *
+ * ## Loop regions (feature 053)
+ *
+ * A drag across the ruler — or a **shifted** drag over the lanes — draws a
+ * region and commits exactly one `setLoopRegion` on release; a plain click on
+ * the ruler clears the region and seeks, which is Audacity's idiom. Three
+ * things about it are worth knowing before changing any of them:
+ *
+ * - **It is the seek gesture's mechanism, not a second one.** The same
+ *   synchronously-cleared ref, the same one-commit-per-gesture rule (setting a
+ *   region while playing rebuilds every source node, exactly as a seek does),
+ *   and the same split between a *drawn* drag in local state and a *committed*
+ *   value in the engine snapshot.
+ * - **Every reading goes through the current viewport**, so a region dragged
+ *   while zoomed and panned lands on the absolute seconds under the pointer,
+ *   and the band moves with the window afterwards.
+ * - **The band does not take clicks; its handles do.** The overlay is rendered
+ *   after the seek surface so the two 8 px edge handles are above it, and is
+ *   `pointer-events: none` in between so seeking through a region still works.
  *
  * ## Zoom and pan (feature 051)
  *
@@ -78,12 +98,17 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
   type PointerEvent,
 } from 'react'
-import type { StemLoadStatus, StemPlayerEngine } from '../audio/engine'
+import type {
+  LoopRegion,
+  StemLoadStatus,
+  StemPlayerEngine,
+} from '../audio/engine'
 import { formatDuration } from '../format'
 import { LANE_HEIGHT_PX, TimelineLane } from './TimelineLane'
 import { TimelineRuler } from './TimelineRuler'
@@ -116,6 +141,20 @@ const COARSE_STEP_SECONDS = 5
  * a little of what was just heard behind it.
  */
 const FOLLOW_MARGIN = 0.1
+
+/**
+ * How far a pointer must travel before a press on the ruler counts as a drag
+ * rather than a click. Below it the gesture is Audacity's "clear the loop and
+ * jump here"; above it, it is a region.
+ */
+const CLICK_SLOP_PX = 4
+
+/**
+ * The shortest region a gesture may leave behind, in seconds. Collapsing an
+ * edge past this clears the loop instead of setting a fifty-millisecond one,
+ * which is the only sane reading of "drag the two edges together".
+ */
+const MIN_REGION_SECONDS = 0.05
 
 /** One stem, as the timeline needs to see it. */
 export interface StemTimelineStem {
@@ -160,6 +199,20 @@ export interface StemTimelineProps {
   readonly onScrubCancel: () => void
   /** Commit a seek. Fires **once** per pointer gesture, and once per keypress. */
   readonly onSeek: (seconds: number) => void
+  /**
+   * The committed loop region, straight from the engine snapshot — the single
+   * source of truth for what is looping. A drag in flight is drawn from this
+   * component's own state and never from here.
+   */
+  readonly loopRegion: LoopRegion | null
+  /**
+   * Commit a loop region. Fires **once** per pointer gesture, for the same
+   * reason {@link StemTimelineProps.onSeek} does: setting one while playing
+   * rebuilds every source node.
+   */
+  readonly onSetLoopRegion: (startSeconds: number, endSeconds: number) => void
+  /** Drop the loop region. */
+  readonly onClearLoopRegion: () => void
   /** Space on the focused timeline. */
   readonly onTogglePlayback: () => void
   /** Mute button in a lane header. */
@@ -180,6 +233,47 @@ function clamp(value: number, min: number, max: number): number {
     return min
   }
   return Math.min(Math.max(value, min), max)
+}
+
+/** The region two edges describe, whichever order they were dragged in. */
+function regionBetween(first: number, second: number): LoopRegion {
+  return {
+    start: Math.min(first, second),
+    end: Math.max(first, second),
+  }
+}
+
+/**
+ * A loop-region gesture in flight: a ruler drag, a shifted drag on the lane
+ * surface, or one edge handle being moved. All three are the same thing — an
+ * anchored edge, a moving edge, and one commit on release.
+ */
+interface RegionDrag {
+  /** A ruler press may still turn out to be a click; a handle press may not. */
+  readonly kind: 'ruler' | 'handle'
+  /** The edge that stays where it is, in seconds. */
+  readonly anchorSeconds: number
+  /** Where the pointer went down, in pixels along the strip. */
+  readonly originX: number
+  /** Whether the pointer has travelled past {@link CLICK_SLOP_PX} yet. */
+  moved: boolean
+  /** Where the moving edge is now, in seconds. */
+  seconds: number
+}
+
+/** Give an element the pointer, so a drag that leaves it keeps arriving. */
+function capturePointer(event: PointerEvent<HTMLDivElement>): void {
+  // jsdom implements neither the method nor `pointerId`, hence the guard.
+  const element = event.currentTarget
+  if (typeof element.setPointerCapture !== 'function') {
+    return
+  }
+  try {
+    element.setPointerCapture(event.pointerId)
+  } catch {
+    // A pointer the browser has already released; the gesture still works,
+    // it just stops tracking outside the element.
+  }
 }
 
 /**
@@ -206,6 +300,9 @@ export function StemTimeline({
   onScrub,
   onScrubCancel,
   onSeek,
+  loopRegion,
+  onSetLoopRegion,
+  onClearLoopRegion,
   onTogglePlayback,
   onToggleMute,
   onToggleSolo,
@@ -244,82 +341,10 @@ export function StemTimeline({
   const canZoomOut = viewport.zoom > 1
 
   /**
-   * The live gesture's position, or `null` when no pointer is down. A ref
-   * rather than state because it must be readable and clearable *within* one
-   * event handler, before React has re-rendered anything — that is what makes
-   * a second release event a no-op instead of a second seek.
-   */
-  const gesture = useRef<number | null>(null)
-
-  const secondsAt = useCallback(
-    (event: PointerEvent<HTMLDivElement>): number => {
-      const rect = event.currentTarget.getBoundingClientRect()
-      return xToTime(viewport, event.clientX - rect.left)
-    },
-    [viewport],
-  )
-
-  const beginGesture = useCallback(
-    (event: PointerEvent<HTMLDivElement>) => {
-      if (!ready) {
-        return
-      }
-      const seconds = secondsAt(event)
-      gesture.current = seconds
-      // Capture so a drag that leaves the strip keeps arriving here. jsdom
-      // implements neither the method nor `pointerId`, hence the guard.
-      const surface = event.currentTarget
-      if (typeof surface.setPointerCapture === 'function') {
-        try {
-          surface.setPointerCapture(event.pointerId)
-        } catch {
-          // A pointer the browser has already released; the gesture still
-          // works, it just stops tracking outside the element.
-        }
-      }
-      onScrub(seconds)
-    },
-    [ready, secondsAt, onScrub],
-  )
-
-  const updateGesture = useCallback(
-    (event: PointerEvent<HTMLDivElement>) => {
-      if (gesture.current === null) {
-        return
-      }
-      const seconds = secondsAt(event)
-      gesture.current = seconds
-      onScrub(seconds)
-    },
-    [secondsAt, onScrub],
-  )
-
-  const commitGesture = useCallback(() => {
-    const seconds = gesture.current
-    if (seconds === null) {
-      return
-    }
-    // Cleared before the seek, synchronously: this is the whole mechanism.
-    gesture.current = null
-    onSeek(seconds)
-  }, [onSeek])
-
-  const abandonGesture = useCallback(() => {
-    if (gesture.current === null) {
-      return
-    }
-    gesture.current = null
-    onScrubCancel()
-  }, [onScrubCancel])
-
-  // -------------------------------------------------------------------------
-  // Zoom and pan
-  // -------------------------------------------------------------------------
-
-  /**
    * The track strip, once it is mounted. State rather than a ref because the
    * wheel listener has to be attached to it in an effect, and an effect cannot
-   * be woken by a ref changing.
+   * be woken by a ref changing — and because every gesture that does not begin
+   * on the strip itself (an edge handle) measures its pixels against it.
    */
   const [tracks, setTracks] = useState<HTMLElement | null>(null)
 
@@ -330,6 +355,230 @@ export function StemTimeline({
     },
     [trackRef],
   )
+
+  /**
+   * The live gesture's position, or `null` when no pointer is down. A ref
+   * rather than state because it must be readable and clearable *within* one
+   * event handler, before React has re-rendered anything — that is what makes
+   * a second release event a no-op instead of a second seek.
+   */
+  const gesture = useRef<number | null>(null)
+
+  /** The live loop-region gesture, under exactly the same rule. */
+  const regionDrag = useRef<RegionDrag | null>(null)
+
+  /**
+   * The region a drag is describing, or `null` when none is. Local state, so
+   * the overlay follows the pointer while the committed region — the engine's
+   * `loopRegion` — stays where it is until release. Exactly the arrangement
+   * the seek gesture uses for the scrub position.
+   */
+  const [draftRegion, setDraftRegion] = useState<LoopRegion | null>(null)
+
+  const secondsAt = useCallback(
+    (event: PointerEvent<HTMLDivElement>): number => {
+      const rect = event.currentTarget.getBoundingClientRect()
+      return xToTime(viewport, event.clientX - rect.left)
+    },
+    [viewport],
+  )
+
+  /**
+   * A client x as an offset along the strip. Measured against the strip
+   * rather than against the element the event landed on, because an edge
+   * handle is eight pixels wide and its own box says nothing about time.
+   */
+  const stripX = useCallback(
+    (clientX: number): number =>
+      clientX - (tracks?.getBoundingClientRect().left ?? 0),
+    [tracks],
+  )
+
+  // -------------------------------------------------------------------------
+  // Loop region (feature 053)
+  //
+  // One gesture, three entry points: a drag across the ruler, a shifted drag
+  // on the lane surface, and an edge handle. Each anchors one edge, moves the
+  // other, and commits **once** on release — a region set while playing
+  // rebuilds every source node, so it is batched for the same reason a seek is.
+  // -------------------------------------------------------------------------
+
+  const beginRegionDrag = useCallback(
+    (
+      event: PointerEvent<HTMLDivElement>,
+      kind: RegionDrag['kind'],
+      anchorSeconds: number,
+    ) => {
+      if (!ready) {
+        return
+      }
+      const x = stripX(event.clientX)
+      const seconds = kind === 'handle' ? xToTime(viewport, x) : anchorSeconds
+      regionDrag.current = {
+        kind,
+        anchorSeconds,
+        originX: x,
+        moved: false,
+        seconds,
+      }
+      // A handle is already showing a region, so it draws one immediately; a
+      // ruler press does not, until it is known to be a drag rather than a
+      // click.
+      setDraftRegion(
+        kind === 'handle' ? regionBetween(anchorSeconds, seconds) : null,
+      )
+      capturePointer(event)
+    },
+    [ready, stripX, viewport],
+  )
+
+  const updateRegionDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      const drag = regionDrag.current
+      if (drag === null) {
+        return
+      }
+      const x = stripX(event.clientX)
+      drag.seconds = xToTime(viewport, x)
+      if (!drag.moved && Math.abs(x - drag.originX) >= CLICK_SLOP_PX) {
+        drag.moved = true
+      }
+      if (drag.moved || drag.kind === 'handle') {
+        setDraftRegion(regionBetween(drag.anchorSeconds, drag.seconds))
+      }
+    },
+    [stripX, viewport],
+  )
+
+  const commitRegionDrag = useCallback(() => {
+    const drag = regionDrag.current
+    if (drag === null) {
+      return
+    }
+    // Cleared before anything commits, synchronously — the same mechanism the
+    // seek gesture uses, and for the same reason.
+    regionDrag.current = null
+    setDraftRegion(null)
+    if (drag.kind === 'ruler' && !drag.moved) {
+      // Audacity's plain click on the ruler: drop the loop and jump there.
+      onClearLoopRegion()
+      onSeek(drag.anchorSeconds)
+      return
+    }
+    const region = regionBetween(drag.anchorSeconds, drag.seconds)
+    if (region.end - region.start < MIN_REGION_SECONDS) {
+      // The two edges were dragged together: that is "no loop", not a loop
+      // too short to hear.
+      onClearLoopRegion()
+      return
+    }
+    onSetLoopRegion(region.start, region.end)
+  }, [onClearLoopRegion, onSeek, onSetLoopRegion])
+
+  const abandonRegionDrag = useCallback(() => {
+    if (regionDrag.current === null) {
+      return
+    }
+    regionDrag.current = null
+    setDraftRegion(null)
+  }, [])
+
+  const beginRulerDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      beginRegionDrag(event, 'ruler', xToTime(viewport, stripX(event.clientX)))
+    },
+    [beginRegionDrag, stripX, viewport],
+  )
+
+  const beginStartHandleDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (loopRegion !== null) {
+        // Dragging the start edge pivots on the end, and vice versa.
+        beginRegionDrag(event, 'handle', loopRegion.end)
+      }
+    },
+    [beginRegionDrag, loopRegion],
+  )
+
+  const beginEndHandleDrag = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (loopRegion !== null) {
+        beginRegionDrag(event, 'handle', loopRegion.start)
+      }
+    },
+    [beginRegionDrag, loopRegion],
+  )
+
+  // -------------------------------------------------------------------------
+  // Seeking
+  // -------------------------------------------------------------------------
+
+  const beginGesture = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (!ready) {
+        return
+      }
+      if (event.shiftKey) {
+        // The second entry point to the loop gesture: a shifted drag over the
+        // lanes is the same thing as a drag across the ruler, and seeks
+        // nothing.
+        beginRulerDrag(event)
+        return
+      }
+      const seconds = secondsAt(event)
+      gesture.current = seconds
+      // Capture so a drag that leaves the strip keeps arriving here.
+      capturePointer(event)
+      onScrub(seconds)
+    },
+    [ready, secondsAt, onScrub, beginRulerDrag],
+  )
+
+  const updateGesture = useCallback(
+    (event: PointerEvent<HTMLDivElement>) => {
+      if (regionDrag.current !== null) {
+        updateRegionDrag(event)
+        return
+      }
+      if (gesture.current === null) {
+        return
+      }
+      const seconds = secondsAt(event)
+      gesture.current = seconds
+      onScrub(seconds)
+    },
+    [secondsAt, onScrub, updateRegionDrag],
+  )
+
+  const commitGesture = useCallback(() => {
+    if (regionDrag.current !== null) {
+      commitRegionDrag()
+      return
+    }
+    const seconds = gesture.current
+    if (seconds === null) {
+      return
+    }
+    // Cleared before the seek, synchronously: this is the whole mechanism.
+    gesture.current = null
+    onSeek(seconds)
+  }, [onSeek, commitRegionDrag])
+
+  const abandonGesture = useCallback(() => {
+    if (regionDrag.current !== null) {
+      abandonRegionDrag()
+      return
+    }
+    if (gesture.current === null) {
+      return
+    }
+    gesture.current = null
+    onScrubCancel()
+  }, [onScrubCancel, abandonRegionDrag])
+
+  // -------------------------------------------------------------------------
+  // Zoom and pan
+  // -------------------------------------------------------------------------
 
   const handleWheel = useCallback(
     (event: WheelEvent, element: HTMLElement) => {
@@ -485,8 +734,10 @@ export function StemTimeline({
         event.preventDefault()
         // A keyboard commit ends any pointer gesture still in flight: were
         // the ref left set, the eventual pointerup would find it and fire a
-        // second, stale seek over this one.
+        // second, stale seek over this one. A loop drag counts as one.
         gesture.current = null
+        regionDrag.current = null
+        setDraftRegion(null)
         onSeek(clamp(seconds, 0, durationSeconds))
       }
       switch (event.key) {
@@ -524,6 +775,36 @@ export function StemTimeline({
   )
 
   const playheadX = clamp(playheadOffsetX, 0, viewport.widthPx)
+
+  /**
+   * What the overlay draws: the drag in flight while there is one, and the
+   * engine's committed region otherwise. Both are absolute seconds, so the
+   * box is derived through the *current* viewport and moves with zoom and pan
+   * like everything else on the strip.
+   */
+  const shownRegion = draftRegion ?? loopRegion
+
+  const regionBox = useMemo(() => {
+    if (shownRegion === null || viewport.widthPx <= 0) {
+      return null
+    }
+    const startX = timeToX(viewport, shownRegion.start)
+    const endX = timeToX(viewport, shownRegion.end)
+    if (endX <= 0 || startX >= viewport.widthPx) {
+      // Panned entirely off one side: there is nothing to draw, and a box
+      // clamped to a zero width at the edge would read as a region there.
+      return null
+    }
+    return {
+      left: clamp(startX, 0, viewport.widthPx),
+      width:
+        clamp(endX, 0, viewport.widthPx) - clamp(startX, 0, viewport.widthPx),
+      // An edge scrolled out of the window has no handle: the box's edge is
+      // the window's, and dragging it would move the wrong second.
+      startVisible: startX >= 0,
+      endVisible: endX <= viewport.widthPx,
+    }
+  }, [shownRegion, viewport])
 
   /** The thumb mirrors the window: how much of the file, and how far in. */
   const windowFraction =
@@ -651,9 +932,21 @@ export function StemTimeline({
           Math.round(viewport.scrollSeconds * 1000) / 1000,
         )}
       >
+        {/*
+          The ruler is also the loop-region control: a drag across it draws a
+          region and commits one `setLoopRegion` on release, a plain click
+          clears the region and seeks. The ruler itself stays `aria-hidden` —
+          the accessible path to a loop is the transport's three buttons and
+          its badge, in `StemPlayer`.
+        */}
         <div
           className="stem-timeline-ruler-row"
+          data-testid="stem-timeline-ruler-row"
           style={{ height: `${String(RULER_HEIGHT_PX)}px` }}
+          onPointerDown={beginRulerDrag}
+          onPointerMove={updateRegionDrag}
+          onPointerUp={commitRegionDrag}
+          onPointerCancel={abandonRegionDrag}
         >
           <TimelineRuler viewport={viewport} />
         </div>
@@ -732,6 +1025,44 @@ export function StemTimeline({
           onPointerCancel={abandonGesture}
           onKeyDown={handleKeyDown}
         />
+
+        {/*
+          Last, so the edge handles sit above the seek surface and can be
+          grabbed over the lanes; the band itself is `pointer-events: none`,
+          so everything between the handles still seeks.
+        */}
+        {regionBox !== null && (
+          <div
+            aria-hidden="true"
+            className="stem-timeline-loop-region"
+            data-testid="stem-timeline-loop-region"
+            style={{
+              left: `${String(regionBox.left)}px`,
+              width: `${String(regionBox.width)}px`,
+            }}
+          >
+            {regionBox.startVisible && (
+              <div
+                className="stem-timeline-loop-handle stem-timeline-loop-handle-start"
+                data-testid="stem-timeline-loop-handle-start"
+                onPointerDown={beginStartHandleDrag}
+                onPointerMove={updateRegionDrag}
+                onPointerUp={commitRegionDrag}
+                onPointerCancel={abandonRegionDrag}
+              />
+            )}
+            {regionBox.endVisible && (
+              <div
+                className="stem-timeline-loop-handle stem-timeline-loop-handle-end"
+                data-testid="stem-timeline-loop-handle-end"
+                onPointerDown={beginEndHandleDrag}
+                onPointerMove={updateRegionDrag}
+                onPointerUp={commitRegionDrag}
+                onPointerCancel={abandonRegionDrag}
+              />
+            )}
+          </div>
+        )}
       </div>
     </div>
   )
