@@ -10,7 +10,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { StemTimeline, type StemTimelineStem } from './StemTimeline'
 import type {
@@ -73,7 +73,7 @@ function bufferEngine(names: readonly string[]): StemPlayerEngine {
   }
 }
 
-/** A loaded, audible stem of `durationSeconds`. */
+/** A loaded, audible stem of `durationSeconds`, at full level. */
 function loaded(name: string, durationSeconds: number): StemTimelineStem {
   return {
     name,
@@ -81,6 +81,7 @@ function loaded(name: string, durationSeconds: number): StemTimelineStem {
     muted: false,
     soloed: false,
     audible: true,
+    level: 1,
     durationSeconds,
   }
 }
@@ -90,6 +91,7 @@ interface RenderOptions {
   readonly durationSeconds?: number
   readonly positionSeconds?: number
   readonly ready?: boolean
+  readonly onSetLevel?: (name: string, value: number) => void
 }
 
 function renderTimeline(options: RenderOptions) {
@@ -107,6 +109,7 @@ function renderTimeline(options: RenderOptions) {
       onTogglePlayback={() => undefined}
       onToggleMute={() => undefined}
       onToggleSolo={() => undefined}
+      onSetLevel={options.onSetLevel ?? (() => undefined)}
     />,
   )
   return { ...view, engine }
@@ -198,6 +201,7 @@ describe('StemTimeline lanes', () => {
         onTogglePlayback={() => undefined}
         onToggleMute={() => undefined}
         onToggleSolo={() => undefined}
+        onSetLevel={() => undefined}
       />,
     )
 
@@ -253,6 +257,7 @@ describe('StemTimeline lane headers', () => {
         onTogglePlayback={() => undefined}
         onToggleMute={(name) => muted.push(name)}
         onToggleSolo={(name) => soloed.push(name)}
+        onSetLevel={() => undefined}
       />,
     )
     await act(async () => {})
@@ -271,5 +276,90 @@ describe('StemTimeline lane headers', () => {
 
     expect(screen.getByText('Loading…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Solo vocals' })).toBeDisabled()
+  })
+})
+
+describe('StemTimeline level faders (feature 054)', () => {
+  it('gives every stem its own fader, for two- and four-stem results', async () => {
+    await renderPainted({
+      stems: ['vocals', 'drums', 'bass', 'other'].map((name) =>
+        loaded(name, AXIS_SECONDS),
+      ),
+    })
+
+    for (const name of ['vocals', 'drums', 'bass', 'other']) {
+      expect(
+        screen.getByRole('slider', { name: `${name} level` }),
+      ).toBeInTheDocument()
+    }
+  })
+
+  it('forwards every change event by stem name and value — continuously, not once per gesture', async () => {
+    const levels: { name: string; value: number }[] = []
+    await renderPainted({
+      stems: [loaded('vocals', AXIS_SECONDS)],
+      onSetLevel: (name, value) => {
+        levels.push({ name, value })
+      },
+    })
+    const fader = screen.getByRole('slider', { name: 'vocals level' })
+
+    // Two events from one drag must reach the engine as two calls: unlike a
+    // seek, a level write has nothing to batch against.
+    fireEvent.change(fader, { target: { value: '0.4' } })
+    fireEvent.change(fader, { target: { value: '0.75' } })
+
+    expect(levels.length).toBeGreaterThanOrEqual(2)
+    expect(levels).toEqual([
+      { name: 'vocals', value: 0.4 },
+      { name: 'vocals', value: 0.75 },
+    ])
+  })
+
+  it("reflects the stem's level from the snapshot", async () => {
+    await renderPainted({
+      stems: [{ ...loaded('vocals', AXIS_SECONDS), level: 0.65 }],
+    })
+
+    expect(screen.getByRole('slider', { name: 'vocals level' })).toHaveValue(
+      '0.65',
+    )
+  })
+
+  it('is disabled until the stem has loaded', async () => {
+    await renderPainted({
+      stems: [{ ...loaded('vocals', AXIS_SECONDS), status: 'loading' }],
+    })
+
+    expect(screen.getByRole('slider', { name: 'vocals level' })).toBeDisabled()
+  })
+
+  it('stays enabled and keeps showing the true level while the stem is muted', async () => {
+    await renderPainted({
+      stems: [
+        {
+          ...loaded('vocals', AXIS_SECONDS),
+          muted: true,
+          audible: false,
+          level: 0.5,
+        },
+      ],
+    })
+
+    const fader = screen.getByRole('slider', { name: 'vocals level' })
+    expect(fader).toBeEnabled()
+    expect(fader).toHaveValue('0.5')
+  })
+
+  it('stays enabled and keeps showing the true level while soloed out', async () => {
+    await renderPainted({
+      stems: [
+        loaded('vocals', AXIS_SECONDS),
+        { ...loaded('drums', AXIS_SECONDS), soloed: false, audible: false },
+      ],
+    })
+
+    const fader = screen.getByRole('slider', { name: 'drums level' })
+    expect(fader).toBeEnabled()
   })
 })

@@ -289,6 +289,18 @@ export function StemPlayer({
     [engine],
   )
 
+  // Continuous, deliberately — unlike `commitSeek`, which batches a whole
+  // drag into one call because a seek tears down and rebuilds every source
+  // node. A level change is a plain gain write (`AudioParam.value`), so there
+  // is nothing to batch against and every `change` event can reach the engine
+  // as it fires.
+  const setLevel = useCallback(
+    (name: string, value: number) => {
+      engine?.setLevel(name, value)
+    },
+    [engine],
+  )
+
   /**
    * The route out of the `inspect` phase. It lives here rather than only on
    * the progress panel because that panel is mounted for `separate` alone:
@@ -358,6 +370,8 @@ export function StemPlayer({
         muted: state?.muted ?? false,
         soloed: state?.soloed ?? false,
         audible: state?.audible ?? true,
+        // The engine's own default until a snapshot exists to read from.
+        level: state?.level ?? 1,
         // The decoded length once there is one; the contract's until then.
         durationSeconds:
           state !== undefined && state.durationSeconds > 0
@@ -392,6 +406,7 @@ export function StemPlayer({
           onTogglePlayback={togglePlayback}
           onToggleMute={toggleMute}
           onToggleSolo={toggleSolo}
+          onSetLevel={setLevel}
         />
 
         <div className="stem-player-transport">
