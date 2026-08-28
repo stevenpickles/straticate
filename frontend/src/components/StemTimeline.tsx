@@ -11,8 +11,8 @@
  * .stem-timeline
  * ├── .stem-timeline-headers        one row per stem, aligned to the lanes
  * │   ├── .stem-timeline-toolbar      corner cell   → 051: zoom controls
- * │   └── .stem-timeline-lane-header  name, status, Mute/Solo
- * │                                                 → 054: level faders
+ * │   └── .stem-timeline-lane-header  name, status, Mute/Solo,
+ * │                                   .stem-timeline-lane-fader (054)
  * └── .stem-timeline-tracks         the strip; its width is the viewport
  *     ├── .stem-timeline-ruler        tick labels   → 053: loop-region drag
  *     ├── .stem-timeline-lanes        one canvas per stem
@@ -83,6 +83,12 @@ export interface StemTimelineStem {
   readonly soloed: boolean
   /** Whether it is currently heard, after mute/solo resolution. */
   readonly audible: boolean
+  /**
+   * Playback level in `0..1`, independent of mute/solo — a muted or
+   * soloed-out stem still reports its true level, because `audible` is what
+   * carries whether it is currently heard.
+   */
+  readonly level: number
   /** Its own length in seconds, which may be shorter than the axis. */
   readonly durationSeconds: number
 }
@@ -114,6 +120,13 @@ export interface StemTimelineProps {
   readonly onToggleMute: (name: string) => void
   /** Solo button in a lane header. */
   readonly onToggleSolo: (name: string) => void
+  /**
+   * The level fader in a lane header. Fires on every `change` event, not on
+   * release: unlike a seek, a level change is a gain write, not a source
+   * rebuild, so there is no teardown/reschedule cost to batch against — the
+   * fader can (and should) drive `engine.setLevel` continuously.
+   */
+  readonly onSetLevel: (name: string, value: number) => void
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -150,6 +163,7 @@ export function StemTimeline({
   onTogglePlayback,
   onToggleMute,
   onToggleSolo,
+  onSetLevel,
 }: StemTimelineProps) {
   const { viewport, devicePixelRatio, trackRef } =
     useTimelineGeometry(durationSeconds)
@@ -320,6 +334,20 @@ export function StemTimeline({
                 Solo
               </button>
             </div>
+            <input
+              type="range"
+              className="stem-timeline-lane-fader"
+              min={0}
+              max={1}
+              step={0.01}
+              value={stem.level}
+              aria-label={`${stem.name} level`}
+              aria-valuetext={`${String(Math.round(stem.level * 100))}%`}
+              disabled={stem.status !== 'loaded'}
+              onChange={(event) => {
+                onSetLevel(stem.name, Number(event.target.value))
+              }}
+            />
           </div>
         ))}
       </div>
