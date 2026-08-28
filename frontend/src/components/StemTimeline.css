@@ -1,0 +1,221 @@
+/*
+ * Styles for StemTimeline.tsx, imported by that module (feature 050).
+ *
+ * Two columns: a fixed header column (stem name, status, Mute/Solo) and the
+ * track strip, whose measured width *is* the timeline viewport. Heights that
+ * the canvas arithmetic also needs — the lane height and the ruler height —
+ * are set inline from the constants in TimelineLane.tsx / StemTimeline.tsx, so
+ * there is exactly one source of truth for each of them.
+ */
+
+.stem-timeline {
+  display: grid;
+  grid-template-columns: minmax(7rem, 10rem) 1fr;
+  gap: 0.5rem;
+  align-items: start;
+}
+
+.stem-timeline-headers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+/*
+ * The corner cell above the headers; feature 051 puts zoom controls here.
+ * The transparent border matches the ruler's, so the header rows line up with
+ * the lanes to the pixel rather than to the eye.
+ */
+.stem-timeline-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  border-bottom: 1px solid transparent;
+}
+
+/*
+ * Two compact rows — a label line and the toggles — inside a box whose height
+ * is fixed to the lane's, so the header column and the lane column stay in
+ * step. Compact is load-bearing rather than cosmetic: content that overflowed
+ * this box would be laid over the *next* header and would swallow its clicks.
+ */
+.stem-timeline-lane-header {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.25rem 0.4rem;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+}
+
+.stem-timeline-lane-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem;
+  min-width: 0;
+  line-height: 1.2;
+}
+
+.stem-timeline-lane-label .stem-player-stem-name {
+  overflow: hidden;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stem-timeline-lane-label .stem-player-stem-detail {
+  flex: none;
+  font-size: 0.7rem;
+}
+
+.stem-timeline-lane-controls {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.stem-timeline-lane-controls .stem-player-toggle {
+  min-width: 0;
+  flex: 1;
+  padding: 0.1rem 0.35rem;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+/*
+ * The strip. `position: relative` makes it the containing block for the
+ * playhead and the interaction surface, and `overflow: hidden` is what keeps
+ * a playhead at the very end from widening the panel.
+ */
+.stem-timeline-tracks {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  background-color: color-mix(in srgb, var(--color-bg) 60%, transparent);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+}
+
+.stem-timeline-ruler-row {
+  position: relative;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.stem-timeline-ruler {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+/*
+ * Each tick is translated to its own x. `translateX` rather than `left` so a
+ * viewport change is a compositor transform on a handful of spans, and the
+ * -50% keeps the label centred on the instant it names.
+ */
+.stem-timeline-tick {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding-left: 0.2rem;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  border-left: 1px solid var(--color-border);
+  pointer-events: none;
+}
+
+.stem-timeline-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.25rem 0;
+}
+
+.stem-timeline-lane {
+  position: relative;
+  min-width: 0;
+}
+
+/*
+ * A silenced stem reads as silenced before anything repaints: the canvas is
+ * redrawn in the muted token, and this dims the whole row at the same time.
+ * The reduced alpha lives here rather than in the fill colour because
+ * `WaveformDrawContext` (feature 049) exposes no alpha channel.
+ */
+.stem-timeline-lane-silenced {
+  opacity: 0.45;
+}
+
+.stem-timeline-canvas {
+  display: block;
+  width: 100%;
+}
+
+.stem-timeline-lane-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 6px,
+    var(--color-border) 6px,
+    var(--color-border) 7px
+  );
+  border-radius: 0.25rem;
+}
+
+/*
+ * The playhead spans the ruler and every lane. It is moved with a transform
+ * from the position the player already updates on animation frames, so
+ * following the audio clock costs a compositor translation and no repaint.
+ */
+.stem-timeline-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1.5px;
+  background-color: var(--color-danger);
+  pointer-events: none;
+  will-change: transform;
+}
+
+/*
+ * The interaction layer, and the accessible seek control. Transparent and on
+ * top of the lanes; `touch-action: none` is what stops a touch drag from
+ * scrolling the page out from under the gesture.
+ */
+.stem-timeline-surface {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.stem-timeline-surface:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.stem-timeline-surface[aria-disabled='true'] {
+  cursor: default;
+}
+
+@media (max-width: 32rem) {
+  .stem-timeline {
+    grid-template-columns: minmax(5rem, 7rem) 1fr;
+  }
+}
