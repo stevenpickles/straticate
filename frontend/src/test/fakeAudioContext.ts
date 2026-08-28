@@ -12,6 +12,12 @@
  * as a byte length and {@link FakeAudioContext.decodeAudioData} decodes it
  * back, so a fake loader can give each stem its own length with no shared
  * lookup table.
+ *
+ * **Samples travel in the bytes too.** {@link FakeAudioBuffer} reads one
+ * mono sample per byte at 100 Hz, which keeps the duration rule above exactly
+ * as it was (`byteLength / 100`) while giving waveform code something real to
+ * read: {@link stemBytesWithSamples} authors the samples directly, and a test
+ * that only cares about length keeps calling {@link stemBytes}.
  */
 
 import type {
@@ -22,12 +28,65 @@ import type {
   AudioEngineSourceNode,
 } from '../audio/engine'
 
-/** Bytes per second of "audio" in the fake encoding. */
+/**
+ * Bytes per second of "audio" in the fake encoding — and, since one byte is
+ * one sample frame, the fake sample rate.
+ */
 const BYTES_PER_SECOND = 100
+
+/** The byte value a sample of `0` encodes to; 128 samples per unit either way. */
+const SAMPLE_ZERO = 128
 
 /** Fake stem bytes whose decoded duration is `durationSeconds`. */
 export function stemBytes(durationSeconds: number): ArrayBuffer {
   return new ArrayBuffer(Math.round(durationSeconds * BYTES_PER_SECOND))
+}
+
+/**
+ * Fake stem bytes carrying exactly these samples, the inverse of
+ * {@link FakeAudioBuffer.getChannelData}. Amplitudes quantise to 1/128, and
+ * the encoding is one-sided — `-1` survives the round trip, `+1` comes back
+ * as `127/128` — so a test that asserts on exact sample values should author
+ * multiples of 1/128 in `[-1, 127/128]`.
+ */
+export function stemBytesWithSamples(samples: readonly number[]): ArrayBuffer {
+  const bytes = new Uint8Array(samples.length)
+  samples.forEach((sample, index) => {
+    const byte = Math.round((sample + 1) * SAMPLE_ZERO)
+    bytes[index] = Math.min(Math.max(byte, 0), 255)
+  })
+  return bytes.buffer
+}
+
+/**
+ * A decoded buffer in the fake encoding: one mono channel, one sample frame
+ * per byte, 100 frames per second. `duration` is therefore still
+ * `byteLength / 100`, which is the invariant every pre-existing engine test
+ * relies on.
+ */
+export class FakeAudioBuffer implements AudioEngineBuffer {
+  readonly length: number
+  readonly duration: number
+  readonly numberOfChannels = 1
+  readonly sampleRate = BYTES_PER_SECOND
+  private readonly samples: Float32Array
+
+  constructor(data: ArrayBuffer) {
+    const bytes = new Uint8Array(data)
+    this.length = bytes.length
+    this.duration = bytes.length / BYTES_PER_SECOND
+    this.samples = new Float32Array(bytes.length)
+    for (let index = 0; index < bytes.length; index += 1) {
+      this.samples[index] = ((bytes[index] ?? 0) - SAMPLE_ZERO) / SAMPLE_ZERO
+    }
+  }
+
+  getChannelData(channel: number): Float32Array {
+    if (channel !== 0) {
+      throw new Error(`FakeAudioBuffer has one channel; asked for ${channel}`)
+    }
+    return this.samples
+  }
 }
 
 /** A recording `AudioParam`. */
@@ -119,7 +178,7 @@ export class FakeAudioContext implements AudioEngineContext {
 
   decodeAudioData(data: ArrayBuffer): Promise<AudioEngineBuffer> {
     this.decoded.push(data)
-    return Promise.resolve({ duration: data.byteLength / BYTES_PER_SECOND })
+    return Promise.resolve(new FakeAudioBuffer(data))
   }
 
   resume(): Promise<void> {
