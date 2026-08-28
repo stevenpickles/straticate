@@ -182,6 +182,8 @@ class FakeEngine implements StemPlayerEngine {
 
   currentTime = (): number => this.time
 
+  getStemBuffer = (): null => null
+
   getSnapshot = (): StemEngineSnapshot => this.snapshot
 
   subscribe = (listener: () => void): (() => void) => {

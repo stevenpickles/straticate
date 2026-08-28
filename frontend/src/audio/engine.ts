@@ -62,9 +62,23 @@ export interface AudioEngineGainNode extends AudioEngineNode {
   readonly gain: AudioEngineParam
 }
 
-/** The subset of `AudioBuffer` the engine uses. */
+/**
+ * The subset of `AudioBuffer` the engine uses — and hands out through
+ * {@link StemPlayerEngine.getStemBuffer}, which is why it covers the sample
+ * data as well as the duration. Every member is one a real `AudioBuffer`
+ * already has, so a browser-decoded buffer satisfies it with no cast.
+ */
 export interface AudioEngineBuffer {
+  /** Length in seconds (`length / sampleRate`). */
   readonly duration: number
+  /** Length in sample frames. */
+  readonly length: number
+  /** How many channels {@link AudioEngineBuffer.getChannelData} accepts. */
+  readonly numberOfChannels: number
+  /** Sample frames per second. */
+  readonly sampleRate: number
+  /** The PCM samples of one channel, in `-1..1`. */
+  getChannelData(channel: number): Float32Array
 }
 
 /** The subset of `AudioBufferSourceNode` the engine uses. */
@@ -174,6 +188,17 @@ export interface StemPlayerEngine {
   setLevel(name: string, level: number): void
   /** The playhead in seconds, derived from the audio clock. */
   currentTime(): number
+  /**
+   * The decoded buffer of one stem, or `null` when there is none — an
+   * unknown name, a stem still loading or failed, or an engine that has been
+   * disposed. The samples are what a waveform view reads; the engine itself
+   * neither analyses them nor puts anything derived from them in the
+   * snapshot, so a repaint costs nothing here.
+   *
+   * The buffer belongs to the engine and stops being valid once the next
+   * `load()` or `dispose()` drops it: read it, do not retain it.
+   */
+  getStemBuffer(name: string): AudioEngineBuffer | null
   /** The current immutable snapshot (stable between changes). */
   getSnapshot(): StemEngineSnapshot
   /** Subscribe to snapshot changes; returns an unsubscribe function. */
@@ -506,6 +531,15 @@ export class StemAudioEngine implements StemPlayerEngine {
     // number that agrees with what is actually coming out of the speakers.
     const elapsed = Math.max(0, this.context.currentTime - this.scheduledStart)
     return Math.min(this.startOffset + elapsed, this.durationSeconds)
+  }
+
+  getStemBuffer = (name: string): AudioEngineBuffer | null => {
+    if (this.disposed) {
+      return null
+    }
+    // `teardownGraph` clears every entry's buffer, so a disposed or reloaded
+    // engine answers `null` here without any extra bookkeeping.
+    return this.entry(name)?.buffer ?? null
   }
 
   getSnapshot = (): StemEngineSnapshot => this.snapshot

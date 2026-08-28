@@ -9,6 +9,7 @@ import {
 import {
   FakeAudioContext,
   stemBytes,
+  stemBytesWithSamples,
   type FakeSourceNode,
 } from '../test/fakeAudioContext'
 
@@ -811,6 +812,60 @@ describe('StemAudioEngine load re-entrancy (review finding 6)', () => {
 
     expect(firstGains.every((gain) => gain.disconnectCount === 1)).toBe(true)
     expect(engine.getSnapshot().stems).toHaveLength(4)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Decoded buffers (feature 049): the seam a waveform view reads samples
+// through. The fake encoding carries samples in the bytes, so a stem can be
+// authored sample by sample and read back the same way.
+// ---------------------------------------------------------------------------
+
+describe('StemAudioEngine stem buffers', () => {
+  /** Amplitudes chosen to survive the fake's 1/128 quantisation exactly. */
+  const authored = [0, 0.5, -0.5, -1, 0.25]
+
+  /** A loader that gives `vocals` authored samples and `drums` silence. */
+  const sampleLoader: StemLoader = (url: string) =>
+    url.endsWith('/vocals')
+      ? Promise.resolve(stemBytesWithSamples(authored))
+      : Promise.resolve(stemBytes(1))
+
+  it('hands back the decoded samples of a loaded stem', async () => {
+    await loadEngine({ vocals: 0.05, drums: 1 }, { load: sampleLoader })
+
+    const buffer = engine.getStemBuffer('vocals')
+    expect(buffer?.numberOfChannels).toBe(1)
+    expect(buffer?.sampleRate).toBe(100)
+    expect(buffer?.length).toBe(authored.length)
+    expect([...(buffer?.getChannelData(0) ?? [])]).toEqual(authored)
+    expect(buffer?.duration).toBeCloseTo(authored.length / 100, 10)
+  })
+
+  it('is null for an unknown stem name', async () => {
+    await loadEngine(twoStems)
+    expect(engine.getStemBuffer('trombone')).toBeNull()
+  })
+
+  it('is null before the stem has loaded', () => {
+    engine = makeEngine(twoStems)
+    expect(engine.getStemBuffer('vocals')).toBeNull()
+  })
+
+  it('is null for a stem whose audio failed to load', async () => {
+    await loadEngine(twoStems, { load: loaderFor({ vocals: 10 }) })
+
+    expect(engine.getStemBuffer('vocals')).not.toBeNull()
+    expect(engine.getStemBuffer('instrumental')).toBeNull()
+  })
+
+  it('is null after disposal', async () => {
+    await loadEngine(twoStems)
+    expect(engine.getStemBuffer('vocals')).not.toBeNull()
+
+    engine.dispose()
+
+    expect(engine.getStemBuffer('vocals')).toBeNull()
   })
 })
 
