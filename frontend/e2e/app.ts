@@ -375,6 +375,45 @@ export class Workflow {
     return this.page.getByRole('region', { name: 'Export' })
   }
 
+  /** The waveform timeline: ruler, lanes, playhead and the seek surface. */
+  get timeline(): Locator {
+    return this.player.locator('.stem-timeline')
+  }
+
+  /**
+   * The seek control. Since feature 050 it is the timeline's interaction
+   * layer rather than an `<input type="range">` — a `div` with `role="slider"`
+   * — so it is still found by role and name, but it is driven with the mouse
+   * and the keyboard rather than with `fill()`.
+   */
+  get seek(): Locator {
+    return this.player.getByRole('slider', { name: 'Seek' })
+  }
+
+  /** The `m:ss / m:ss` readout under the transport. */
+  get playhead(): Locator {
+    return this.player.locator('.stem-player-time')
+  }
+
+  /**
+   * Click the timeline `fraction` of the way along it — the gesture a user
+   * makes to jump somewhere, and the one that must produce exactly one seek.
+   *
+   * The position is read from the element's own box rather than assumed, so
+   * the spec asserts in *seconds of audio* and never in pixels.
+   */
+  async seekToFraction(fraction: number): Promise<void> {
+    const box = await this.seek.boundingBox()
+    expect(box, 'the timeline has been laid out').not.toBeNull()
+    if (box === null) {
+      throw new Error('unreachable')
+    }
+    await this.page.mouse.click(
+      box.x + box.width * fraction,
+      box.y + box.height / 2,
+    )
+  }
+
   /** The stage line of the progress panel (`Separating`, `Completed`, …). */
   get stage(): Locator {
     return this.progress.locator('.separation-progress-stage')

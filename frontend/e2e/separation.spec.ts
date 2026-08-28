@@ -170,12 +170,23 @@ test.describe.serial('a separation, end to end', () => {
     const play = workflow.player.getByRole('button', { name: 'Play' })
     await expect(play).toBeEnabled()
 
-    const seek = workflow.player.getByRole('slider', { name: 'Seek' })
-    await seek.fill('15')
-    await seek.blur()
-    await expect(workflow.player.locator('.stem-player-time')).toContainText(
-      '0:15',
+    // Feature 050: one waveform lane per stem, on one shared time axis.
+    await expect(workflow.timeline).toBeVisible()
+    await expect(workflow.timeline.locator('canvas')).toHaveCount(
+      mode.stems.length,
     )
+
+    // Clicking a quarter of the way along a 60 s mix is 0:15 — the same
+    // assertion the range slider used to make, through the gesture a user
+    // actually performs.
+    await workflow.seekToFraction(0.25)
+    await expect(workflow.playhead).toContainText('0:15')
+    await expect(workflow.seek).toHaveAttribute('aria-valuetext', /^0:15 of /)
+
+    // …and the keyboard path, which is the accessible one: one second per
+    // press, committed as one discrete seek.
+    await workflow.seek.press('ArrowRight')
+    await expect(workflow.playhead).toContainText('0:16')
 
     const first = mode.stems[0] ?? ''
     const mute = workflow.player.getByRole('button', { name: `Mute ${first}` })

@@ -1,10 +1,8 @@
 import {
   useCallback,
   useEffect,
-  useRef,
   useState,
   useSyncExternalStore,
-  type ChangeEvent,
   type ReactNode,
 } from 'react'
 import { ApiError } from '../api/client'
@@ -18,6 +16,7 @@ import {
 import { formatDuration } from '../format'
 import { useAppDispatch } from '../state/appState'
 import { useJobDispatch, useJobState } from '../state/jobState'
+import { StemTimeline, type StemTimelineStem } from './StemTimeline'
 import './StemPlayer.css'
 
 /** Envelope-shaped view of any rejection. */
@@ -124,11 +123,17 @@ export interface StemPlayerProps {
  * The `inspect` step of the workflow: listen to a completed job's separated
  * stems.
  *
- * Every stem row comes from `SeparationResult.stems` — a two-stem and a
+ * Every stem lane comes from `SeparationResult.stems` — a two-stem and a
  * four-stem job render through the same code, and no stem name or count
  * appears anywhere here (AGENTS.md principle 6). The audio itself is handled
  * by `src/audio/engine.ts`, which keeps the stems on one clock; this
  * component only renders its snapshot and forwards the user's intent.
+ *
+ * The transport is `StemTimeline` (feature 050): waveform lanes on a shared
+ * time axis, a playhead, and a timeline that *is* the accessible seek control.
+ * What stays here is the state the timeline reports into — the playhead
+ * position, and the drag position that overrides it mid-gesture — plus the
+ * Play/Pause button and the readout.
  *
  * Playback is an **inspection tool** (ARCHITECTURE.md §13): transport, solo
  * and mute, and nothing that edits audio.
@@ -242,33 +247,47 @@ export function StemPlayer({
     }
   }, [engine, snapshot.playing])
 
-  // Dragging a range input fires `change` continuously — it *is* the native
-  // `input` event — so seeking on every one of them would stop, discard and
-  // rebuild every source node dozens of times a second, each rebuild opening
-  // a fresh scheduling lookahead. That is audible gapping, not scrubbing. So
-  // the drag only moves the displayed value and the seek is committed once,
-  // on release.
-  const scrubRef = useRef<number | null>(null)
+  // A drag across the timeline moves only what is *displayed*; the seek is
+  // committed once, on release. Seeking on every pointer move would stop,
+  // discard and rebuild every source node dozens of times a second, each
+  // rebuild opening a fresh scheduling lookahead — audible gapping, not
+  // scrubbing. The ref that makes "once per gesture" true lives in
+  // `StemTimeline`, next to the pointer handlers; what lives here is the
+  // displayed position it drives.
   const [scrubValue, setScrubValue] = useState<number | null>(null)
 
-  const handleScrub = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    const seconds = Number(event.target.value)
-    scrubRef.current = seconds
+  const handleScrub = useCallback((seconds: number) => {
     setScrubValue(seconds)
   }, [])
 
-  const commitScrub = useCallback(() => {
-    const seconds = scrubRef.current
-    if (seconds === null) {
-      return
-    }
-    // The ref, not the state, is what makes a pointerup and its mouseup one
-    // seek: it clears synchronously, before React re-renders.
-    scrubRef.current = null
+  /** A cancelled gesture commits nothing: the clock is the truth again. */
+  const cancelScrub = useCallback(() => {
     setScrubValue(null)
-    setCurrentTime(seconds)
-    engine?.seek(seconds)
+    setCurrentTime(engine?.currentTime() ?? 0)
   }, [engine])
+
+  const commitSeek = useCallback(
+    (seconds: number) => {
+      setScrubValue(null)
+      setCurrentTime(seconds)
+      engine?.seek(seconds)
+    },
+    [engine],
+  )
+
+  const toggleMute = useCallback(
+    (name: string) => {
+      engine?.toggleMute(name)
+    },
+    [engine],
+  )
+
+  const toggleSolo = useCallback(
+    (name: string) => {
+      engine?.toggleSolo(name)
+    },
+    [engine],
+  )
 
   /**
    * The route out of the `inspect` phase. It lives here rather than only on
@@ -324,6 +343,28 @@ export function StemPlayer({
     const ready = snapshot.status === 'ready'
     const engineError =
       snapshot.error === null ? null : errorInfo(snapshot.error)
+    /** The drag position while a gesture is in flight, the clock otherwise. */
+    const position = Math.min(scrubValue ?? currentTime, duration)
+
+    // Lane rows come from the *result*, merged with whatever the engine
+    // snapshot knows so far: the rows have to exist while the stems are still
+    // decoding, and the snapshot is empty until they have. Either way the
+    // count comes from the data, never from a literal (AGENTS.md principle 6).
+    const timelineStems: StemTimelineStem[] = stems.map((stem) => {
+      const state = stemStates.get(stem.name)
+      return {
+        name: stem.name,
+        status: state?.status ?? 'loading',
+        muted: state?.muted ?? false,
+        soloed: state?.soloed ?? false,
+        audible: state?.audible ?? true,
+        // The decoded length once there is one; the contract's until then.
+        durationSeconds:
+          state !== undefined && state.durationSeconds > 0
+            ? state.durationSeconds
+            : stem.duration_seconds,
+      }
+    })
 
     body = (
       <>
@@ -339,50 +380,19 @@ export function StemPlayer({
           </p>
         )}
 
-        <ul className="stem-player-stems">
-          {stems.map((stem) => {
-            const state = stemStates.get(stem.name)
-            const status = state?.status ?? 'loading'
-            const muted = state?.muted ?? false
-            const soloed = state?.soloed ?? false
-            return (
-              <li className="stem-player-stem" key={stem.name}>
-                <span className="stem-player-stem-name">{stem.name}</span>
-                <span className="stem-player-stem-detail">
-                  {status === 'loaded'
-                    ? formatDuration(stem.duration_seconds)
-                    : status === 'error'
-                      ? 'Unavailable'
-                      : 'Loading…'}
-                </span>
-                <button
-                  type="button"
-                  className="stem-player-toggle"
-                  aria-label={`Mute ${stem.name}`}
-                  aria-pressed={muted}
-                  disabled={status !== 'loaded'}
-                  onClick={() => {
-                    engine?.toggleMute(stem.name)
-                  }}
-                >
-                  Mute
-                </button>
-                <button
-                  type="button"
-                  className="stem-player-toggle"
-                  aria-label={`Solo ${stem.name}`}
-                  aria-pressed={soloed}
-                  disabled={status !== 'loaded'}
-                  onClick={() => {
-                    engine?.toggleSolo(stem.name)
-                  }}
-                >
-                  Solo
-                </button>
-              </li>
-            )
-          })}
-        </ul>
+        <StemTimeline
+          stems={timelineStems}
+          durationSeconds={duration}
+          positionSeconds={position}
+          ready={ready}
+          engine={engine}
+          onScrub={handleScrub}
+          onScrubCancel={cancelScrub}
+          onSeek={commitSeek}
+          onTogglePlayback={togglePlayback}
+          onToggleMute={toggleMute}
+          onToggleSolo={toggleSolo}
+        />
 
         <div className="stem-player-transport">
           <button
@@ -393,24 +403,8 @@ export function StemPlayer({
           >
             {snapshot.playing ? 'Pause' : 'Play'}
           </button>
-          <input
-            type="range"
-            className="stem-player-seek"
-            aria-label="Seek"
-            min={0}
-            max={duration}
-            step={0.01}
-            value={Math.min(scrubValue ?? currentTime, duration)}
-            disabled={!ready}
-            onChange={handleScrub}
-            onPointerUp={commitScrub}
-            onMouseUp={commitScrub}
-            onKeyUp={commitScrub}
-            onBlur={commitScrub}
-          />
           <p className="stem-player-time">
-            {formatDuration(scrubValue ?? currentTime)} /{' '}
-            {formatDuration(duration)}
+            {formatDuration(position)} / {formatDuration(duration)}
           </p>
         </div>
       </>
