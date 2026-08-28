@@ -33,9 +33,13 @@ refetches the result.
     user clicks "Try again", reaching the loaded/ready state;
   - a 409 `result_not_available` while the job is still running also gets
     the "Try again" button;
-  - a retry's fetch that resolves *after* the job was cleared (via "Start
-    another separation") does not apply its stale result — the effect's
-    existing `current` cleanup flag, unchanged, is what protects this.
+  - a retry's fetch that is superseded — job cleared via "Start another
+    separation" and the same job re-tracked, giving the component a third,
+    distinct in-flight fetch — does not apply its stale result when it
+    resolves late; the effect's existing `current` cleanup flag, unchanged,
+    is what protects this. Proved by mutation: with the cleanup emptied
+    (`current` forced permanently `true`), the stale result renders and the
+    test fails.
 
 ## Out of scope
 
@@ -57,15 +61,28 @@ refetches the result.
 
 ## Acceptance criteria
 
-- [x] A failed result fetch renders the error message plus a "Try again"
-      button; clicking it refetches and, on success, the stems render.
-- [x] Errors of every shape (network failure, 409 `result_not_available`)
-      get the button.
+- [x] A failed **result fetch** renders the error message plus a "Try again"
+      button; clicking it refetches and, on success, the stems render. This
+      does not extend to a failed stem-audio download (engine load error) —
+      see Known Limitations.
+- [x] Result-fetch errors of every shape (network failure, 409
+      `result_not_available`) get the button.
 - [x] New tests cover retry-success and stale-fetch-superseded; the
       retry-success test was proven to fail against the unfixed code (see
       Notes below).
 - [x] Feature doc + own ROADMAP row updated; all five frontend checks
       green (`format:check`, `lint`, `typecheck`, `test`, `build`).
+
+## Known Limitations
+
+- **The retry covers the result fetch only.** A failed stem-audio download
+  (an engine load error, rendered through the same `.stem-player-error`
+  paragraph once a result has loaded) still renders the verbatim defect
+  wording — "Something went wrong. Please try again." — with no control that
+  does anything: the "Try again" button lives only in the result-fetch error
+  branch. Widening retry to engine errors needs an engine reload path, which
+  is out of this feature's scope. The timeline work (050+) rebuilds this UI
+  and should give this its own numbered fix rather than inherit this one's.
 
 ## Required tests
 
@@ -73,7 +90,7 @@ refetches the result.
   `frontend/src/components/StemPlayer.test.tsx`:
   - `recovers from a dropped result fetch when the user tries again`
   - `offers "Try again" for a 409 result_not_available while the job is still running`
-  - `does not apply a retry fetch that resolves after the job was cleared`
+  - `does not apply a retry fetch that resolves after a newer fetch superseded it`
 
 ## Notes / decisions
 
@@ -93,3 +110,19 @@ refetches the result.
 - A four-stem or a two-stem result renders through the same code either
   way; no stem name or count is hardcoded (AGENTS.md principle 6),
   unaffected by this change.
+- **Accepted trade-off: "Try again" is shown for definitionally-futile
+  errors too.** `job_not_found` and a `result_not_available` whose
+  `detail.state` is `cancelled` or `failed` will never be fixed by retrying
+  the same job — "Start another separation" is the real remedy for those.
+  The button is kept unconditional across every error shape anyway, for
+  simplicity: branching the body on which errors are worth retrying would
+  add a second axis of error classification on top of `explainError`'s
+  existing one, for a control that is merely useless (not harmful) in the
+  futile cases.
+- **Accepted trade-off: clicking "Try again" drops keyboard focus.** The
+  button unmounts as soon as `result` leaves the `error` state (the body
+  switches to the loading paragraph), which takes the focused element with
+  it; the browser's default is to drop focus to `<body>` rather than move it
+  anywhere meaningful. Not addressed here — noted for whoever rebuilds this
+  UI in the 050 timeline work, who should decide where focus belongs across
+  this transition.

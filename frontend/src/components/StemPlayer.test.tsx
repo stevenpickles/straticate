@@ -12,6 +12,7 @@ import {
 import {
   JobStateProvider,
   initialJobState,
+  useJobDispatch,
   useJobState,
   type JobStateValue,
 } from '../state/jobState'
@@ -615,40 +616,80 @@ describe('StemPlayer result-fetch retry (feature 048)', () => {
     ).toBeInTheDocument()
   })
 
-  it('does not apply a retry fetch that resolves after the job was cleared', async () => {
+  it('does not apply a retry fetch that resolves after a newer fetch superseded it', async () => {
+    // Three distinct fetches, all held open until this test settles them:
+    //   1. the initial fetch — rejects, so "Try again" appears.
+    //   2. the retry's fetch (clicking "Try again") — left abandoned.
+    //   3. the fetch from re-tracking the same job — the component's
+    //      *current* fetch, which is what the assertions below are about.
+    // `stubResultFetchQueue` repeats its last responder for further calls,
+    // so a genuine race needs a third, distinct one — reusing the retry's
+    // responder for the re-track would make it the very thing being awaited
+    // and the test would pass for the wrong reason.
     const retryFetch = deferred<Response>()
+    const retrackFetch = deferred<Response>()
     stubResultFetchQueue(
       () => Promise.reject(new TypeError('network error')),
       () => retryFetch.promise,
+      () => retrackFetch.promise,
     )
-    renderPlayer(new FakeEngine())
 
+    /** Re-tracks the same job, as `POST /jobs` or a WS reconnect might. */
+    function Retracker({ job }: { job: Job }) {
+      const dispatch = useJobDispatch()
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            dispatch({ type: 'job/track', job })
+          }}
+        >
+          Retrack
+        </button>
+      )
+    }
+
+    render(
+      <AppStateProvider initialState={inspectingState()}>
+        <JobStateProvider
+          initialState={{ ...initialJobState, job: completedJob }}
+        >
+          <StemPlayer createEngine={() => new FakeEngine()} />
+          <Retracker job={completedJob} />
+        </JobStateProvider>
+      </AppStateProvider>,
+    )
+
+    // (a) The initial fetch fails, so "Try again" is offered.
     await screen.findByRole('alert')
+
+    // (b) Click "Try again": its fetch is the abandoned deferred above.
     await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await screen.findByText('Loading the separation result…')
 
-    // The retry's fetch is now in flight (loading), superseding attempt 0.
-    expect(
-      await screen.findByText('Loading the separation result…'),
-    ).toBeInTheDocument()
-
-    // Something else (leaving the inspect step) supersedes it before it
-    // settles: the effect's `current` flag must keep its late resolution
-    // from being applied.
+    // (c) Clear the job, then re-track the *same* job: the component is back
+    // in `loading`, with a fresh, distinct fetch in flight — its own current
+    // one.
     await userEvent.click(
       screen.getByRole('button', { name: 'Start another separation' }),
     )
     expect(
       screen.getByText('No separation job is being tracked.'),
     ).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retrack' }))
+    await screen.findByText('Loading the separation result…')
 
+    // (d) The abandoned retry fetch (b) resolves late, with a real result.
     await act(async () => {
       retryFetch.resolve(jsonResponse(resultOver(twoStemNames)))
       await Promise.resolve()
       await Promise.resolve()
     })
 
+    // (e) The stale result must not render: this component's own current
+    // fetch (c) has not answered yet, so it must still show loading.
     expect(
-      screen.getByText('No separation job is being tracked.'),
+      screen.getByText('Loading the separation result…'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Mute vocals' })).toBeNull()
