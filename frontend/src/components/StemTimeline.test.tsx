@@ -19,6 +19,7 @@ import {
 } from './StemTimeline'
 import type {
   AudioEngineBuffer,
+  LoopRegion,
   StemEngineSnapshot,
   StemPlayerEngine,
 } from '../audio/engine'
@@ -44,6 +45,7 @@ const EMPTY_SNAPSHOT: StemEngineSnapshot = {
   stems: [],
   playing: false,
   durationSeconds: AXIS_SECONDS,
+  loopRegion: null,
   error: null,
 }
 
@@ -72,6 +74,8 @@ function bufferEngine(
     setSoloed: () => undefined,
     toggleSolo: () => undefined,
     setLevel: () => undefined,
+    setLoopRegion: () => undefined,
+    clearLoopRegion: () => undefined,
     currentTime: () => 0,
     getStemBuffer: (name: string) => buffers.get(name) ?? null,
     getSnapshot: () => EMPTY_SNAPSHOT,
@@ -113,6 +117,9 @@ function renderTimeline(options: RenderOptions) {
       onScrub={() => undefined}
       onScrubCancel={() => undefined}
       onSeek={() => undefined}
+      loopRegion={null}
+      onSetLoopRegion={() => undefined}
+      onClearLoopRegion={() => undefined}
       onTogglePlayback={() => undefined}
       onToggleMute={() => undefined}
       onToggleSolo={() => undefined}
@@ -245,6 +252,9 @@ describe('StemTimeline lanes', () => {
         onScrub={() => undefined}
         onScrubCancel={() => undefined}
         onSeek={() => undefined}
+        loopRegion={null}
+        onSetLoopRegion={() => undefined}
+        onClearLoopRegion={() => undefined}
         onTogglePlayback={() => undefined}
         onToggleMute={() => undefined}
         onToggleSolo={() => undefined}
@@ -301,6 +311,9 @@ describe('StemTimeline lane headers', () => {
         onScrub={() => undefined}
         onScrubCancel={() => undefined}
         onSeek={() => undefined}
+        loopRegion={null}
+        onSetLoopRegion={() => undefined}
+        onClearLoopRegion={() => undefined}
         onTogglePlayback={() => undefined}
         onToggleMute={(name) => muted.push(name)}
         onToggleSolo={(name) => soloed.push(name)}
@@ -468,6 +481,8 @@ interface FixtureOptions {
   readonly durationSeconds?: number
   readonly positionSeconds?: number
   readonly engine?: StemPlayerEngine
+  /** The committed region, as the engine snapshot would carry it. */
+  readonly loopRegion?: LoopRegion | null
 }
 
 /**
@@ -478,15 +493,21 @@ async function fixture(options: FixtureOptions = {}) {
   const stems = options.stems ?? [loaded('vocals', AXIS_SECONDS)]
   const engine = options.engine ?? bufferEngine(stems.map((stem) => stem.name))
   const seeks: number[] = []
+  const scrubs: number[] = []
+  /** Every loop commit, in order: a region, or `null` for a clear. */
+  const loopRegions: (LoopRegion | null)[] = []
   const props: StemTimelineProps = {
     stems,
     durationSeconds: options.durationSeconds ?? AXIS_SECONDS,
     positionSeconds: options.positionSeconds ?? 0,
     ready: true,
     engine,
-    onScrub: () => undefined,
+    onScrub: (seconds) => scrubs.push(seconds),
     onScrubCancel: () => undefined,
     onSeek: (seconds) => seeks.push(seconds),
+    loopRegion: options.loopRegion ?? null,
+    onSetLoopRegion: (start, end) => loopRegions.push({ start, end }),
+    onClearLoopRegion: () => loopRegions.push(null),
     onTogglePlayback: () => undefined,
     onToggleMute: () => undefined,
     onToggleSolo: () => undefined,
@@ -496,6 +517,8 @@ async function fixture(options: FixtureOptions = {}) {
   await act(async () => {})
   return {
     seeks,
+    scrubs,
+    loopRegions,
     engine,
     /** Re-render with some props changed, as the player re-renders it. */
     show: (next: Partial<StemTimelineProps>) => {
@@ -708,6 +731,198 @@ describe('StemTimeline seeking under a moved window', () => {
     fireEvent.pointerDown(surface(), { clientX: 100, pointerId: 2 })
     fireEvent.pointerUp(surface(), { pointerId: 2 })
     expect(view.seeks).toEqual([40, 20])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Feature 053: loop regions
+//
+// Every case asserts in *seconds of audio*: the gesture is pixels on a strip,
+// but what it must produce is an absolute region, whatever window happens to
+// be on screen when it is drawn.
+// ---------------------------------------------------------------------------
+
+/** The x offset that means `seconds` in a fitted view of the whole axis. */
+function xFor(seconds: number): number {
+  return (seconds / AXIS_SECONDS) * WIDTH
+}
+
+/** The ruler's row: the loop-region drag surface. */
+function rulerRow(): HTMLElement {
+  return screen.getByTestId('stem-timeline-ruler-row')
+}
+
+/** The loop band, or `null` when none is drawn. */
+function loopBand(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('.stem-timeline-loop-region')
+}
+
+/** One pointer gesture across `element`, in client x offsets. */
+function drag(element: HTMLElement, from: number, ...path: number[]): void {
+  fireEvent.pointerDown(element, { clientX: from, pointerId: 1 })
+  for (const x of path) {
+    fireEvent.pointerMove(element, { clientX: x, pointerId: 1 })
+  }
+  fireEvent.pointerUp(element, { clientX: path.at(-1) ?? from, pointerId: 1 })
+}
+
+describe('StemTimeline loop regions', () => {
+  it('commits one region for a whole ruler drag, in absolute seconds', async () => {
+    const view = await fixture()
+
+    fireEvent.pointerDown(rulerRow(), { clientX: xFor(9), pointerId: 1 })
+    fireEvent.pointerMove(rulerRow(), { clientX: xFor(20), pointerId: 1 })
+    fireEvent.pointerMove(rulerRow(), { clientX: xFor(30), pointerId: 1 })
+    // Nothing has been committed yet: the drag is only drawn.
+    expect(view.loopRegions).toEqual([])
+    expect(loopBand()).not.toBeNull()
+
+    fireEvent.pointerUp(rulerRow(), { pointerId: 1 })
+
+    expect(view.loopRegions).toHaveLength(1)
+    expect(view.loopRegions[0]?.start).toBeCloseTo(9, 6)
+    expect(view.loopRegions[0]?.end).toBeCloseTo(30, 6)
+    // A drag across the ruler is not a seek.
+    expect(view.seeks).toEqual([])
+  })
+
+  it('normalises a right-to-left drag', async () => {
+    const view = await fixture()
+
+    drag(rulerRow(), xFor(30), xFor(9))
+
+    expect(view.loopRegions).toHaveLength(1)
+    expect(view.loopRegions[0]?.start).toBeCloseTo(9, 6)
+    expect(view.loopRegions[0]?.end).toBeCloseTo(30, 6)
+  })
+
+  it('treats a plain click on the ruler as clear-and-seek', async () => {
+    const view = await fixture({ loopRegion: { start: 10, end: 20 } })
+
+    // Two pixels of travel is a click, not a drag.
+    drag(rulerRow(), xFor(18), xFor(18) + 2)
+
+    expect(view.loopRegions).toEqual([null])
+    expect(view.seeks).toHaveLength(1)
+    expect(view.seeks[0]).toBeCloseTo(18, 6)
+  })
+
+  it('draws a region from a shifted drag over the lanes, and seeks nothing', async () => {
+    const view = await fixture()
+
+    fireEvent.pointerDown(surface(), {
+      clientX: xFor(6),
+      pointerId: 1,
+      shiftKey: true,
+    })
+    fireEvent.pointerMove(surface(), { clientX: xFor(24), pointerId: 1 })
+    fireEvent.pointerUp(surface(), { pointerId: 1 })
+
+    expect(view.loopRegions).toHaveLength(1)
+    expect(view.loopRegions[0]?.start).toBeCloseTo(6, 6)
+    expect(view.loopRegions[0]?.end).toBeCloseTo(24, 6)
+    // The playhead was never touched: a shifted drag is not a scrub.
+    expect(view.seeks).toEqual([])
+    expect(view.scrubs).toEqual([])
+  })
+
+  it('moves one edge by its handle, and commits once', async () => {
+    const view = await fixture({ loopRegion: { start: 10, end: 20 } })
+
+    drag(
+      screen.getByTestId('stem-timeline-loop-handle-end'),
+      xFor(20),
+      xFor(35),
+      xFor(45),
+    )
+
+    expect(view.loopRegions).toHaveLength(1)
+    expect(view.loopRegions[0]?.start).toBeCloseTo(10, 6)
+    expect(view.loopRegions[0]?.end).toBeCloseTo(45, 6)
+  })
+
+  it('clears when an edge is dragged onto the other one', async () => {
+    const view = await fixture({ loopRegion: { start: 10, end: 20 } })
+
+    drag(
+      screen.getByTestId('stem-timeline-loop-handle-start'),
+      xFor(10),
+      xFor(20),
+    )
+
+    expect(view.loopRegions).toEqual([null])
+  })
+
+  it('commits nothing when the gesture is cancelled', async () => {
+    const view = await fixture()
+
+    fireEvent.pointerDown(rulerRow(), { clientX: xFor(9), pointerId: 1 })
+    fireEvent.pointerMove(rulerRow(), { clientX: xFor(30), pointerId: 1 })
+    expect(loopBand()).not.toBeNull()
+
+    fireEvent.pointerCancel(rulerRow(), { pointerId: 1 })
+
+    expect(view.loopRegions).toEqual([])
+    expect(loopBand()).toBeNull()
+  })
+
+  it('ignores a second release of the same gesture', async () => {
+    const view = await fixture()
+
+    fireEvent.pointerDown(rulerRow(), { clientX: xFor(9), pointerId: 1 })
+    fireEvent.pointerMove(rulerRow(), { clientX: xFor(30), pointerId: 1 })
+    fireEvent.pointerUp(rulerRow(), { pointerId: 1 })
+    fireEvent.pointerUp(rulerRow(), { pointerId: 1 })
+
+    expect(view.loopRegions).toHaveLength(1)
+  })
+
+  it('drags an absolute region while zoomed and panned', async () => {
+    const view = await fixture()
+
+    // 1.5× from the left edge is a 40 s window at ten pixels to the second;
+    // one notch of pan puts its left edge at 0:10 — the same window the seek
+    // regression above uses.
+    ctrlWheel(-100, 0)
+    fireEvent.wheel(tracks(), { deltaY: 100 })
+    expect(scrollSeconds()).toBeCloseTo(10, 6)
+
+    drag(rulerRow(), 100, 300)
+
+    // 100 px in is 0:20 and 300 px in is 0:40. A reading that dropped the
+    // scroll would say 0:10–0:30, and one that dropped the zoom 0:15–0:45.
+    expect(view.loopRegions).toHaveLength(1)
+    expect(view.loopRegions[0]?.start).toBeCloseTo(20, 6)
+    expect(view.loopRegions[0]?.end).toBeCloseTo(40, 6)
+  })
+
+  it('positions the band from the viewport, and moves it with the window', async () => {
+    await fixture({ loopRegion: { start: 15, end: 30 } })
+
+    // Fitted: 400 px over a minute, so 0:15 is 100 px in and the band is
+    // 100 px wide.
+    const fitted = loopBand()
+    expect(Number.parseFloat(fitted?.style.left ?? '')).toBeCloseTo(100, 6)
+    expect(Number.parseFloat(fitted?.style.width ?? '')).toBeCloseTo(100, 6)
+
+    // One notch of zoom about 100 px: a 40 s window starting at 0:05, at ten
+    // pixels to the second. The band is the same seconds, drawn wider.
+    ctrlWheel(-100, 100)
+
+    const zoomed = loopBand()
+    expect(Number.parseFloat(zoomed?.style.left ?? '')).toBeCloseTo(100, 4)
+    expect(Number.parseFloat(zoomed?.style.width ?? '')).toBeCloseTo(150, 4)
+  })
+
+  it('draws nothing for a region that is off the window entirely', async () => {
+    await fixture({ loopRegion: { start: 1, end: 3 } })
+    expect(loopBand()).not.toBeNull()
+
+    // All the way in at the far end: the region is off the left edge.
+    ctrlWheel(-100, 400, 20)
+
+    expect(scrollSeconds()).toBeGreaterThan(3)
+    expect(loopBand()).toBeNull()
   })
 })
 

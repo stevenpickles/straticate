@@ -869,6 +869,269 @@ describe('StemAudioEngine stem buffers', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Loop regions (feature 053). The loop is the platform's own — `loop`,
+// `loopStart` and `loopEnd` set on every source before the one shared
+// `start()` — so these tests assert on the flags the engine wrote and on the
+// playhead arithmetic that has to agree with them.
+// ---------------------------------------------------------------------------
+
+describe('StemAudioEngine loop regions', () => {
+  /** Long enough that a 10 s region sits well inside the mix. */
+  const longStems = { vocals: 30, instrumental: 30 }
+
+  /** The loop flags of a set of sources, as `[loop, start, end]` triples. */
+  function loopFlags(
+    nodes: readonly FakeSourceNode[],
+  ): [boolean, number, number][] {
+    return nodes.map((node) => [node.loop, node.loopStart, node.loopEnd])
+  }
+
+  it('loops every stem natively, on one shared start time', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    context.currentTime = 2
+
+    await engine.play()
+
+    expect(context.sources).toHaveLength(2)
+    expect(loopFlags(context.sources)).toEqual([
+      [true, 10, 20],
+      [true, 10, 20],
+    ])
+    // The whole point: one `when` for the mix, so every stem wraps on the
+    // same sample rather than each on its own boundary.
+    expect(startTimes(context.sources)).toEqual([2 + LOOKAHEAD])
+    expect(startOffsets(context.sources)).toEqual([0])
+    expect(engine.getSnapshot().loopRegion).toEqual({ start: 10, end: 20 })
+  })
+
+  it('wraps the playhead back into the region, however many passes on', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+
+    // Raw 25 s of material is five seconds into the second pass.
+    context.currentTime = 25 + LOOKAHEAD
+    expect(engine.currentTime()).toBeCloseTo(15, 6)
+
+    // …and 45 s is five seconds into the fourth, at the same place.
+    context.currentTime = 45 + LOOKAHEAD
+    expect(engine.currentTime()).toBeCloseTo(15, 6)
+
+    // Before the region, playback simply runs towards it: no wrap.
+    context.currentTime = 4 + LOOKAHEAD
+    expect(engine.currentTime()).toBeCloseTo(4, 6)
+  })
+
+  it('is a trap, not a fence: a seek past the end runs straight through', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+
+    engine.seek(25)
+
+    // The sources still carry the region — nothing was cleared — but they
+    // started past it, so the platform never re-enters it and neither does
+    // the playhead.
+    const after = context.sourcesFrom(2)
+    expect(loopFlags(after)).toEqual([
+      [true, 10, 20],
+      [true, 10, 20],
+    ])
+    context.currentTime = 3 + LOOKAHEAD
+    expect(engine.currentTime()).toBeCloseTo(28, 6)
+
+    // And the mix still ends the way it always did.
+    after
+      .find((source) => source.onended !== null)
+      ?.onended?.(new Event('ended'))
+    expect(engine.getSnapshot().playing).toBe(false)
+    expect(engine.currentTime()).toBe(30)
+  })
+
+  it('rebuilds at the wrapped position when the region is cleared mid-play', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+    context.currentTime = 25 + LOOKAHEAD
+
+    engine.clearLoopRegion()
+
+    const after = context.sourcesFrom(2)
+    expect(after).toHaveLength(2)
+    expect(loopFlags(after)).toEqual([
+      [false, 0, 0],
+      [false, 0, 0],
+    ])
+    // Resumed from where the audio actually was — inside the region, not at
+    // the 25 s the raw clock would have suggested.
+    const offsets = startOffsets(after)
+    expect(offsets).toHaveLength(1)
+    expect(offsets[0] as number).toBeCloseTo(15, 6)
+    expect(engine.getSnapshot().loopRegion).toBeNull()
+  })
+
+  it('rebuilds at the current position when a region is set mid-play', async () => {
+    await loadEngine(longStems)
+    await engine.play()
+    context.currentTime = 6 + LOOKAHEAD
+
+    engine.setLoopRegion(2, 8)
+
+    const after = context.sourcesFrom(2)
+    expect(loopFlags(after)).toEqual([
+      [true, 2, 8],
+      [true, 2, 8],
+    ])
+    const offsets = startOffsets(after)
+    expect(offsets[0] as number).toBeCloseTo(6, 6)
+  })
+
+  it('leaves the sources alone while paused, and loops from the next play', async () => {
+    await loadEngine(longStems)
+
+    engine.setLoopRegion(10, 20)
+
+    expect(context.sources).toHaveLength(0)
+    expect(engine.getSnapshot().loopRegion).toEqual({ start: 10, end: 20 })
+
+    await engine.play()
+    expect(loopFlags(context.sources)).toEqual([
+      [true, 10, 20],
+      [true, 10, 20],
+    ])
+  })
+
+  it('survives a pause and a resume', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+    context.currentTime = 12 + LOOKAHEAD
+
+    engine.pause()
+    expect(engine.getSnapshot().loopRegion).toEqual({ start: 10, end: 20 })
+    await engine.play()
+
+    expect(loopFlags(context.sourcesFrom(2))).toEqual([
+      [true, 10, 20],
+      [true, 10, 20],
+    ])
+  })
+
+  it('pauses at the wrapped position and resumes from it', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+    // Two full passes plus five seconds: audibly at 0:15, raw clock at 0:35.
+    context.currentTime = 35 + LOOKAHEAD
+
+    engine.pause()
+
+    // The stored position is the wrapped one — what the user hears — not the
+    // raw elapsed time, so the readout holds at 0:15 while paused…
+    expect(engine.currentTime()).toBeCloseTo(15, 6)
+
+    await engine.play()
+
+    // …and resume starts every source from inside the region, still looping.
+    const resumed = context.sourcesFrom(2)
+    expect(loopFlags(resumed)).toEqual([
+      [true, 10, 20],
+      [true, 10, 20],
+    ])
+    for (const source of resumed) {
+      expect(source.started?.offset).toBeCloseTo(15, 6)
+    }
+  })
+
+  it('does not rebuild the graph for the region it already has', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+
+    engine.setLoopRegion(10, 20)
+
+    // A handle dragged back to where it started must not cost a teardown and
+    // a fresh lookahead.
+    expect(context.sources).toHaveLength(2)
+  })
+
+  it.each([
+    ['an empty region', 5, 5],
+    ['an inverted one', 20, 10],
+    ['one shorter than the minimum', 5, 5.005],
+    ['one entirely past the end of the mix', 40, 50],
+  ])('clears rather than setting %s', async (_label, start, end) => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    expect(engine.getSnapshot().loopRegion).not.toBeNull()
+
+    engine.setLoopRegion(start, end)
+
+    expect(engine.getSnapshot().loopRegion).toBeNull()
+  })
+
+  it('clamps a region that overhangs the mix', async () => {
+    await loadEngine(longStems)
+
+    engine.setLoopRegion(-5, 45)
+
+    expect(engine.getSnapshot().loopRegion).toEqual({ start: 0, end: 30 })
+  })
+
+  it('never asks a stem to wrap past its own end', async () => {
+    // A short stem and a stem that is over before the region even begins.
+    await loadEngine({ vocals: 30, instrumental: 15, drums: 5 })
+    engine.setLoopRegion(10, 20)
+
+    await engine.play()
+
+    expect(loopFlags(context.sources)).toEqual([
+      [true, 10, 20],
+      // Clamped to its own duration rather than told to read past it.
+      [true, 10, 15],
+      // Nothing of this stem is inside the region, so it runs straight
+      // through — there is nothing to repeat.
+      [false, 0, 0],
+    ])
+  })
+
+  it('forgets the region when a new job is loaded', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+
+    await engine.load(sources(fourStems))
+
+    expect(engine.getSnapshot().loopRegion).toBeNull()
+    await engine.play()
+    expect(context.sources.every((source) => !source.loop)).toBe(true)
+  })
+
+  it('notifies subscribers when the region changes, and only then', async () => {
+    await loadEngine(longStems)
+    const listener = vi.fn()
+    engine.subscribe(listener)
+
+    engine.setLoopRegion(10, 20)
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    // Already cleared: nothing changed, so nothing is published.
+    engine.clearLoopRegion()
+    engine.clearLoopRegion()
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+
+  it('ignores loop commands after disposal', async () => {
+    await loadEngine(longStems)
+    engine.dispose()
+
+    engine.setLoopRegion(10, 20)
+
+    expect(engine.getSnapshot().loopRegion).toBeNull()
+  })
+})
+
 describe('createStemAudioEngine', () => {
   it('builds a StemAudioEngine', () => {
     engine = createStemAudioEngine({

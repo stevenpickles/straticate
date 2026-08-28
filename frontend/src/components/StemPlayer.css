@@ -71,8 +71,14 @@
   opacity: 0.5;
 }
 
+/*
+ * Play/Pause, the readout, the three loop controls and the loop badge. It
+ * wraps since feature 053: five items do not fit a narrow panel on one line,
+ * and a transport that overflowed would put controls out of reach.
+ */
 .stem-player-transport {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
 }
@@ -113,6 +119,64 @@
   margin: 0;
   font-size: 0.9rem;
   color: var(--color-danger);
+}
+
+/* 053: loop / A-B region playback */
+
+.stem-player-loop-controls {
+  display: flex;
+  gap: 0.35rem;
+}
+
+/*
+ * The transport's loop buttons, styled as the lane toggles are — they are the
+ * same kind of control (a small, secondary intent next to a primary one), and
+ * saying so twice in two vocabularies would be a third button style.
+ */
+.stem-player-loop {
+  padding: 0.25rem 0.6rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: 0.4rem;
+  cursor: pointer;
+  transition:
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.stem-player-loop:hover:enabled,
+.stem-player-loop:focus-visible:enabled {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+.stem-player-loop:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/*
+ * The badge's box is always mounted (it is the live region); only the badge
+ * inside it comes and goes, so the transport does not reflow as a loop is set
+ * and cleared.
+ */
+.stem-player-loop-status {
+  min-height: 1.4em;
+}
+
+.stem-player-loop-badge {
+  margin: 0;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+  white-space: nowrap;
+  background-color: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border: 1px solid var(--color-accent);
+  border-radius: 999px;
 }
 
 /* .stem-player-retry retries the result fetch after it failed (feature 048);

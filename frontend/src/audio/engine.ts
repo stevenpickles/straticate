@@ -21,6 +21,33 @@
  * (`startOffset + (context.currentTime - scheduledStart)`), never from an
  * interval counter that would drift away from what is actually audible.
  *
+ * **Looping (feature 053).** A loop region is applied to the *source nodes*,
+ * not to a timer: `loop`, `loopStart` and `loopEnd` are set on every stem's
+ * source before the one shared `start(when, offset)`, so the browser wraps
+ * all of them on the same sample for as long as they run. Nothing has to be
+ * rescheduled per pass, and there is no drift to accumulate. Two consequences
+ * are deliberate:
+ *
+ * - **A region is a trap, not a fence.** The engine never seeks to enter one.
+ *   Playback that starts before the region runs forward into it and then
+ *   wraps; playback that starts at or after `loopEnd` never re-enters it
+ *   (that is the platform's behaviour, not a rule invented here) and plays to
+ *   the end of the mix. Playing a region "from the top" is `seek(start)`,
+ *   which is a UI decision rather than engine magic.
+ * - **A looping mix does not end.** `onended` is still attached to the
+ *   longest stem, and a looping source simply never fires it — so a mix with
+ *   a region under way never settles until the region is cleared or the
+ *   transport is moved past it.
+ *
+ * `currentTime()` wraps to match, but only when the transport can actually be
+ * looping: a generation started at or after `loopEnd` reports the raw
+ * position, because its sources are running straight through.
+ *
+ * **A note for feature 052.** The scrub-preview grains that feature adds must
+ * **not** set `loop`: a grain auditions one position and then stops, so a
+ * looping grain would repeat a fragment under the pointer for as long as the
+ * user held it. The region belongs to the transport, not to a preview.
+ *
  * **Testability.** The `AudioContext` is a constructor parameter defaulting
  * to `new AudioContext()`, and so is the loader that turns a stem URL into
  * bytes. jsdom implements neither `AudioContext` nor `decodeAudioData`, so
@@ -81,10 +108,23 @@ export interface AudioEngineBuffer {
   getChannelData(channel: number): Float32Array
 }
 
-/** The subset of `AudioBufferSourceNode` the engine uses. */
+/**
+ * The subset of `AudioBufferSourceNode` the engine uses.
+ *
+ * The three `loop*` members are how feature 053 loops a region: they are set
+ * on the node **before** `start()`, so the wrap is the browser's own — one
+ * sample-accurate boundary applied to every stem's source at once, rather
+ * than a timer that would have to reschedule the whole mix on every pass.
+ */
 export interface AudioEngineSourceNode extends AudioEngineNode {
   buffer: AudioEngineBuffer | null
   onended: ((event: Event) => void) | null
+  /** Whether playback wraps from `loopEnd` back to `loopStart`. */
+  loop: boolean
+  /** Where a wrap lands, in seconds into the buffer. */
+  loopStart: number
+  /** Where playback wraps, in seconds into the buffer. */
+  loopEnd: number
   start(when?: number, offset?: number): void
   stop(when?: number): void
 }
@@ -137,6 +177,18 @@ export interface StemState {
   readonly durationSeconds: number
 }
 
+/**
+ * A loop region: the half-open interval `[start, end)` of the mix playback
+ * wraps within. Always legal — clamped to the mix and never degenerate — so a
+ * renderer can use it without re-checking.
+ */
+export interface LoopRegion {
+  /** Where a wrap lands, in seconds. */
+  readonly start: number
+  /** Where playback wraps, in seconds. Always `> start`. */
+  readonly end: number
+}
+
 /** Immutable view of the engine, safe to render from. */
 export interface StemEngineSnapshot {
   /** Overall engine state. */
@@ -147,6 +199,12 @@ export interface StemEngineSnapshot {
   readonly playing: boolean
   /** Longest stem duration in seconds — the transport's full extent. */
   readonly durationSeconds: number
+  /**
+   * The loop region playback wraps within, or `null` when there is none.
+   * This is the single source of truth for the committed region: a UI drawing
+   * a live drag holds that in its own state and renders this once it commits.
+   */
+  readonly loopRegion: LoopRegion | null
   /**
    * The failure worth showing, or `null`. A transport failure (a rejected
    * `resume()`) shadows a load failure while it stands and is cleared by the
@@ -186,6 +244,20 @@ export interface StemPlayerEngine {
   toggleSolo(name: string): void
   /** Set one stem's playback level (`0..1`). */
   setLevel(name: string, level: number): void
+  /**
+   * Loop `[startSeconds, endSeconds)`, clamped to the mix. A degenerate
+   * region — shorter than {@link MIN_LOOP_SECONDS} once clamped, which
+   * includes an inverted one — clears instead of setting.
+   *
+   * **The region is a trap, not a fence** (see the module docstring): the
+   * engine never moves the playhead to enter it. Playback started before the
+   * region runs into it and then wraps; playback started at or after
+   * `endSeconds` never enters it at all and plays to the end of the mix.
+   * "Play the region from the top" is `seek(startSeconds)` — a UI decision.
+   */
+  setLoopRegion(startSeconds: number, endSeconds: number): void
+  /** Drop the loop region; playback carries on from where it is. */
+  clearLoopRegion(): void
   /** The playhead in seconds, derived from the audio clock. */
   currentTime(): number
   /**
@@ -238,6 +310,14 @@ export interface StemAudioEngineOptions {
 /** Default scheduling lookahead, in seconds. */
 const DEFAULT_LOOKAHEAD_SECONDS = 0.05
 
+/**
+ * The shortest loop region worth having, in seconds. Anything below it is
+ * treated as an instruction to clear rather than as a region: a ten-millisecond
+ * loop is a buzz, not a passage, and it is what an accidental click on a
+ * loop-setting control produces.
+ */
+export const MIN_LOOP_SECONDS = 0.01
+
 /** Mutable bookkeeping for one stem. */
 interface StemEntry {
   readonly name: string
@@ -259,6 +339,7 @@ const IDLE_SNAPSHOT: StemEngineSnapshot = {
   stems: [],
   playing: false,
   durationSeconds: 0,
+  loopRegion: null,
   error: null,
 }
 
@@ -311,6 +392,8 @@ export class StemAudioEngine implements StemPlayerEngine {
   private startOffset = 0
   /** The playhead while stopped, in seconds. */
   private position = 0
+  /** The region playback wraps within, or `null`. Always legal when set. */
+  private loopRegion: LoopRegion | null = null
 
   private snapshot: StemEngineSnapshot = IDLE_SNAPSHOT
 
@@ -354,6 +437,9 @@ export class StemAudioEngine implements StemPlayerEngine {
     this.transportError = null
     this.durationSeconds = 0
     this.position = 0
+    // A new job is a new timeline: a region measured against the last one
+    // would name seconds that no longer mean anything.
+    this.loopRegion = null
     this.playing = false
     this.notify()
     if (entries.length === 0) {
@@ -523,6 +609,34 @@ export class StemAudioEngine implements StemPlayerEngine {
     this.notify()
   }
 
+  setLoopRegion = (startSeconds: number, endSeconds: number): void => {
+    if (this.disposed) {
+      return
+    }
+    const start = clamp(startSeconds, 0, this.durationSeconds)
+    const end = clamp(endSeconds, 0, this.durationSeconds)
+    if (end - start < MIN_LOOP_SECONDS) {
+      // Degenerate, inverted, or clamped down to nothing by a mix that ends
+      // before the region did: all of them mean "no region".
+      this.clearLoopRegion()
+      return
+    }
+    const current = this.loopRegion
+    if (current !== null && current.start === start && current.end === end) {
+      // Setting the region it already has must not rebuild the graph — a
+      // handle dragged back where it started would be an audible gap.
+      return
+    }
+    this.applyLoopRegion({ start, end })
+  }
+
+  clearLoopRegion = (): void => {
+    if (this.disposed || this.loopRegion === null) {
+      return
+    }
+    this.applyLoopRegion(null)
+  }
+
   currentTime = (): number => {
     if (!this.playing || this.context === null) {
       return clamp(this.position, 0, this.durationSeconds)
@@ -530,7 +644,16 @@ export class StemAudioEngine implements StemPlayerEngine {
     // Derived from the audio clock, never from a counter: this is the only
     // number that agrees with what is actually coming out of the speakers.
     const elapsed = Math.max(0, this.context.currentTime - this.scheduledStart)
-    return Math.min(this.startOffset + elapsed, this.durationSeconds)
+    const raw = this.startOffset + elapsed
+    const region = this.loopRegion
+    // Only a generation that started *before* the region's end can be
+    // looping: one started at or after it ran straight past and its sources
+    // never re-enter, so its position is the raw one (see the module
+    // docstring's "trap, not a fence").
+    if (region !== null && this.startOffset < region.end && raw >= region.end) {
+      return region.start + ((raw - region.end) % (region.end - region.start))
+    }
+    return Math.min(raw, this.durationSeconds)
   }
 
   getStemBuffer = (name: string): AudioEngineBuffer | null => {
@@ -566,6 +689,7 @@ export class StemAudioEngine implements StemPlayerEngine {
     this.status = 'idle'
     this.loadError = null
     this.transportError = null
+    this.loopRegion = null
     this.snapshot = IDLE_SNAPSHOT
     this.listeners.clear()
     const context = this.context
@@ -579,6 +703,31 @@ export class StemAudioEngine implements StemPlayerEngine {
         // …and some browsers throw synchronously instead.
       }
     }
+  }
+
+  /**
+   * Store a region and make the running sources agree with it.
+   *
+   * An `AudioBufferSourceNode`'s `loop` flags are only honoured from `start()`
+   * onwards, so changing the region while playing means a new generation —
+   * through the same `startSources` the seek path uses, at the position the
+   * transport has actually reached, with the same try/catch. While paused
+   * there is nothing to rebuild: the next `play()` reads the region.
+   */
+  private applyLoopRegion(region: LoopRegion | null): void {
+    // Read under the *outgoing* region: that is where the audio is now.
+    const at = this.currentTime()
+    this.loopRegion = region
+    if (this.playing) {
+      try {
+        this.startSources(at)
+      } catch (reason) {
+        this.transportError = reason
+        this.playing = false
+        this.position = at
+      }
+    }
+    this.notify()
   }
 
   /** Record a failure that made a whole load unusable. */
@@ -624,12 +773,25 @@ export class StemAudioEngine implements StemPlayerEngine {
     this.stopSources()
     const when = context.currentTime + this.lookaheadSeconds
     const longest = this.longestEntry()
+    const region = this.loopRegion
     for (const entry of this.entries) {
       if (entry.buffer === null || entry.gain === null) {
         continue
       }
       const source = context.createBufferSource()
       source.buffer = entry.buffer
+      if (region !== null && entry.buffer.duration > region.start) {
+        // Set before `start()`, which is the only time the platform reads
+        // them. A stem that ends before the region begins is left running
+        // straight through — there is nothing of it in the loop to repeat.
+        source.loop = true
+        source.loopStart = region.start
+        // Belt and braces: a stem shorter than the region would otherwise be
+        // told to wrap past its own end. Exact sync across the mix assumes
+        // the stems are the same length, which is what a separation produces;
+        // a genuinely short stem loops on its own boundary instead.
+        source.loopEnd = Math.min(region.end, entry.buffer.duration)
+      }
       source.connect(entry.gain)
       if (entry === longest) {
         // Only the longest stem decides when the mix has ended; a shorter
@@ -709,6 +871,7 @@ export class StemAudioEngine implements StemPlayerEngine {
       status: this.status,
       playing: this.playing,
       durationSeconds: this.durationSeconds,
+      loopRegion: this.loopRegion,
       // A transient transport failure shadows a load failure while it stands
       // and clears on the next transport command; a load failure has no such
       // remedy and survives until the next load.
