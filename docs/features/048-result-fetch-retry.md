@@ -3,7 +3,7 @@
 Branch: `048-result-fetch-retry`
 Status: PR OPEN
 Dependencies: 023
-PR: —
+PR: #72
 
 ## Objective
 
