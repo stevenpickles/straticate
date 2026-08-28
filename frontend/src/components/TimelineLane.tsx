@@ -8,7 +8,10 @@
  *    zoomed-in ten-minute mix would otherwise want a canvas tens of thousands
  *    of pixels wide per stem; instead the window is aggregated down to the
  *    strip's width on every viewport change (`downsamplePeaks`), which is an
- *    arithmetic pass over a few thousand buckets.
+ *    arithmetic pass over a few thousand buckets. Zoomed past the base peaks'
+ *    own resolution the aggregation would be a *stretch* rather than a
+ *    reduction, so feature 051 hands the lane a high-resolution `tile` of the
+ *    visible window instead — same canvas, same columns, sharper source.
  * 2. **It repaints on state, not on frames.** The effect's dependencies are
  *    exactly the things that change what is painted — peaks, viewport, device
  *    pixel ratio, audibility, the stem's own length. The playhead moves 60
@@ -30,10 +33,13 @@ import type { PeakBuckets } from '../audio/peaks'
 import { downsamplePeaks } from '../audio/peaks'
 import {
   drawWaveform,
+  sameTileRange,
+  tileRangeFor,
   timeToX,
   visibleSeconds,
   type TimelineViewport,
 } from './timelineGeometry'
+import type { WaveformTile } from './useWaveformPeaks'
 
 /**
  * Height of one waveform lane, in CSS pixels. It is also the height of the
@@ -57,6 +63,14 @@ export interface TimelineLaneProps {
   readonly name: string
   /** Whole-stem base peaks, or `null` while the stem is still decoding. */
   readonly peaks: PeakBuckets | null
+  /**
+   * A high-resolution tile of the visible window, computed from samples when
+   * the zoom has gone past the base peaks' resolution (feature 051), or `null`
+   * to draw from {@link TimelineLaneProps.peaks}. A tile whose range does not
+   * match the current window is ignored rather than stretched: a stale picture
+   * of the wrong seconds is worse than a coarse picture of the right ones.
+   */
+  readonly tile: WaveformTile | null
   /** The shared window every lane is drawn against. */
   readonly viewport: TimelineViewport
   /** Backing-store scale. */
@@ -79,6 +93,7 @@ function resolveColor(
 function TimelineLaneImpl({
   name,
   peaks,
+  tile,
   viewport,
   devicePixelRatio,
   audible,
@@ -117,11 +132,17 @@ function TimelineLaneImpl({
       // jsdom with no rendering backend and no fake installed.
       return
     }
-    // …and the window, expressed as fractions of the stem's own peak set.
+    // …and the window, from the sharpest source that covers it. A tile is
+    // used only when it is a tile *of this window*; otherwise the base peaks
+    // are aggregated as fractions of the stem's own peak set.
     const startFraction = viewport.scrollSeconds / stemDurationSeconds
     const endFraction =
       (viewport.scrollSeconds + visibleSeconds(viewport)) / stemDurationSeconds
-    const visible = downsamplePeaks(peaks, startFraction, endFraction, columns)
+    const visible =
+      tile !== null &&
+      sameTileRange(tile.range, tileRangeFor(viewport, stemDurationSeconds))
+        ? tile.peaks
+        : downsamplePeaks(peaks, startFraction, endFraction, columns)
 
     drawWaveform(
       context,
@@ -131,7 +152,7 @@ function TimelineLaneImpl({
       devicePixelRatio,
       resolveColor(canvas, audible ? AUDIBLE_COLOR : SILENCED_COLOR),
     )
-  }, [peaks, viewport, devicePixelRatio, audible, stemDurationSeconds])
+  }, [peaks, tile, viewport, devicePixelRatio, audible, stemDurationSeconds])
 
   return (
     <canvas

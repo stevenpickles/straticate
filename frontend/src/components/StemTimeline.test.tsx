@@ -12,7 +12,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { StemTimeline, type StemTimelineStem } from './StemTimeline'
+import {
+  StemTimeline,
+  type StemTimelineProps,
+  type StemTimelineStem,
+} from './StemTimeline'
 import type {
   AudioEngineBuffer,
   StemEngineSnapshot,
@@ -48,11 +52,14 @@ const EMPTY_SNAPSHOT: StemEngineSnapshot = {
  * thing the timeline asks one for. Every other member is present because
  * `StemPlayerEngine` declares it, and inert because nothing here calls it.
  */
-function bufferEngine(names: readonly string[]): StemPlayerEngine {
+function bufferEngine(
+  names: readonly string[],
+  samples: readonly number[] = LOUD,
+): StemPlayerEngine {
   const buffers = new Map<string, AudioEngineBuffer>(
     names.map((name) => [
       name,
-      new FakeAudioBuffer(stemBytesWithSamples(LOUD)),
+      new FakeAudioBuffer(stemBytesWithSamples(samples)),
     ]),
   )
   return {
@@ -124,7 +131,44 @@ async function renderPainted(options: RenderOptions) {
 
 let canvas: FakeCanvasContext2D
 
+// ---------------------------------------------------------------------------
+// Animation frames
+//
+// Feature 051's high-resolution tiles are computed on a frame, so that a burst
+// of wheel events costs one computation rather than one each. Tests deliver
+// those frames by hand — nothing here waits on wall-clock time — exactly as
+// `StemPlayer.test.tsx` does for the playhead's.
+// ---------------------------------------------------------------------------
+
+let frames: Map<number, FrameRequestCallback>
+let nextFrameId = 0
+
+function stubAnimationFrames(): void {
+  frames = new Map()
+  nextFrameId = 0
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    nextFrameId += 1
+    frames.set(nextFrameId, callback)
+    return nextFrameId
+  })
+  vi.stubGlobal('cancelAnimationFrame', (handle: number) => {
+    frames.delete(handle)
+  })
+}
+
+/** Run every pending animation frame callback once. */
+function flushFrame(): void {
+  const pending = [...frames.values()]
+  frames.clear()
+  act(() => {
+    for (const callback of pending) {
+      callback(0)
+    }
+  })
+}
+
 beforeEach(() => {
+  stubAnimationFrames()
   canvas = installFakeCanvas()
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
     x: 0,
@@ -140,6 +184,9 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.unstubAllGlobals()
+  // `installFakeCanvas` and the layout stub are `vi.spyOn`, which
+  // `unstubAllGlobals` does not touch.
   vi.restoreAllMocks()
 })
 
@@ -361,5 +408,405 @@ describe('StemTimeline level faders (feature 054)', () => {
 
     const fader = screen.getByRole('slider', { name: 'drums level' })
     expect(fader).toBeEnabled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Feature 051: zoom and pan
+//
+// Every case here reads the window off the strip's `data-zoom` /
+// `data-scroll-seconds`, which is what the ruler, the lanes and every seek are
+// derived from — so asserting on those two numbers is asserting on all of it,
+// in seconds rather than in pixels. Where a case is about what the *user*
+// sees, it asserts on the tick labels or on the rectangles instead.
+// ---------------------------------------------------------------------------
+
+/** The strip, which carries the window as data. */
+function tracks(): HTMLElement {
+  const element = document.querySelector<HTMLElement>('.stem-timeline-tracks')
+  if (element === null) {
+    throw new Error('the timeline has no track strip')
+  }
+  return element
+}
+
+/** The current zoom ratio. */
+function zoomRatio(): number {
+  return Number(tracks().dataset.zoom)
+}
+
+/** Seconds scrolled past the left edge. */
+function scrollSeconds(): number {
+  return Number(tracks().dataset.scrollSeconds)
+}
+
+/** The seek control, which is also the surface `+`/`-` are pressed on. */
+function surface(): HTMLElement {
+  return screen.getByRole('slider', { name: 'Seek' })
+}
+
+function scrollThumb(): HTMLElement {
+  return screen.getByTestId('stem-timeline-scroll-thumb')
+}
+
+/** Every tick label on the ruler, left to right. */
+function tickLabels(): (string | null)[] {
+  return [...document.querySelectorAll('.stem-timeline-tick')].map(
+    (tick) => tick.textContent,
+  )
+}
+
+/** A Ctrl+wheel notch at `clientX`: negative deltas zoom in, as a mouse does. */
+function ctrlWheel(deltaY: number, clientX: number, times = 1): void {
+  for (let index = 0; index < times; index += 1) {
+    fireEvent.wheel(tracks(), { deltaY, clientX, ctrlKey: true })
+  }
+}
+
+interface FixtureOptions {
+  readonly stems?: readonly StemTimelineStem[]
+  readonly durationSeconds?: number
+  readonly positionSeconds?: number
+  readonly engine?: StemPlayerEngine
+}
+
+/**
+ * A rendered timeline with its props to hand, so a case can push a new
+ * playhead position through it the way the player would.
+ */
+async function fixture(options: FixtureOptions = {}) {
+  const stems = options.stems ?? [loaded('vocals', AXIS_SECONDS)]
+  const engine = options.engine ?? bufferEngine(stems.map((stem) => stem.name))
+  const seeks: number[] = []
+  const props: StemTimelineProps = {
+    stems,
+    durationSeconds: options.durationSeconds ?? AXIS_SECONDS,
+    positionSeconds: options.positionSeconds ?? 0,
+    ready: true,
+    engine,
+    onScrub: () => undefined,
+    onScrubCancel: () => undefined,
+    onSeek: (seconds) => seeks.push(seconds),
+    onTogglePlayback: () => undefined,
+    onToggleMute: () => undefined,
+    onToggleSolo: () => undefined,
+    onSetLevel: () => undefined,
+  }
+  const view = render(<StemTimeline {...props} />)
+  await act(async () => {})
+  return {
+    seeks,
+    engine,
+    /** Re-render with some props changed, as the player re-renders it. */
+    show: (next: Partial<StemTimelineProps>) => {
+      view.rerender(<StemTimeline {...props} {...next} />)
+    },
+  }
+}
+
+describe('StemTimeline zoom', () => {
+  it('zooms about the cursor on Ctrl+wheel, and rescales the ruler', async () => {
+    await fixture()
+
+    // 100 px along a 400 px strip of a minute is 0:15, and one notch shows
+    // two thirds of what was on screen — so the window becomes 40 s with 0:15
+    // still a quarter of the way along it, i.e. starting at 0:05.
+    ctrlWheel(-100, 100)
+
+    expect(zoomRatio()).toBeCloseTo(1.5, 6)
+    expect(scrollSeconds()).toBeCloseTo(5, 6)
+    // The ruler follows: the same ten-second ladder, but starting inside the
+    // file and positioned against the scroll rather than against zero.
+    expect(tickLabels()).toEqual(['0:10', '0:20', '0:30', '0:40'])
+    expect(
+      document.querySelector<HTMLElement>('.stem-timeline-tick')?.style
+        .transform,
+    ).toBe('translateX(50px)')
+  })
+
+  it('finds a finer tick ladder the further in it goes', async () => {
+    await fixture()
+
+    ctrlWheel(-100, 0, 6)
+
+    // 1.5^6 ≈ 11.4, so 5.27 s are on screen and the ruler drops from
+    // ten-second marks to one-second ones.
+    expect(tickLabels()).toEqual([
+      '0:00',
+      '0:01',
+      '0:02',
+      '0:03',
+      '0:04',
+      '0:05',
+    ])
+  })
+
+  it('zooms about the playhead from the toolbar and from the keyboard', async () => {
+    await fixture({ positionSeconds: 30 })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+
+    // The playhead is at 0:30, which is the middle of the strip: the window
+    // shrinks to 40 s around it, so it starts at 0:10.
+    expect(zoomRatio()).toBeCloseTo(1.5, 6)
+    expect(scrollSeconds()).toBeCloseTo(10, 6)
+
+    fireEvent.keyDown(surface(), { key: '+' })
+    expect(zoomRatio()).toBeCloseTo(2.25, 6)
+
+    fireEvent.keyDown(surface(), { key: '-' })
+    expect(zoomRatio()).toBeCloseTo(1.5, 6)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom out' }))
+    expect(zoomRatio()).toBeCloseTo(1, 6)
+    expect(scrollSeconds()).toBeCloseTo(0, 6)
+  })
+
+  it('goes back to the whole file, from the start, on Fit', async () => {
+    await fixture()
+
+    ctrlWheel(-100, 400, 4)
+    expect(zoomRatio()).toBeGreaterThan(4)
+    expect(scrollSeconds()).toBeGreaterThan(0)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom to fit' }))
+
+    expect(zoomRatio()).toBe(1)
+    expect(scrollSeconds()).toBe(0)
+    expect(tickLabels()).toEqual([
+      '0:00',
+      '0:10',
+      '0:20',
+      '0:30',
+      '0:40',
+      '0:50',
+      '1:00',
+    ])
+  })
+
+  it('stops at the whole file one way and at a second of it the other', async () => {
+    await fixture()
+
+    // Already fitted: there is nothing to zoom out to, and the controls say so.
+    expect(screen.getByRole('button', { name: 'Zoom out' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Zoom to fit' })).toBeDisabled()
+    ctrlWheel(100, 200, 3)
+    expect(zoomRatio()).toBe(1)
+    expect(scrollSeconds()).toBe(0)
+
+    // Twenty notches of 1.5 is a magnification of three thousand; the window
+    // stops at one second, which for a minute-long mix is a zoom of 60.
+    ctrlWheel(-100, 0, 20)
+
+    expect(zoomRatio()).toBe(60)
+    expect(screen.getByRole('button', { name: 'Zoom in' })).toBeDisabled()
+  })
+
+  it('leaves a fitted timeline alone for the page to scroll', async () => {
+    await fixture()
+
+    // No `preventDefault`: at fit zoom there is nothing to pan, so the wheel
+    // still belongs to the page it is over.
+    const wheel = new WheelEvent('wheel', {
+      deltaY: 100,
+      bubbles: true,
+      cancelable: true,
+    })
+    tracks().dispatchEvent(wheel)
+
+    expect(wheel.defaultPrevented).toBe(false)
+    expect(scrollSeconds()).toBe(0)
+  })
+})
+
+describe('StemTimeline pan', () => {
+  it('pans on a plain or shifted wheel, and stops at the end of the file', async () => {
+    await fixture()
+    // 40 s across 400 px: ten pixels to the second, from the very start.
+    ctrlWheel(-100, 0)
+
+    fireEvent.wheel(tracks(), { deltaY: 100 })
+    expect(scrollSeconds()).toBeCloseTo(10, 6)
+
+    fireEvent.wheel(tracks(), { deltaY: -50, shiftKey: true })
+    expect(scrollSeconds()).toBeCloseTo(5, 6)
+
+    // A trackpad's own horizontal axis is used when it sends one.
+    fireEvent.wheel(tracks(), { deltaX: 50, deltaY: 0 })
+    expect(scrollSeconds()).toBeCloseTo(10, 6)
+
+    // The window may not show past the end: 60 s of material minus the 40 s
+    // on screen is as far as it goes.
+    fireEvent.wheel(tracks(), { deltaY: 1000 })
+    expect(scrollSeconds()).toBeCloseTo(20, 6)
+  })
+
+  it('scrolls by dragging the thumb, which mirrors the window', async () => {
+    await fixture()
+    ctrlWheel(-100, 0)
+
+    // Two thirds of the file is on screen, from its start.
+    expect(scrollThumb().style.width).toBe(`${String((40 / 60) * 100)}%`)
+    expect(scrollThumb().style.left).toBe('0%')
+
+    // The thumb's track is the whole file across 400 px, so 100 px of drag is
+    // 15 s wherever the zoom happens to be.
+    fireEvent.pointerDown(scrollThumb(), { clientX: 0, pointerId: 1 })
+    fireEvent.pointerMove(scrollThumb(), { clientX: 40, pointerId: 1 })
+    fireEvent.pointerMove(scrollThumb(), { clientX: 100, pointerId: 1 })
+    fireEvent.pointerUp(scrollThumb(), { pointerId: 1 })
+
+    expect(scrollSeconds()).toBeCloseTo(15, 6)
+    expect(scrollThumb().style.left).toBe('25%')
+
+    // The ref is cleared on release, so a stray move afterwards scrolls
+    // nothing.
+    fireEvent.pointerMove(scrollThumb(), { clientX: 300, pointerId: 1 })
+    expect(scrollSeconds()).toBeCloseTo(15, 6)
+  })
+
+  it('follows a playhead that leaves the window, and only then', async () => {
+    const view = await fixture({ positionSeconds: 0 })
+    ctrlWheel(-100, 0, 2)
+    // 1.5² is 2.25, so 26.667 s are on screen, from the start.
+    expect(scrollSeconds()).toBe(0)
+
+    // Playback carries the playhead past the right edge: the window flips so
+    // it reappears a tenth of the way in.
+    // (The window is read back rounded to the millisecond, which is all the
+    // precision a scroll position has any use for.)
+    view.show({ positionSeconds: 30 })
+    expect(scrollSeconds()).toBeCloseTo(30 - (60 / 2.25) * 0.1, 3)
+
+    // The user pans away from it — and is not fought over it, because the
+    // playhead has not moved since.
+    fireEvent.wheel(tracks(), { deltaY: -100 })
+    const panned = scrollSeconds()
+    expect(panned).toBeLessThan(27)
+    view.show({ positionSeconds: 30 })
+    expect(scrollSeconds()).toBe(panned)
+  })
+})
+
+describe('StemTimeline seeking under a moved window', () => {
+  it('seeks to the absolute second under the pointer, zoomed and panned', async () => {
+    const view = await fixture()
+
+    // 1.5× from the left edge is a 40 s window at ten pixels to the second;
+    // one wheel notch of pan puts its left edge at 0:10.
+    ctrlWheel(-100, 0)
+    fireEvent.wheel(tracks(), { deltaY: 100 })
+    expect(scrollSeconds()).toBeCloseTo(10, 6)
+
+    // 300 px in is 30 s into that window, which is 0:40 of the file. A reading
+    // that ignored the scroll would say 0:45, and one that ignored the zoom
+    // would say 0:55 — neither of which is what is under the pointer.
+    fireEvent.pointerDown(surface(), { clientX: 300, pointerId: 1 })
+    fireEvent.pointerUp(surface(), { pointerId: 1 })
+    expect(view.seeks).toEqual([40])
+
+    fireEvent.pointerDown(surface(), { clientX: 100, pointerId: 2 })
+    fireEvent.pointerUp(surface(), { pointerId: 2 })
+    expect(view.seeks).toEqual([40, 20])
+  })
+})
+
+describe('StemTimeline high-resolution tiles', () => {
+  /**
+   * A five-minute axis, which is what makes the base peaks *coarser* than the
+   * pixels: 8192 buckets over 300 s of the fake encoding's 100 Hz is 3.66
+   * sample frames a bucket, so a window of a few seconds asks for more detail
+   * than they hold.
+   */
+  const TILE_AXIS = 300
+
+  /** Silence with a single full-scale sample at 0.5 s. */
+  const IMPULSE = Array.from({ length: TILE_AXIS * 100 }, (_, index) =>
+    index === 50 ? 1 : 0,
+  )
+
+  /** An engine that records every buffer it is asked for. */
+  function recordingEngine(): {
+    engine: StemPlayerEngine
+    reads: string[]
+  } {
+    const inner = bufferEngine(['vocals'], IMPULSE)
+    const reads: string[] = []
+    return {
+      reads,
+      engine: {
+        ...inner,
+        getStemBuffer: (name: string) => {
+          reads.push(name)
+          return inner.getStemBuffer(name)
+        },
+      },
+    }
+  }
+
+  async function renderTiled(): Promise<{ reads: string[] }> {
+    const { engine, reads } = recordingEngine()
+    await fixture({
+      stems: [loaded('vocals', TILE_AXIS)],
+      durationSeconds: TILE_AXIS,
+      engine,
+    })
+    reads.length = 0
+    return { reads }
+  }
+
+  it('reads samples once per frame, not once per wheel event', async () => {
+    const { reads } = await renderTiled()
+
+    // 1.5^8 ≈ 25.6, so about 11.7 s are on screen — past the point where a
+    // pixel covers less than a base bucket, and a tile is worth having.
+    ctrlWheel(-100, 0, 8)
+    expect(reads, 'the storm itself reads nothing').toEqual([])
+
+    flushFrame()
+
+    expect(reads, 'one tile for the window that was landed on').toEqual([
+      'vocals',
+    ])
+  })
+
+  it('keeps the last few tiles, so panning back costs nothing', async () => {
+    const { reads } = await renderTiled()
+    ctrlWheel(-100, 0, 8)
+    flushFrame()
+    reads.length = 0
+
+    // Somewhere new: that window has to be read from the samples.
+    fireEvent.wheel(tracks(), { deltaY: 100 })
+    flushFrame()
+    expect(reads).toEqual(['vocals'])
+
+    // …and back to exactly where it was, which is still in the cache.
+    reads.length = 0
+    fireEvent.wheel(tracks(), { deltaY: -1000 })
+    flushFrame()
+    expect(scrollSeconds()).toBe(0)
+    expect(reads).toEqual([])
+  })
+
+  it('draws the tile, which is sharper than the base peaks are', async () => {
+    await renderTiled()
+
+    // All the way in: one second across 400 px, a quarter of a sample frame
+    // per column.
+    ctrlWheel(-100, 0, 15)
+    expect(zoomRatio()).toBe(TILE_AXIS)
+    canvas.reset()
+
+    flushFrame()
+
+    // A column that has the impulse in it is drawn from near the top of the
+    // lane; a silent one is a hairline through its middle. Four columns share
+    // the one sample the tile puts them each a quarter of. Drawn from the base
+    // peaks the same instant would have smeared it across fifteen, because one
+    // base bucket is 3.66 sample frames wide and covers 15 columns at this
+    // zoom.
+    const loud = canvas.fillRects.filter((rect) => rect.y < 31)
+    expect(loud).toHaveLength(4)
   })
 })
