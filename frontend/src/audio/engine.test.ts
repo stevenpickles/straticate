@@ -1019,6 +1019,32 @@ describe('StemAudioEngine loop regions', () => {
     ])
   })
 
+  it('pauses at the wrapped position and resumes from it', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+    // Two full passes plus five seconds: audibly at 0:15, raw clock at 0:35.
+    context.currentTime = 35 + LOOKAHEAD
+
+    engine.pause()
+
+    // The stored position is the wrapped one — what the user hears — not the
+    // raw elapsed time, so the readout holds at 0:15 while paused…
+    expect(engine.currentTime()).toBeCloseTo(15, 6)
+
+    await engine.play()
+
+    // …and resume starts every source from inside the region, still looping.
+    const resumed = context.sourcesFrom(2)
+    expect(loopFlags(resumed)).toEqual([
+      [true, 10, 20],
+      [true, 10, 20],
+    ])
+    for (const source of resumed) {
+      expect(source.started?.offset).toBeCloseTo(15, 6)
+    }
+  })
+
   it('does not rebuild the graph for the region it already has', async () => {
     await loadEngine(longStems)
     engine.setLoopRegion(10, 20)

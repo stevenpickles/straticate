@@ -244,3 +244,20 @@ auto-follow all derive from that one number.
     survive a phase change — leaving `inspect` and coming back rebuilds the
     engine at 0:00 with no region — and the two jsdom `getContext` warnings
     `StemPlayer.test.tsx` prints, which predate this branch.
+
+13. **Auto-follow and a wrapping playhead (review finding).** When the window
+    is zoomed narrower than the region's span, playback approaching
+    `loopEnd` page-flips the window forward (051's rule: follow only when the
+    playhead leaves the view), and the wrap back to `loopStart` reads as
+    out-of-view again — so the window flips back, once per loop pass. It
+    follows 051's documented page-flip design and is not incorrect, but it
+    is visually busy in that one zoom regime. Options if it grates in use:
+    suppress auto-follow while a region is set, or zoom-to-region on loop
+    start. Left for a follow-up decision; no test pins the interaction.
+
+14. **Pause while wrapped is covered by composition and now directly.**
+    `pause()` stores `currentTime()`, whose wrap is independently tested; a
+    dedicated test ("pauses at the wrapped position and resumes from it",
+    added at review) also pins the full sequence: pause past `loopEnd` holds
+    the wrapped readout, and resume restarts every source from that wrapped
+    offset with the loop flags intact.
