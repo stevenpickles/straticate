@@ -198,7 +198,7 @@ The first three are things the release ships *with*, recorded in
   Inspect step permanently reading "Something went wrong. Please try again."
   with no control that tries again. Found and quantified by **044** (finding 2)
   and deliberately not fixed there. The smallest real defect in the release and
-  the cheapest to fix. **Now feature 048.**
+  the cheapest to fix. **Fixed by feature 048 (#72).**
 - **Nothing prunes job outputs, exports or uploads.** 021, 022, 024 and 040 each
   recorded it and none of them owns it: disk use grows with every job forever,
   deleting an uploaded file leaves its stems behind, and the free-space warning
@@ -297,8 +297,8 @@ The first three are things the release ships *with*, recorded in
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 | 046 | Release workflow and release-process corrections | MERGED  | 043        | `046-release-workflow` | #65 |
 | 047 | Release workflow: ask GitHub whether the tag is annotated | MERGED | 046        | `hotfix/release-workflow-annotated-tag` | #69 |
-| 048 | Stem player recovers from a failed result fetch | PR OPEN | 023        | `048-result-fetch-retry` | #72 |
-| 049 | Waveform foundation (peaks, geometry, engine seam) | PR OPEN | 023        | `049-waveform-foundation` | #71 |
+| 048 | Stem player recovers from a failed result fetch | MERGED  | 023        | `048-result-fetch-retry` | #72 |
+| 049 | Waveform foundation (peaks, geometry, engine seam) | MERGED  | 023        | `049-waveform-foundation` | #71 |
 | 050 | Stem timeline with per-stem waveform lanes   | PLANNED | 049        | `050-stem-timeline-lanes` | |
 | 051 | Timeline zoom and pan                        | PLANNED | 050        | `051-timeline-zoom-pan` | |
 | 052 | Audible scrub preview                        | PLANNED | 050        | `052-scrub-preview` | |
