@@ -300,7 +300,7 @@ The first three are things the release ships *with*, recorded in
 | 048 | Stem player recovers from a failed result fetch | MERGED  | 023        | `048-result-fetch-retry` | #72 |
 | 049 | Waveform foundation (peaks, geometry, engine seam) | MERGED  | 023        | `049-waveform-foundation` | #71 |
 | 050 | Stem timeline with per-stem waveform lanes   | MERGED  | 049        | `050-stem-timeline-lanes` | #74 |
-| 051 | Timeline zoom and pan                        | PR OPEN | 050        | `051-timeline-zoom-pan` | |
+| 051 | Timeline zoom and pan                        | PR OPEN | 050        | `051-timeline-zoom-pan` | #78 |
 | 052 | Audible scrub preview                        | PLANNED | 050        | `052-scrub-preview` | |
 | 053 | Loop / A-B region playback                   | PLANNED | 050        | `053-loop-region` | |
 | 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |

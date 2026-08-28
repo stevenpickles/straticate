@@ -3,7 +3,7 @@
 Branch: `051-timeline-zoom-pan`
 Status: PR OPEN
 Dependencies: 050
-PR: —
+PR: #78
 
 ## Objective
 
