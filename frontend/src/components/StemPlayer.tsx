@@ -151,6 +151,11 @@ export function StemPlayer({
   const [engine, setEngine] = useState<StemPlayerEngine | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
 
+  // Bumped by the "Try again" control in the error state, which is the only
+  // thing that ever changes it. Widening the effect's dependencies on it is
+  // what turns that click into a genuine refetch of the same job.
+  const [attempt, setAttempt] = useState(0)
+
   // The result is fetched rather than read off `job.result`: the REST route
   // is the contract's source of truth, and it is the only thing that can
   // tell us *why* there is nothing to play (021's 409 `detail.state`).
@@ -175,7 +180,7 @@ export function StemPlayer({
     return () => {
       current = false
     }
-  }, [jobId])
+  }, [jobId, attempt])
 
   // One engine per loaded result, disposed when the result or the job
   // changes and on unmount: sources stopped, nodes disconnected, context
@@ -276,14 +281,30 @@ export function StemPlayer({
     appDispatch({ type: 'results/startAnother' })
   }, [jobDispatch, appDispatch])
 
+  // The remedy for every shape of result-fetch failure: a 409
+  // `result_not_available` while the job is still separating resolves once
+  // it finishes, and a dropped request is, definitionally, worth retrying.
+  const retryResult = useCallback(() => {
+    setAttempt((current) => current + 1)
+  }, [])
+
   let body: ReactNode
   if (jobId === null) {
     body = <p className="workspace-hint">No separation job is being tracked.</p>
   } else if (result.status === 'error') {
     body = (
-      <p className="stem-player-error" role="alert">
-        {explainError(result.error)}
-      </p>
+      <>
+        <p className="stem-player-error" role="alert">
+          {explainError(result.error)}
+        </p>
+        <button
+          type="button"
+          className="stem-player-retry"
+          onClick={retryResult}
+        >
+          Try again
+        </button>
+      </>
     )
   } else if (result.status !== 'loaded') {
     body = (

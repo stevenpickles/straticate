@@ -12,6 +12,7 @@ import {
 import {
   JobStateProvider,
   initialJobState,
+  useJobDispatch,
   useJobState,
   type JobStateValue,
 } from '../state/jobState'
@@ -248,6 +249,45 @@ function errorResponse(
   detail?: unknown,
 ): Response {
   return jsonResponse({ error: { code, message, detail } }, status)
+}
+
+/**
+ * Stub `fetch` so successive calls to `GET /jobs/{id}/result` answer with
+ * different outcomes in order — e.g. a rejection (dropped request) followed
+ * by a resolved response, which is what a "Try again" click needs to
+ * recover from. The last responder repeats for any further calls.
+ */
+function stubResultFetchQueue(
+  first: () => Promise<Response>,
+  ...rest: readonly (() => Promise<Response>)[]
+): void {
+  const responders = [first, ...rest]
+  let call = 0
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      if (String(url).endsWith('/result')) {
+        const index = Math.min(call, responders.length - 1)
+        call += 1
+        // `first` is a safe fallback: `index` is always in bounds, so the
+        // lookup never actually falls through to it at runtime.
+        return (responders[index] ?? first)()
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`)
+    }),
+  )
+}
+
+/** A promise plus the function that settles it, for controlling fetch timing. */
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+} {
+  let resolve: (value: T) => void = () => undefined
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
 }
 
 /** Surfaces the workflow phase and the tracked job, for the route-out tests. */
@@ -529,6 +569,130 @@ describe('StemPlayer loading and error states', () => {
       screen.getByText('No separation job is being tracked.'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('slider')).toBeNull()
+  })
+})
+
+describe('StemPlayer result-fetch retry (feature 048)', () => {
+  it('recovers from a dropped result fetch when the user tries again', async () => {
+    stubResultFetchQueue(
+      () => Promise.reject(new TypeError('network error')),
+      () => Promise.resolve(jsonResponse(resultOver(twoStemNames))),
+    )
+    const engine = new FakeEngine()
+    renderPlayer(engine)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong',
+    )
+    const retry = screen.getByRole('button', { name: 'Try again' })
+
+    await userEvent.click(retry)
+
+    await screen.findByRole('button', { name: 'Mute vocals' })
+    await act(async () => {})
+    engine.becomeReady(twoStemNames)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('offers "Try again" for a 409 result_not_available while the job is still running', async () => {
+    stubResultFetchQueue(() =>
+      Promise.resolve(
+        errorResponse(409, 'result_not_available', 'No result yet.', {
+          state: 'separating',
+        }),
+      ),
+    )
+    renderPlayer(new FakeEngine())
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'this job is separating',
+    )
+    expect(
+      screen.getByRole('button', { name: 'Try again' }),
+    ).toBeInTheDocument()
+  })
+
+  it('does not apply a retry fetch that resolves after a newer fetch superseded it', async () => {
+    // Three distinct fetches, all held open until this test settles them:
+    //   1. the initial fetch — rejects, so "Try again" appears.
+    //   2. the retry's fetch (clicking "Try again") — left abandoned.
+    //   3. the fetch from re-tracking the same job — the component's
+    //      *current* fetch, which is what the assertions below are about.
+    // `stubResultFetchQueue` repeats its last responder for further calls,
+    // so a genuine race needs a third, distinct one — reusing the retry's
+    // responder for the re-track would make it the very thing being awaited
+    // and the test would pass for the wrong reason.
+    const retryFetch = deferred<Response>()
+    const retrackFetch = deferred<Response>()
+    stubResultFetchQueue(
+      () => Promise.reject(new TypeError('network error')),
+      () => retryFetch.promise,
+      () => retrackFetch.promise,
+    )
+
+    /** Re-tracks the same job, as `POST /jobs` or a WS reconnect might. */
+    function Retracker({ job }: { job: Job }) {
+      const dispatch = useJobDispatch()
+      return (
+        <button
+          type="button"
+          onClick={() => {
+            dispatch({ type: 'job/track', job })
+          }}
+        >
+          Retrack
+        </button>
+      )
+    }
+
+    render(
+      <AppStateProvider initialState={inspectingState()}>
+        <JobStateProvider
+          initialState={{ ...initialJobState, job: completedJob }}
+        >
+          <StemPlayer createEngine={() => new FakeEngine()} />
+          <Retracker job={completedJob} />
+        </JobStateProvider>
+      </AppStateProvider>,
+    )
+
+    // (a) The initial fetch fails, so "Try again" is offered.
+    await screen.findByRole('alert')
+
+    // (b) Click "Try again": its fetch is the abandoned deferred above.
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+    await screen.findByText('Loading the separation result…')
+
+    // (c) Clear the job, then re-track the *same* job: the component is back
+    // in `loading`, with a fresh, distinct fetch in flight — its own current
+    // one.
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+    expect(
+      screen.getByText('No separation job is being tracked.'),
+    ).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Retrack' }))
+    await screen.findByText('Loading the separation result…')
+
+    // (d) The abandoned retry fetch (b) resolves late, with a real result.
+    await act(async () => {
+      retryFetch.resolve(jsonResponse(resultOver(twoStemNames)))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // (e) The stale result must not render: this component's own current
+    // fetch (c) has not answered yet, so it must still show loading.
+    expect(
+      screen.getByText('Loading the separation result…'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Mute vocals' })).toBeNull()
   })
 })
 
