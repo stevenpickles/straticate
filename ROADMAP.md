@@ -297,7 +297,7 @@ The first three are things the release ships *with*, recorded in
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 | 046 | Release workflow and release-process corrections | MERGED  | 043        | `046-release-workflow` | #65 |
 | 047 | Release workflow: ask GitHub whether the tag is annotated | MERGED | 046        | `hotfix/release-workflow-annotated-tag` | #69 |
-| 048 | Stem player recovers from a failed result fetch | READY | 023        | `048-result-fetch-retry` | |
+| 048 | Stem player recovers from a failed result fetch | PR OPEN | 023        | `048-result-fetch-retry` | #72 |
 | 049 | Waveform foundation (peaks, geometry, engine seam) | PR OPEN | 023        | `049-waveform-foundation` | #71 |
 | 050 | Stem timeline with per-stem waveform lanes   | PLANNED | 049        | `050-stem-timeline-lanes` | |
 | 051 | Timeline zoom and pan                        | PLANNED | 050        | `051-timeline-zoom-pan` | |

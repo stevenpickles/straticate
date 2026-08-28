@@ -139,9 +139,9 @@ test.describe.serial('a separation, end to end', () => {
     await workflow.viewResultsButton.click()
     await expect(workflow.phase).toHaveText('Inspect')
 
-    // The player fetches `GET /jobs/{id}/result` once and renders either the
-    // stems or an error — there is no third outcome and no retry. Wait for it
-    // to reach one of them, then say which.
+    // The player fetches `GET /jobs/{id}/result` and renders the stems or an
+    // error — no third outcome. Wait for it to reach one of them, then say
+    // which.
     //
     // Feature 044: when that fetch is dropped before it reaches the backend,
     // the player parks in its error state and the stem list stays empty. The
@@ -149,6 +149,10 @@ test.describe.serial('a separation, end to end', () => {
     // expected, which is true and useless — the reason is in the error the
     // player is already showing. Asserting on it first spends nothing when the
     // fetch succeeds and names the cause when it does not.
+    //
+    // Feature 048 gave that error state a "Try again" button, so the 044
+    // flake is now recoverable from the UI rather than stranding the user —
+    // this assertion just documents the failure; it does not exercise retry.
     const stemNames = workflow.player.locator('.stem-player-stem-name')
     const loadFailed = workflow.player.locator('.stem-player-error')
     await expect
