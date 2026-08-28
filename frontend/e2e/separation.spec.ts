@@ -196,6 +196,18 @@ test.describe.serial('a separation, end to end', () => {
     await solo.click()
     await expect(solo).toHaveAttribute('aria-pressed', 'true')
 
+    // Feature 054: one level fader per stem, driving the engine continuously.
+    for (const name of mode.stems) {
+      await expect(
+        workflow.player.getByRole('slider', { name: `${name} level` }),
+      ).toBeVisible()
+    }
+    const fader = workflow.player.getByRole('slider', {
+      name: `${first} level`,
+    })
+    await fader.fill('0.5')
+    await expect(fader).toHaveValue('0.5')
+
     await play.click()
     const pause = workflow.player.getByRole('button', { name: 'Pause' })
     await expect(pause).toBeVisible()
