@@ -5,7 +5,8 @@
   flex-direction: column;
   align-items: stretch;
   gap: 0.75rem;
-  width: min(32rem, 100%);
+  /* Wider since feature 050: the waveform lanes want horizontal room. */
+  width: min(48rem, 100%);
   margin-top: 1rem;
   padding: 1.25rem;
   text-align: left;
@@ -20,25 +21,11 @@
   font-weight: 600;
 }
 
-.stem-player-stems {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.stem-player-stem {
-  display: grid;
-  grid-template-columns: 1fr auto auto auto;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--color-border);
-  border-radius: 0.5rem;
-}
-
+/*
+ * The stem name and its status line. Feature 050 moved them from a list row
+ * into the timeline's lane header; the classes stayed, because they are the
+ * player's vocabulary and the E2E tier reads `.stem-player-stem-name`.
+ */
 .stem-player-stem-name {
   font-weight: 500;
   text-transform: capitalize;
@@ -85,8 +72,7 @@
 }
 
 .stem-player-transport {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+  display: flex;
   align-items: center;
   gap: 0.75rem;
 }
@@ -113,17 +99,6 @@
   color: var(--color-text-muted);
   border-color: var(--color-border);
   cursor: default;
-}
-
-.stem-player-seek {
-  width: 100%;
-  accent-color: var(--color-accent);
-  cursor: pointer;
-}
-
-.stem-player-seek:disabled {
-  cursor: default;
-  opacity: 0.5;
 }
 
 .stem-player-time {

@@ -23,7 +23,13 @@ import {
   type StemPlayerEngine,
   type StemSource,
 } from '../audio/engine'
-import { FakeAudioContext, stemBytes } from '../test/fakeAudioContext'
+import {
+  FakeAudioBuffer,
+  FakeAudioContext,
+  stemBytes,
+  stemBytesWithSamples,
+} from '../test/fakeAudioContext'
+import { installFakeCanvas } from '../test/fakeCanvasContext'
 import { sampleAudioFile, sampleJob, sampleJobId } from '../test/fixtures'
 
 /** Every stem in these fixtures is this long, so the readout is predictable. */
@@ -94,6 +100,113 @@ function flushFrame(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Layout
+//
+// The timeline maps pixels to seconds, so jsdom — which lays nothing out and
+// reports every box as 0×0 — has to be told how wide the strip is. One fixed
+// rect for every element makes `x → seconds` exact arithmetic, and the
+// `ResizeObserver` stub stands in for the API jsdom does not implement.
+// ---------------------------------------------------------------------------
+
+/** Width of the timeline strip in every test here. */
+const TIMELINE_WIDTH = 400
+
+/** A resize observer whose callbacks a test delivers by hand. */
+class FakeResizeObserver {
+  static readonly instances: FakeResizeObserver[] = []
+  readonly targets: Element[] = []
+  private readonly callback: ResizeObserverCallback
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback
+    FakeResizeObserver.instances.push(this)
+  }
+
+  observe(target: Element): void {
+    this.targets.push(target)
+  }
+
+  unobserve(): void {
+    // Nothing here observes twice.
+  }
+
+  disconnect(): void {
+    this.targets.length = 0
+  }
+
+  /** Report a new width to every live observer, as a real resize would. */
+  static resizeTo(width: number): void {
+    act(() => {
+      for (const observer of FakeResizeObserver.instances) {
+        for (const target of observer.targets) {
+          observer.callback(
+            [
+              {
+                target,
+                contentRect: { width, height: 200 },
+              } as unknown as ResizeObserverEntry,
+            ],
+            observer as unknown as ResizeObserver,
+          )
+        }
+      }
+    })
+  }
+}
+
+function stubLayout(): void {
+  FakeResizeObserver.instances.length = 0
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+    x: 0,
+    y: 0,
+    width: TIMELINE_WIDTH,
+    height: 200,
+    top: 0,
+    left: 0,
+    right: TIMELINE_WIDTH,
+    bottom: 200,
+    toJSON: () => ({}),
+  })
+}
+
+/** The timeline, which is also the seek control. */
+function timeline(): HTMLElement {
+  return screen.getByRole('slider', { name: 'Seek' })
+}
+
+/** The x offset on the strip that means `seconds`. */
+function xFor(seconds: number): number {
+  return (seconds / STEM_SECONDS) * TIMELINE_WIDTH
+}
+
+/** One pointer gesture: press at `from`, drag through `path`, release. */
+function dragTimeline(from: number, ...path: number[]): void {
+  const surface = timeline()
+  fireEvent.pointerDown(surface, { clientX: xFor(from), pointerId: 1 })
+  for (const seconds of path) {
+    fireEvent.pointerMove(surface, { clientX: xFor(seconds), pointerId: 1 })
+  }
+  fireEvent.pointerUp(surface, { pointerId: 1 })
+}
+
+/**
+ * Ceiling for the two waits that depend on a promise rather than on React's
+ * own queue: the result fetch, and the engine reaching `ready`. Still a
+ * condition, not a sleep — a passing run never spends any of it. RTL's 1 s
+ * default is the one thing here that a loaded machine can genuinely exceed
+ * (Playwright's config raises its own budget to 20 s for the same reason).
+ */
+const SETTLE = { timeout: 10_000 }
+
+/** Every lane header's stem name, in render order. */
+function laneNames(): string[] {
+  return [...document.querySelectorAll('.stem-player-stem-name')].map(
+    (element) => element.textContent ?? '',
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Test doubles
 // ---------------------------------------------------------------------------
 
@@ -114,6 +227,16 @@ function stemState(
     ...overrides,
   }
 }
+
+/**
+ * A short synthetic stem: one cycle of a sine, authored in multiples of
+ * 1/128 so it survives the fake codec's round trip. Enough for the peak
+ * computation to produce a real envelope, small enough to cost nothing.
+ */
+const SYNTHETIC_SAMPLES = Array.from(
+  { length: 240 },
+  (_, index) => Math.round(Math.sin((index / 240) * Math.PI * 2) * 96) / 128,
+)
 
 /**
  * A recording stand-in for the audio engine. The component must not know how
@@ -183,7 +306,15 @@ class FakeEngine implements StemPlayerEngine {
 
   currentTime = (): number => this.time
 
-  getStemBuffer = (): null => null
+  /**
+   * Decoded audio per stem, so the waveform lanes have something real to
+   * reduce. Filled by {@link FakeEngine.becomeReady}, exactly as the real
+   * engine fills its entries when a decode finishes.
+   */
+  private readonly buffers = new Map<string, FakeAudioBuffer>()
+
+  getStemBuffer = (name: string): FakeAudioBuffer | null =>
+    this.buffers.get(name) ?? null
 
   getSnapshot = (): StemEngineSnapshot => this.snapshot
 
@@ -208,6 +339,12 @@ class FakeEngine implements StemPlayerEngine {
 
   /** Settle into "every stem decoded and playable". */
   becomeReady(names: readonly string[]): void {
+    for (const name of names) {
+      this.buffers.set(
+        name,
+        new FakeAudioBuffer(stemBytesWithSamples(SYNTHETIC_SAMPLES)),
+      )
+    }
     act(() => {
       this.update({
         status: 'ready',
@@ -340,12 +477,19 @@ async function renderReady(
   stubResultFetch(jsonResponse(resultOver(names)))
   const engine = new FakeEngine()
   renderPlayer(engine)
-  await screen.findByRole('button', { name: `Mute ${String(names[0])}` })
+  await screen.findByRole(
+    'button',
+    { name: `Mute ${String(names[0])}` },
+    SETTLE,
+  )
   await act(async () => {})
   engine.becomeReady(names)
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
-  })
+  }, SETTLE)
+  // Let the peak computations settle: they are chunked and therefore async,
+  // and a lane that paints after the test has finished is a stray act warning.
+  await act(async () => {})
   return { engine }
 }
 
@@ -375,27 +519,36 @@ async function renderReal(names: readonly string[]): Promise<StemPlayerEngine> {
   renderPlayer(engine)
   await waitFor(() => {
     expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
-  })
+  }, SETTLE)
+  await act(async () => {})
   return engine
 }
 
+/** The recording 2D context every lane in a test draws through. */
+let canvas: ReturnType<typeof installFakeCanvas>
+
 beforeEach(() => {
   stubAnimationFrames()
+  stubLayout()
+  canvas = installFakeCanvas()
 })
 
 afterEach(() => {
   vi.unstubAllGlobals()
+  // `stubLayout` and `installFakeCanvas` are `vi.spyOn`, which
+  // `unstubAllGlobals` does not touch (feature 049, note 9).
+  vi.restoreAllMocks()
 })
 
 // ---------------------------------------------------------------------------
 
-describe('StemPlayer stem rows', () => {
-  it('renders one row per stem of a two-stem result', async () => {
+describe('StemPlayer stem lanes', () => {
+  it('renders one lane per stem of a two-stem result', async () => {
     await renderReady(twoStemNames)
 
-    expect(screen.getAllByRole('listitem')).toHaveLength(2)
+    expect(laneNames()).toEqual(twoStemNames)
+    expect(document.querySelectorAll('canvas')).toHaveLength(2)
     for (const name of twoStemNames) {
-      expect(screen.getByText(name)).toBeInTheDocument()
       expect(
         screen.getByRole('button', { name: `Mute ${name}` }),
       ).toBeInTheDocument()
@@ -405,15 +558,79 @@ describe('StemPlayer stem rows', () => {
     }
   })
 
-  it('renders one row per stem of a four-stem result', async () => {
+  it('renders one lane per stem of a four-stem result', async () => {
     await renderReady(fourStemNames)
 
-    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+    expect(laneNames()).toEqual(fourStemNames)
+    expect(document.querySelectorAll('canvas')).toHaveLength(4)
     for (const name of fourStemNames) {
       expect(
         screen.getByRole('button', { name: `Solo ${name}` }),
       ).toBeInTheDocument()
     }
+  })
+
+  it('draws every lane from the engine’s decoded audio', async () => {
+    await renderReady(twoStemNames)
+
+    // Coarse by design: that a waveform was painted in the accent colour, not
+    // which pixels it covered. `timelineGeometry.test.ts` pins the geometry.
+    expect(canvas.fillRects.length).toBeGreaterThan(0)
+    expect(canvas.fillRects.every((rect) => rect.fillStyle === '#7aa2f7')).toBe(
+      true,
+    )
+  })
+
+  it('redraws a silenced lane in the muted colour', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    canvas.reset()
+
+    act(() => {
+      engine.update({
+        stems: [
+          stemState('vocals'),
+          stemState('instrumental', { muted: true, audible: false }),
+        ],
+      })
+    })
+
+    const silenced = canvas.fillRects.filter(
+      (rect) => rect.fillStyle === '#9a9aa5',
+    )
+    expect(silenced.length).toBeGreaterThan(0)
+  })
+
+  it('gives a stem whose audio failed a placeholder instead of a canvas', async () => {
+    const { engine } = await renderReady(twoStemNames)
+
+    act(() => {
+      engine.update({
+        stems: [
+          stemState('vocals'),
+          stemState('instrumental', { status: 'error' }),
+        ],
+      })
+    })
+
+    expect(
+      document.querySelector('.stem-timeline-lane-placeholder'),
+    ).toHaveTextContent('Unavailable')
+    // One lane fewer than stems: the failed one has nothing to draw.
+    expect(document.querySelectorAll('canvas')).toHaveLength(1)
+  })
+
+  it('repaints the lanes when the strip is resized, not on every frame', async () => {
+    await renderReady(twoStemNames)
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    canvas.reset()
+
+    flushFrame()
+    flushFrame()
+    expect(canvas.fillRects).toHaveLength(0)
+
+    FakeResizeObserver.resizeTo(200)
+
+    expect(canvas.fillRects.length).toBeGreaterThan(0)
   })
 
   it('loads every stem from its own streaming URL', async () => {
@@ -464,7 +681,19 @@ describe('StemPlayer loading and error states', () => {
 
     expect(await screen.findByText('Decoding stems…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Play' })).toBeDisabled()
-    expect(screen.getByRole('slider', { name: 'Seek' })).toBeDisabled()
+    // The timeline is a div, so it says so the way a div can.
+    expect(timeline()).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  it('ignores a pointer gesture until the stems are ready', async () => {
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    const engine = new FakeEngine()
+    renderPlayer(engine)
+    await screen.findByText('Decoding stems…')
+
+    dragTimeline(10, 20)
+
+    expect(engine.seeks).toEqual([])
   })
 
   it('explains a 409 for a job that is still separating', async () => {
@@ -713,31 +942,77 @@ describe('StemPlayer transport', () => {
 
   it('seeks the engine and moves the readout', async () => {
     const { engine } = await renderReady(twoStemNames)
-    const slider = screen.getByRole('slider', { name: 'Seek' })
 
-    fireEvent.change(slider, { target: { value: '18' } })
-    fireEvent.pointerUp(slider)
+    dragTimeline(18)
 
     expect(engine.seeks).toEqual([18])
     expect(screen.getByText('0:18 / 1:00')).toBeInTheDocument()
   })
 
-  it('commits a keyboard scrub on key up', async () => {
+  it('treats a motionless click as the degenerate drag: one seek', async () => {
     const { engine } = await renderReady(twoStemNames)
-    const slider = screen.getByRole('slider', { name: 'Seek' })
+    const surface = timeline()
 
-    fireEvent.change(slider, { target: { value: '5' } })
-    fireEvent.keyUp(slider, { key: 'ArrowRight' })
+    fireEvent.pointerDown(surface, { clientX: xFor(42), pointerId: 1 })
+    fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    expect(engine.seeks).toEqual([5])
+    expect(engine.seeks).toEqual([42])
   })
 
-  it('spans the full mix duration', async () => {
-    await renderReady(twoStemNames)
+  it.each([
+    ['ArrowRight', {}, 1],
+    ['ArrowLeft', {}, 0],
+    ['ArrowRight', { shiftKey: true }, 5],
+    ['Home', {}, 0],
+    ['End', {}, STEM_SECONDS],
+  ])('commits one discrete seek for %s', async (key, modifiers, expected) => {
+    const { engine } = await renderReady(twoStemNames)
 
-    const slider = screen.getByRole('slider', { name: 'Seek' })
-    expect(slider).toHaveAttribute('min', '0')
-    expect(slider).toHaveAttribute('max', String(STEM_SECONDS))
+    fireEvent.keyDown(timeline(), { key, ...modifiers })
+
+    expect(engine.seeks).toEqual([expected])
+  })
+
+  it('toggles playback with Space on the focused timeline', async () => {
+    const { engine } = await renderReady(twoStemNames)
+
+    fireEvent.keyDown(timeline(), { key: ' ' })
+    expect(engine.playCount).toBe(1)
+
+    fireEvent.keyDown(timeline(), { key: ' ' })
+    expect(engine.pauseCount).toBe(1)
+    expect(engine.seeks).toEqual([])
+  })
+
+  it('spans the full mix duration, and says where the playhead is', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+    expect(surface).toHaveAttribute('aria-valuemin', '0')
+    expect(surface).toHaveAttribute('aria-valuemax', String(STEM_SECONDS))
+    expect(surface).toHaveAttribute('aria-valuenow', '0')
+    expect(surface).toHaveAttribute('aria-valuetext', '0:00 of 1:00')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    engine.time = 24
+    flushFrame()
+
+    expect(timeline()).toHaveAttribute('aria-valuenow', '24')
+    expect(timeline()).toHaveAttribute('aria-valuetext', '0:24 of 1:00')
+  })
+
+  it('moves the playhead with a transform rather than a repaint', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const playhead = screen.getByTestId('stem-timeline-playhead')
+    expect(playhead).toHaveStyle({ transform: 'translateX(0px)' })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    engine.time = 30
+    flushFrame()
+
+    // Half the file, so half the 400 px strip.
+    expect(screen.getByTestId('stem-timeline-playhead')).toHaveStyle({
+      transform: 'translateX(200px)',
+    })
   })
 
   it('reads the playhead off the engine on every animation frame', async () => {
@@ -865,9 +1140,7 @@ describe('StemPlayer over the real engine', () => {
     await renderReal(fourStemNames)
     await userEvent.click(screen.getByRole('button', { name: 'Play' }))
 
-    const slider = screen.getByRole('slider', { name: 'Seek' })
-    fireEvent.change(slider, { target: { value: '30' } })
-    fireEvent.pointerUp(slider)
+    dragTimeline(30)
 
     const restarted = context.sourcesFrom(4)
     expect(restarted).toHaveLength(4)
@@ -889,7 +1162,7 @@ describe('StemPlayer over the real engine', () => {
     renderPlayer(engine)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
-    })
+    }, SETTLE)
     expect(context.resumeCount).toBe(0)
 
     await userEvent.click(screen.getByRole('button', { name: 'Play' }))
@@ -897,6 +1170,7 @@ describe('StemPlayer over the real engine', () => {
     await waitFor(() => {
       expect(context.resumeCount).toBe(1)
     })
+    await act(async () => {})
     expect(context.sources).toHaveLength(2)
   })
 
@@ -919,7 +1193,8 @@ describe('StemPlayer over the real engine', () => {
 
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
-    })
+    }, SETTLE)
+    await act(async () => {})
     expect(screen.getByRole('alert')).toBeInTheDocument()
     expect(
       screen.getByRole('button', { name: 'Mute instrumental' }),
@@ -933,84 +1208,125 @@ describe('StemPlayer over the real engine', () => {
 // ---------------------------------------------------------------------------
 
 describe('StemPlayer scrubbing (review finding 1)', () => {
-  /** The `change` events a drag across the bar really produces. */
-  const dragPath = ['6', '13', '21', '28', '34', '41', '47']
+  /** The positions a drag across the strip really passes through. */
+  const dragPath = [6, 13, 21, 28, 34, 41, 47]
 
-  it('commits one seek for a whole drag, not one per input event', async () => {
+  it('commits one seek for a whole drag, not one per pointer event', async () => {
     const { engine } = await renderReady(twoStemNames)
-    const slider = screen.getByRole('slider', { name: 'Seek' })
+    const surface = timeline()
 
-    for (const value of dragPath) {
-      fireEvent.change(slider, { target: { value } })
+    fireEvent.pointerDown(surface, { clientX: xFor(6), pointerId: 1 })
+    for (const seconds of dragPath) {
+      fireEvent.pointerMove(surface, { clientX: xFor(seconds), pointerId: 1 })
     }
     expect(engine.seeks).toEqual([])
 
-    fireEvent.pointerUp(slider)
+    fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    expect(engine.seeks).toEqual([47])
+    // One seek, at the position the pointer was released from. (Approximate
+    // because the value is `x / pxPerSecond` and 400 px does not divide a
+    // minute; the *count* is the finding this test exists for.)
+    expect(engine.seeks).toHaveLength(1)
+    expect(engine.seeks[0]).toBeCloseTo(47, 6)
   })
 
   it('follows the drag on screen before the seek is committed', async () => {
     await renderReady(twoStemNames)
-    const slider = screen.getByRole('slider', { name: 'Seek' })
+    const surface = timeline()
 
-    fireEvent.change(slider, { target: { value: '21' } })
+    fireEvent.pointerDown(surface, { clientX: xFor(21), pointerId: 1 })
 
     expect(screen.getByText('0:21 / 1:00')).toBeInTheDocument()
-    expect(slider).toHaveValue('21')
+    expect(timeline()).toHaveAttribute('aria-valuenow', '21')
+    expect(screen.getByTestId('stem-timeline-playhead')).toHaveStyle({
+      transform: 'translateX(140px)',
+    })
   })
 
-  it('rebuilds the source graph once per drag, not once per input event', async () => {
+  it('rebuilds the source graph once per drag, not once per pointer event', async () => {
     await renderReal(fourStemNames)
     await userEvent.click(screen.getByRole('button', { name: 'Play' }))
     // One source per stem for the initial play.
     expect(context.sources).toHaveLength(4)
-    const slider = screen.getByRole('slider', { name: 'Seek' })
+    const surface = timeline()
 
-    for (const value of dragPath) {
-      fireEvent.change(slider, { target: { value } })
+    fireEvent.pointerDown(surface, { clientX: xFor(6), pointerId: 1 })
+    for (const seconds of dragPath) {
+      fireEvent.pointerMove(surface, { clientX: xFor(seconds), pointerId: 1 })
     }
 
     // Nothing was torn down or rescheduled while the pointer was still down:
     // a rebuild per event would be seven silent 50 ms lookaheads.
     expect(context.sources).toHaveLength(4)
 
-    fireEvent.pointerUp(slider)
+    fireEvent.pointerUp(surface, { pointerId: 1 })
 
     const restarted = context.sourcesFrom(4)
     expect(restarted).toHaveLength(4)
-    expect(new Set(restarted.map((source) => source.started?.offset))).toEqual(
-      new Set([47]),
-    )
+    const offsets = restarted.map((source) => source.started?.offset ?? -1)
+    expect(new Set(offsets).size).toBe(1)
+    expect(offsets[0]).toBeCloseTo(47, 6)
     expect(new Set(restarted.map((source) => source.started?.when)).size).toBe(
       1,
     )
   })
 
-  it('treats a pointer up and its mouse up as a single seek', async () => {
+  it('ignores a second release of the same gesture', async () => {
     const { engine } = await renderReady(twoStemNames)
-    const slider = screen.getByRole('slider', { name: 'Seek' })
+    const surface = timeline()
 
-    fireEvent.change(slider, { target: { value: '12' } })
-    fireEvent.pointerUp(slider)
-    fireEvent.mouseUp(slider)
-    fireEvent.blur(slider)
+    fireEvent.pointerDown(surface, { clientX: xFor(12), pointerId: 1 })
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+    fireEvent.pointerUp(surface, { pointerId: 1 })
 
     expect(engine.seeks).toEqual([12])
+  })
+
+  it('lets a keyboard commit end a drag instead of doubling it', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(surface, { clientX: xFor(12), pointerId: 1 })
+    fireEvent.keyDown(surface, { key: 'ArrowRight' })
+
+    // The arrow key committed a seek; the ref must be cleared with it, or
+    // the release below would fire a second, stale seek over this one.
+    expect(engine.seeks).toHaveLength(1)
+
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+
+    expect(engine.seeks).toHaveLength(1)
+  })
+
+  it('commits nothing when the gesture is cancelled', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    engine.time = 7
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(40), pointerId: 1 })
+    fireEvent.pointerMove(surface, { clientX: xFor(44), pointerId: 1 })
+    expect(screen.getByText('0:44 / 1:00')).toBeInTheDocument()
+
+    fireEvent.pointerCancel(surface, { pointerId: 1 })
+
+    expect(engine.seeks).toEqual([])
+    // Snapped back to wherever the audio clock actually is.
+    expect(screen.getByText('0:07 / 1:00')).toBeInTheDocument()
   })
 
   it('lets the audio clock drive the readout again after the drag', async () => {
     const { engine } = await renderReady(twoStemNames)
     await userEvent.click(screen.getByRole('button', { name: 'Play' }))
-    const slider = screen.getByRole('slider', { name: 'Seek' })
+    const surface = timeline()
 
-    fireEvent.change(slider, { target: { value: '30' } })
+    fireEvent.pointerDown(surface, { clientX: xFor(30), pointerId: 1 })
     engine.time = 9
     flushFrame()
     // Still showing the drag, not the clock.
     expect(screen.getByText('0:30 / 1:00')).toBeInTheDocument()
 
-    fireEvent.pointerUp(slider)
+    fireEvent.pointerUp(surface, { pointerId: 1 })
     engine.time = 31
     flushFrame()
 
@@ -1109,7 +1425,7 @@ describe('StemPlayer cleanup', () => {
     const view = renderPlayer(engine)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
-    })
+    }, SETTLE)
     await userEvent.click(screen.getByRole('button', { name: 'Play' }))
 
     view.unmount()
