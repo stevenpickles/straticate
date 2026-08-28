@@ -303,7 +303,7 @@ The first three are things the release ships *with*, recorded in
 | 051 | Timeline zoom and pan                        | PLANNED | 050        | `051-timeline-zoom-pan` | |
 | 052 | Audible scrub preview                        | PLANNED | 050        | `052-scrub-preview` | |
 | 053 | Loop / A-B region playback                   | PLANNED | 050        | `053-loop-region` | |
-| 054 | Per-stem level faders                        | PLANNED | 050        | `054-stem-level-faders` | |
+| 054 | Per-stem level faders                        | PR OPEN | 050        | `054-stem-level-faders` | |
 | 055 | Release preparation for v0.2.0               | PLANNED | 048–054    | `055-release-preparation-v0.2.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its

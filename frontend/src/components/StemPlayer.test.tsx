@@ -251,6 +251,7 @@ class FakeEngine implements StemPlayerEngine {
   readonly seeks: number[] = []
   readonly muteToggles: string[] = []
   readonly soloToggles: string[] = []
+  readonly levelSets: { name: string; value: number }[] = []
   disposeCount = 0
   time = 0
 
@@ -300,8 +301,8 @@ class FakeEngine implements StemPlayerEngine {
     this.soloToggles.push(name)
   }
 
-  setLevel = (): void => {
-    // Not driven from this UI.
+  setLevel = (name: string, value: number): void => {
+    this.levelSets.push({ name, value })
   }
 
   currentTime = (): number => this.time
@@ -1080,6 +1081,76 @@ describe('StemPlayer mute and solo', () => {
   })
 })
 
+describe('StemPlayer level faders (feature 054)', () => {
+  it('calls engine.setLevel with the stem name and value, continuously — not once per gesture', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const fader = screen.getByRole('slider', { name: 'vocals level' })
+
+    // Two events from one drag reach the engine as two calls: a level write
+    // is a plain `AudioParam` assignment, unlike the seek gesture next door,
+    // which batches a whole drag into one `engine.seek` because a seek tears
+    // down and rebuilds every source node.
+    fireEvent.change(fader, { target: { value: '0.3' } })
+    fireEvent.change(fader, { target: { value: '0.9' } })
+
+    expect(engine.levelSets.length).toBeGreaterThanOrEqual(2)
+    expect(engine.levelSets).toEqual([
+      { name: 'vocals', value: 0.3 },
+      { name: 'vocals', value: 0.9 },
+    ])
+  })
+
+  it('renders one fader per stem for two- and four-stem results', async () => {
+    await renderReady(fourStemNames)
+
+    for (const name of fourStemNames) {
+      expect(
+        screen.getByRole('slider', { name: `${name} level` }),
+      ).toBeInTheDocument()
+    }
+  })
+
+  it("reflects the stem's level from the engine snapshot", async () => {
+    const { engine } = await renderReady(twoStemNames)
+
+    act(() => {
+      engine.update({
+        stems: [stemState('vocals', { level: 0.4 }), stemState('instrumental')],
+      })
+    })
+
+    expect(screen.getByRole('slider', { name: 'vocals level' })).toHaveValue(
+      '0.4',
+    )
+  })
+
+  it('is disabled until the stem has loaded', async () => {
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    renderPlayer(new FakeEngine())
+
+    expect(
+      await screen.findByRole('slider', { name: 'vocals level' }),
+    ).toBeDisabled()
+  })
+
+  it('stays enabled and keeps showing the true level while the stem is muted', async () => {
+    const { engine } = await renderReady(twoStemNames)
+
+    act(() => {
+      engine.update({
+        stems: [
+          stemState('vocals', { muted: true, audible: false, level: 0.6 }),
+          stemState('instrumental'),
+        ],
+      })
+    })
+
+    const fader = screen.getByRole('slider', { name: 'vocals level' })
+    expect(fader).toBeEnabled()
+    expect(fader).toHaveValue('0.6')
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Against the real engine, with a fake AudioContext underneath: the mute and
 // solo *semantics* the user actually experiences, end to end through the UI.
@@ -1098,6 +1169,21 @@ describe('StemPlayer over the real engine', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Mute drums' }))
     expect(gains()).toEqual([1, 1, 1, 1])
+  })
+
+  it('reaches the gain node value through a fader change (feature 054)', async () => {
+    await renderReal(fourStemNames)
+
+    fireEvent.change(screen.getByRole('slider', { name: 'drums level' }), {
+      target: { value: '0.25' },
+    })
+
+    expect(gains()).toEqual([1, 0.25, 1, 1])
+
+    // Mute silences it regardless of the level just set — `level` and
+    // `audible` compose the way the engine documents, not the fader alone.
+    await userEvent.click(screen.getByRole('button', { name: 'Mute drums' }))
+    expect(gains()).toEqual([1, 0, 1, 1])
   })
 
   it('adds solos together and restores the mutes when they are cleared', async () => {
