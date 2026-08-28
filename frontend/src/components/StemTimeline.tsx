@@ -235,6 +235,10 @@ export function StemTimeline({
       const step = event.shiftKey ? COARSE_STEP_SECONDS : FINE_STEP_SECONDS
       const move = (seconds: number): void => {
         event.preventDefault()
+        // A keyboard commit ends any pointer gesture still in flight: were
+        // the ref left set, the eventual pointerup would find it and fire a
+        // second, stale seek over this one.
+        gesture.current = null
         onSeek(clamp(seconds, 0, durationSeconds))
       }
       switch (event.key) {

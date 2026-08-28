@@ -1282,6 +1282,23 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
     expect(engine.seeks).toEqual([12])
   })
 
+  it('lets a keyboard commit end a drag instead of doubling it', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(surface, { clientX: xFor(12), pointerId: 1 })
+    fireEvent.keyDown(surface, { key: 'ArrowRight' })
+
+    // The arrow key committed a seek; the ref must be cleared with it, or
+    // the release below would fire a second, stale seek over this one.
+    expect(engine.seeks).toHaveLength(1)
+
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+
+    expect(engine.seeks).toHaveLength(1)
+  })
+
   it('commits nothing when the gesture is cancelled', async () => {
     const { engine } = await renderReady(twoStemNames)
     engine.time = 7
