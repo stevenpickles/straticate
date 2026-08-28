@@ -56,12 +56,37 @@ CPU path (Demucs, 1.63× real time). Reopening the fast-vocals question needs a
 model whose terms somebody with standing has stated; see
 `docs/features/027-mdx-fast-separator.md`.
 
-**Every M3 requirement is met.** What remains is the project owner's, and
-deliberately so (`AGENTS.md`: never push to `main`): open the release PR
-`dev → main`, merge it, and create the annotated tag `v0.1.0`. Feature 043
-prepared `dev` and stopped there.
+**M3 is complete: v0.1.0 is released.** The release PR (#66) rebase-merged
+`release/v0.1.0` into `main`, the annotated tag `v0.1.0` exists, hotfix 047
+(#69) landed on `main`, and `dev` was reconciled via #68 (with 047 brought
+back to `dev` alongside this ledger update).
 
-## Current state (2026-08-26)
+### M4 — v0.2.0: inspect like an editor
+
+**Defined 2026-08-27.** The Inspect step grows from a transport into an
+Audacity-like timeline: per-stem waveform lanes rendered from the audio the
+player already decodes, a scrubbable playhead with audible preview, zoom,
+loop regions, per-stem level faders — and the one known defect v0.1.0
+shipped with (the unrecoverable result fetch) fixed. Features 048–055;
+decisions and design in the feature docs.
+
+| Requirement | Feature(s) |
+| --- | --- |
+| Result fetch failure is recoverable in place | 048 |
+| Per-stem waveform lanes on a shared time axis (hand-rolled canvas, no new runtime dependency) | 049, 050 |
+| Click/drag seek preserving the one-seek-per-gesture contract | 050 |
+| Horizontal zoom + pan, keyboard transport, accessible seek control | 050, 051 |
+| Audible Audacity-style scrub preview | 052 |
+| Loop / A-B region playback, sample-accurate across stems | 053 |
+| Per-stem volume faders over the existing `setLevel` | 054 |
+| CHANGELOG, version `0.2.0`, clean-clone verification | 055 |
+
+## Current state (2026-08-27)
+
+**M1, M2 and M3 are met and v0.1.0 is released** (tag `v0.1.0`, PR #66,
+hotfix #69). **M4 (v0.2.0) is defined and in progress** — features 048–055.
+
+The remainder of this section is the v0.1.0 state as recorded at release.
 
 **M1, M2 and M3 are all met, and `dev` is prepared for the v0.1.0 release.**
 Every numbered feature 001–045 is merged or resolved — 027 `WONTFIX` (no licence
@@ -164,16 +189,16 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 
 ### After v0.1.0
 
-Nothing below is numbered yet. The first three are things the release ships
-*with*, recorded in `CHANGELOG.md` where a user will meet them; the rest are
-open questions.
+The first item below became feature **048** (M4); the rest remain unnumbered.
+The first three are things the release ships *with*, recorded in
+`CHANGELOG.md` where a user will meet them; the rest are open questions.
 
 - **`StemPlayer` cannot recover from a failed result fetch.** One `useEffect`,
   one `getSeparationResult`, no retry — a single dropped request leaves the
   Inspect step permanently reading "Something went wrong. Please try again."
   with no control that tries again. Found and quantified by **044** (finding 2)
   and deliberately not fixed there. The smallest real defect in the release and
-  the cheapest to fix.
+  the cheapest to fix. **Now feature 048.**
 - **Nothing prunes job outputs, exports or uploads.** 021, 022, 024 and 040 each
   recorded it and none of them owns it: disk use grows with every job forever,
   deleting an uploaded file leaves its stems behind, and the free-space warning
@@ -271,6 +296,15 @@ open questions.
 | 044 | Playwright tier stability under load         | MERGED  | 030        | `044-e2e-stability` | #58 |
 | 045 | Fake separator must not block the event loop | MERGED  | 041, 044   | `045-fake-separator-event-loop` | #60 |
 | 046 | Release workflow and release-process corrections | MERGED  | 043        | `046-release-workflow` | #65 |
+| 047 | Release workflow: ask GitHub whether the tag is annotated | MERGED | 046        | `hotfix/release-workflow-annotated-tag` | #69 |
+| 048 | Stem player recovers from a failed result fetch | READY | 023        | `048-result-fetch-retry` | |
+| 049 | Waveform foundation (peaks, geometry, engine seam) | READY | 023        | `049-waveform-foundation` | |
+| 050 | Stem timeline with per-stem waveform lanes   | PLANNED | 049        | `050-stem-timeline-lanes` | |
+| 051 | Timeline zoom and pan                        | PLANNED | 050        | `051-timeline-zoom-pan` | |
+| 052 | Audible scrub preview                        | PLANNED | 050        | `052-scrub-preview` | |
+| 053 | Loop / A-B region playback                   | PLANNED | 050        | `053-loop-region` | |
+| 054 | Per-stem level faders                        | PLANNED | 050        | `054-stem-level-faders` | |
+| 055 | Release preparation for v0.2.0               | PLANNED | 048–054    | `055-release-preparation-v0.2.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
@@ -302,6 +336,10 @@ graph LR
   014 & 018 & 025 --> 026
   026 --> 027 & 028
   010 & 026 --> 032
+  023 --> 048 & 049
+  049 --> 050
+  050 --> 051 & 052 & 053 & 054
+  048 & 051 & 052 & 053 & 054 --> 055
 ```
 
 ## Parallel tracks
@@ -342,6 +380,8 @@ with each other.
   numbered when planned)
 - **Phase 10 — Release:** production build, deployment docs, release
   automation → **v0.1.0** (M3)
+- **Phase 11 — Waveform timeline:** 048, 049, 050, 051, 052, 053, 054,
+  055 → **v0.2.0** (M4)
 
 Note the deliberate ordering: results/preview/export (Phase 6) is built against
 the fake separator *before* real inference (Phase 7), so M1 proves the entire
