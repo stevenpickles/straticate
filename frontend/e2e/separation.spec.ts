@@ -215,6 +215,57 @@ test.describe.serial('a separation, end to end', () => {
     await expect(play).toBeVisible()
   })
 
+  test('zooms the timeline, and a click still lands on the right second', async () => {
+    // Feature 051. The whole file is on screen to begin with, labelled at the
+    // ten-second marks a 60 s mix gets on a strip this wide.
+    expect(await workflow.window()).toEqual({ zoom: 1, scrollSeconds: 0 })
+    await expect(workflow.zoomOut).toBeDisabled()
+    const fittedTicks = await workflow.ticks.allTextContents()
+
+    for (let click = 0; click < 4; click += 1) {
+      await workflow.zoomIn.click()
+    }
+
+    // Four steps of 1.5 is a magnification of five, anchored on the playhead
+    // the previous test left at 0:16 — so the window is a slice out of the
+    // middle of the file rather than the whole of it.
+    const zoomed = await workflow.window()
+    expect(zoomed.zoom, 'four steps of 1.5 is about five times in').toBeCloseTo(
+      1.5 ** 4,
+      2,
+    )
+    expect(zoomed.scrollSeconds).toBeGreaterThan(0)
+
+    // The ruler rescaled with it: ten-second marks cannot survive a window of
+    // a dozen seconds, so at least one label is now off the ten-second grid.
+    const zoomedTicks = await workflow.ticks.allTextContents()
+    expect(zoomedTicks).not.toEqual(fittedTicks)
+    expect(
+      zoomedTicks.some((label) => !/:[0-5]0$/.test(label)),
+      `the ruler found a finer step than ten seconds: ${zoomedTicks.join(' ')}`,
+    ).toBe(true)
+
+    // The assertion this feature exists to keep true: a click a quarter of the
+    // way along the strip is a quarter of the way through the *window*, which
+    // is an absolute time neither the scroll nor the zoom may be dropped from.
+    const visibleSeconds = 60 / zoomed.zoom
+    const expected = zoomed.scrollSeconds + visibleSeconds * 0.25
+    await workflow.seekToFraction(0.25)
+    const landed = Number(await workflow.seek.getAttribute('aria-valuenow'))
+    expect(
+      Math.abs(landed - expected),
+      'the click seeks where it points',
+    ).toBeLessThan(0.25)
+    await expect(workflow.playhead).toContainText(
+      `0:${String(Math.round(landed)).padStart(2, '0')}`,
+    )
+
+    // …and Fit puts the whole file back, exactly as it was.
+    await workflow.zoomFit.click()
+    expect(await workflow.window()).toEqual({ zoom: 1, scrollSeconds: 0 })
+    expect(await workflow.ticks.allTextContents()).toEqual(fittedTicks)
+  })
+
   test('exports the stems as a real download', async () => {
     // FLAC by choice: it exercises the format picker, and a lossless encode
     // of four minute-long stems is a fraction of the 24-bit WAV zip to build

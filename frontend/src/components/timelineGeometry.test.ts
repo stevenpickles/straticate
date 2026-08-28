@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   clampViewport,
   drawWaveform,
+  maxZoom,
   needsHighResTile,
   panned,
   pxPerSecond,
+  sameTileRange,
   tickStepSeconds,
+  tileRangeFor,
   timeToX,
   visibleSeconds,
   xToTime,
@@ -237,6 +240,62 @@ describe('needsHighResTile', () => {
     ).toBe(false)
     expect(needsHighResTile(viewport(), 0, 800)).toBe(false)
     expect(needsHighResTile(viewport(), sampleRate, 0)).toBe(false)
+  })
+})
+
+describe('maxZoom', () => {
+  it('is the zoom at which one second fills the strip', () => {
+    expect(maxZoom(180)).toBe(180)
+    // …and it is where `clampViewport` stops, which is what a control that
+    // greys itself out at the limit relies on.
+    expect(clampViewport(viewport({ zoom: 10_000 })).zoom).toBe(maxZoom(180))
+  })
+
+  it('is 1 for material no longer than the minimum window', () => {
+    expect(maxZoom(1)).toBe(1)
+    expect(maxZoom(0.4)).toBe(1)
+    expect(maxZoom(0)).toBe(1)
+  })
+})
+
+describe('tileRangeFor', () => {
+  it('is the window itself for a stem that spans the axis', () => {
+    expect(tileRangeFor(viewport({ zoom: 4, scrollSeconds: 45 }), 180)).toEqual(
+      { startSeconds: 45, endSeconds: 90, buckets: 800 },
+    )
+  })
+
+  it('stops at a stem that ends inside the window', () => {
+    // Half a minute of stem against a 45 s window from the start: it covers
+    // the first two thirds of the strip and nothing after that.
+    expect(tileRangeFor(viewport({ zoom: 4 }), 30)).toEqual({
+      startSeconds: 0,
+      endSeconds: 30,
+      buckets: 533,
+    })
+  })
+
+  it('is nothing at all for a stem that has ended before the window', () => {
+    expect(
+      tileRangeFor(viewport({ zoom: 4, scrollSeconds: 90 }), 30),
+    ).toBeNull()
+    expect(tileRangeFor(viewport({ widthPx: 0 }), 180)).toBeNull()
+  })
+
+  it('answers the same range for the same window', () => {
+    const view = viewport({ zoom: 6, scrollSeconds: 12 })
+
+    expect(
+      sameTileRange(tileRangeFor(view, 180), tileRangeFor({ ...view }, 180)),
+    ).toBe(true)
+    // A pan of a single second is a different picture, cache key and all.
+    expect(
+      sameTileRange(
+        tileRangeFor(view, 180),
+        tileRangeFor(viewport({ zoom: 6, scrollSeconds: 13 }), 180),
+      ),
+    ).toBe(false)
+    expect(sameTileRange(null, tileRangeFor(view, 180))).toBe(false)
   })
 })
 

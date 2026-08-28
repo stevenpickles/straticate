@@ -7,12 +7,14 @@
  * measured width, a device pixel ratio, and the zoom/scroll pair — kept in one
  * place so the components below it can stay declarative.
  *
- * **Zoom is fixed at 1 in feature 050**, which is what makes the whole file fit
- * the strip. The state is nevertheless the full `{ zoom, scrollSeconds }` pair
- * and the only way to change it is {@link TimelineGeometry.applyToViewport},
- * which takes one of 049's pure transforms (`zoomedAt`, `panned`) and stores
- * its result. Feature 051 adds the controls that call it; nothing else in the
- * timeline has to change for that.
+ * **Every viewport change goes through here.** The state is the full
+ * `{ zoom, scrollSeconds }` pair and the only way to change it is
+ * {@link TimelineGeometry.applyToViewport}, which takes one of 049's pure
+ * transforms (`zoomedAt`, `panned`) and stores its result. Feature 051 added
+ * the five named movements the controls actually call — {@link
+ * TimelineGeometry.zoomIn}, `zoomOut`, `zoomToFit`, `panBy` and `scrollTo` —
+ * each of them one line over that same seam, so there is still exactly one
+ * place a window can move and exactly one place it is clamped.
  *
  * **Width is observed, not guessed.** One `ResizeObserver` on the track stack
  * writes `widthPx`, and the callback ref also measures once on attach so the
@@ -27,7 +29,19 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { clampViewport, type TimelineViewport } from './timelineGeometry'
+import {
+  clampViewport,
+  panned,
+  zoomedAt,
+  type TimelineViewport,
+} from './timelineGeometry'
+
+/**
+ * How much one zoom step magnifies. A step of about half again is small enough
+ * that a wheel notch feels continuous and large enough that a button click is
+ * worth making — four of them are an order of magnitude.
+ */
+export const ZOOM_STEP = 1.5
 
 /** A pure viewport transform, as `timelineGeometry.ts` exports them. */
 export type ViewportTransform = (current: TimelineViewport) => TimelineViewport
@@ -50,6 +64,20 @@ export interface TimelineGeometry {
    * new file can never leave a stale window behind. **Feature 051's seam.**
    */
   readonly applyToViewport: (transform: ViewportTransform) => void
+  /**
+   * Magnify by one {@link ZOOM_STEP} about `anchorX`, keeping the time under
+   * that offset where it is. Anchoring defaults to the middle of the window,
+   * which is what a control with no cursor position to offer should use.
+   */
+  readonly zoomIn: (anchorX?: number) => void
+  /** Shrink by one {@link ZOOM_STEP} about `anchorX`, as {@link zoomIn}. */
+  readonly zoomOut: (anchorX?: number) => void
+  /** Back to the whole file, from the start. */
+  readonly zoomToFit: () => void
+  /** Scroll the window by `deltaSeconds`, clamped to the material. */
+  readonly panBy: (deltaSeconds: number) => void
+  /** Put `seconds` at the left edge of the window, clamped to the material. */
+  readonly scrollTo: (seconds: number) => void
 }
 
 /** The window into the material, independent of how wide the strip is. */
@@ -58,7 +86,7 @@ interface TimelineWindow {
   readonly scrollSeconds: number
 }
 
-/** Whole file, from the start: the only window feature 050 ever shows. */
+/** Whole file, from the start: where a timeline opens, and where Fit goes. */
 const WHOLE_FILE: TimelineWindow = { zoom: 1, scrollSeconds: 0 }
 
 /** The display's pixel ratio, defaulting to 1 wherever it is unreadable. */
@@ -167,5 +195,66 @@ export function useTimelineGeometry(durationSeconds: number): TimelineGeometry {
     [durationSeconds, widthPx],
   )
 
-  return { viewport, devicePixelRatio, trackRef, applyToViewport }
+  const zoomBy = useCallback(
+    (factor: number, anchorX?: number) => {
+      applyToViewport((current) =>
+        // No anchor offered — a toolbar button, a key — means the middle of
+        // the window, which is the point a user reads a zoom as growing from.
+        zoomedAt(current, factor, anchorX ?? current.widthPx / 2),
+      )
+    },
+    [applyToViewport],
+  )
+
+  const zoomIn = useCallback(
+    (anchorX?: number) => {
+      zoomBy(ZOOM_STEP, anchorX)
+    },
+    [zoomBy],
+  )
+
+  const zoomOut = useCallback(
+    (anchorX?: number) => {
+      zoomBy(1 / ZOOM_STEP, anchorX)
+    },
+    [zoomBy],
+  )
+
+  const zoomToFit = useCallback(() => {
+    setTimelineWindow((current) =>
+      current.zoom === WHOLE_FILE.zoom &&
+      current.scrollSeconds === WHOLE_FILE.scrollSeconds
+        ? // Same window: keep the identity so nothing downstream repaints.
+          current
+        : WHOLE_FILE,
+    )
+  }, [])
+
+  const panBy = useCallback(
+    (deltaSeconds: number) => {
+      applyToViewport((current) => panned(current, deltaSeconds))
+    },
+    [applyToViewport],
+  )
+
+  const scrollTo = useCallback(
+    (seconds: number) => {
+      applyToViewport((current) =>
+        clampViewport({ ...current, scrollSeconds: seconds }),
+      )
+    },
+    [applyToViewport],
+  )
+
+  return {
+    viewport,
+    devicePixelRatio,
+    trackRef,
+    applyToViewport,
+    zoomIn,
+    zoomOut,
+    zoomToFit,
+    panBy,
+    scrollTo,
+  }
 }

@@ -102,8 +102,12 @@ export function xToTime(viewport: TimelineViewport, x: number): number {
   return clamp(viewport.scrollSeconds + x / scale, 0, duration)
 }
 
-/** The largest zoom that keeps the window at or above the minimum. */
-function maxZoom(durationSeconds: number): number {
+/**
+ * The largest zoom that keeps the window at or above the minimum — the point
+ * {@link clampViewport} stops at, and the one a "zoom in" control greys itself
+ * out at (feature 051).
+ */
+export function maxZoom(durationSeconds: number): number {
   const duration = Math.max(0, durationSeconds)
   if (duration <= MIN_VISIBLE_SECONDS) {
     // A file shorter than the minimum window cannot be zoomed at all: it
@@ -209,6 +213,68 @@ export function needsHighResTile(
   const samplesPerPixel = (visible * sampleRate) / viewport.widthPx
   const samplesPerBaseBucket = (duration * sampleRate) / baseBucketCount
   return samplesPerPixel < samplesPerBaseBucket
+}
+
+/**
+ * The exact slice of a stem a lane is about to paint, when the lane is drawn
+ * from samples rather than from the whole-file peaks (feature 051).
+ *
+ * It doubles as the cache key for a computed tile: two viewports that produce
+ * the same three numbers produce the same picture, so a tile computed for one
+ * can be reused for the other.
+ */
+export interface TileRange {
+  /** First second of the stem the tile covers. */
+  readonly startSeconds: number
+  /** Last second of the stem the tile covers (exclusive). */
+  readonly endSeconds: number
+  /** Buckets across it — one per pixel column the lane will draw. */
+  readonly buckets: number
+}
+
+/**
+ * The slice of `stemDurationSeconds` of material that `viewport` puts on
+ * screen, or `null` when the stem has no columns in the window at all.
+ *
+ * This is deliberately the *same* arithmetic `TimelineLane` uses to decide how
+ * wide to paint a stem — the window intersected with the stem's own extent,
+ * one bucket per whole pixel of the result — so a tile computed from it lines
+ * up column-for-column with the lane that asked for it.
+ */
+export function tileRangeFor(
+  viewport: TimelineViewport,
+  stemDurationSeconds: number,
+): TileRange | null {
+  const widthPx = Math.max(0, Math.floor(viewport.widthPx))
+  const stemWidthPx = Math.min(
+    widthPx,
+    Math.max(0, timeToX(viewport, stemDurationSeconds)),
+  )
+  const buckets = Math.floor(stemWidthPx)
+  const startSeconds = viewport.scrollSeconds
+  const endSeconds = Math.min(
+    stemDurationSeconds,
+    viewport.scrollSeconds + visibleSeconds(viewport),
+  )
+  if (buckets <= 0 || endSeconds <= startSeconds) {
+    return null
+  }
+  return { startSeconds, endSeconds, buckets }
+}
+
+/** Whether two tile ranges name the same picture. */
+export function sameTileRange(
+  left: TileRange | null,
+  right: TileRange | null,
+): boolean {
+  if (left === null || right === null) {
+    return false
+  }
+  return (
+    left.startSeconds === right.startSeconds &&
+    left.endSeconds === right.endSeconds &&
+    left.buckets === right.buckets
+  )
 }
 
 /**
