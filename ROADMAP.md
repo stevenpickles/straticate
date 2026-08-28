@@ -299,7 +299,7 @@ The first three are things the release ships *with*, recorded in
 | 047 | Release workflow: ask GitHub whether the tag is annotated | MERGED | 046        | `hotfix/release-workflow-annotated-tag` | #69 |
 | 048 | Stem player recovers from a failed result fetch | MERGED  | 023        | `048-result-fetch-retry` | #72 |
 | 049 | Waveform foundation (peaks, geometry, engine seam) | MERGED  | 023        | `049-waveform-foundation` | #71 |
-| 050 | Stem timeline with per-stem waveform lanes   | PR OPEN | 049        | `050-stem-timeline-lanes` | #74 |
+| 050 | Stem timeline with per-stem waveform lanes   | MERGED  | 049        | `050-stem-timeline-lanes` | #74 |
 | 051 | Timeline zoom and pan                        | PLANNED | 050        | `051-timeline-zoom-pan` | |
 | 052 | Audible scrub preview                        | PLANNED | 050        | `052-scrub-preview` | |
 | 053 | Loop / A-B region playback                   | PLANNED | 050        | `053-loop-region` | |
