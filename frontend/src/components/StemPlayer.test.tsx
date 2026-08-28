@@ -250,6 +250,45 @@ function errorResponse(
   return jsonResponse({ error: { code, message, detail } }, status)
 }
 
+/**
+ * Stub `fetch` so successive calls to `GET /jobs/{id}/result` answer with
+ * different outcomes in order — e.g. a rejection (dropped request) followed
+ * by a resolved response, which is what a "Try again" click needs to
+ * recover from. The last responder repeats for any further calls.
+ */
+function stubResultFetchQueue(
+  first: () => Promise<Response>,
+  ...rest: readonly (() => Promise<Response>)[]
+): void {
+  const responders = [first, ...rest]
+  let call = 0
+  vi.stubGlobal(
+    'fetch',
+    vi.fn((url: string) => {
+      if (String(url).endsWith('/result')) {
+        const index = Math.min(call, responders.length - 1)
+        call += 1
+        // `first` is a safe fallback: `index` is always in bounds, so the
+        // lookup never actually falls through to it at runtime.
+        return (responders[index] ?? first)()
+      }
+      throw new Error(`unexpected fetch: ${String(url)}`)
+    }),
+  )
+}
+
+/** A promise plus the function that settles it, for controlling fetch timing. */
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+} {
+  let resolve: (value: T) => void = () => undefined
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 /** Surfaces the workflow phase and the tracked job, for the route-out tests. */
 function WorkflowState() {
   const { phase } = useAppState()
@@ -529,6 +568,90 @@ describe('StemPlayer loading and error states', () => {
       screen.getByText('No separation job is being tracked.'),
     ).toBeInTheDocument()
     expect(screen.queryByRole('slider')).toBeNull()
+  })
+})
+
+describe('StemPlayer result-fetch retry (feature 048)', () => {
+  it('recovers from a dropped result fetch when the user tries again', async () => {
+    stubResultFetchQueue(
+      () => Promise.reject(new TypeError('network error')),
+      () => Promise.resolve(jsonResponse(resultOver(twoStemNames))),
+    )
+    const engine = new FakeEngine()
+    renderPlayer(engine)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Something went wrong',
+    )
+    const retry = screen.getByRole('button', { name: 'Try again' })
+
+    await userEvent.click(retry)
+
+    await screen.findByRole('button', { name: 'Mute vocals' })
+    await act(async () => {})
+    engine.becomeReady(twoStemNames)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('offers "Try again" for a 409 result_not_available while the job is still running', async () => {
+    stubResultFetchQueue(() =>
+      Promise.resolve(
+        errorResponse(409, 'result_not_available', 'No result yet.', {
+          state: 'separating',
+        }),
+      ),
+    )
+    renderPlayer(new FakeEngine())
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'this job is separating',
+    )
+    expect(
+      screen.getByRole('button', { name: 'Try again' }),
+    ).toBeInTheDocument()
+  })
+
+  it('does not apply a retry fetch that resolves after the job was cleared', async () => {
+    const retryFetch = deferred<Response>()
+    stubResultFetchQueue(
+      () => Promise.reject(new TypeError('network error')),
+      () => retryFetch.promise,
+    )
+    renderPlayer(new FakeEngine())
+
+    await screen.findByRole('alert')
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    // The retry's fetch is now in flight (loading), superseding attempt 0.
+    expect(
+      await screen.findByText('Loading the separation result…'),
+    ).toBeInTheDocument()
+
+    // Something else (leaving the inspect step) supersedes it before it
+    // settles: the effect's `current` flag must keep its late resolution
+    // from being applied.
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+    expect(
+      screen.getByText('No separation job is being tracked.'),
+    ).toBeInTheDocument()
+
+    await act(async () => {
+      retryFetch.resolve(jsonResponse(resultOver(twoStemNames)))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(
+      screen.getByText('No separation job is being tracked.'),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Mute vocals' })).toBeNull()
   })
 })
 
