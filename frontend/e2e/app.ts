@@ -462,6 +462,33 @@ export class Workflow {
     await this.page.mouse.up()
   }
 
+  /**
+   * Drag the seek surface from one fraction of the strip to another — the
+   * gesture feature 052 made audible.
+   *
+   * The intermediate moves are the point of it: they are what a scrub *is*,
+   * and each one is a position the player auditions. A press and a release
+   * with nothing in between is the degenerate case (a click), which
+   * {@link Workflow.seekToFraction} already covers.
+   */
+  async dragSeek(from: number, to: number): Promise<void> {
+    const box = await this.seek.boundingBox()
+    expect(box, 'the timeline has been laid out').not.toBeNull()
+    if (box === null) {
+      throw new Error('unreachable')
+    }
+    const y = box.y + box.height / 2
+    await this.page.mouse.move(box.x + box.width * from, y)
+    await this.page.mouse.down()
+    for (const step of [0.25, 0.5, 0.75, 1]) {
+      await this.page.mouse.move(
+        box.x + box.width * (from + (to - from) * step),
+        y,
+      )
+    }
+    await this.page.mouse.up()
+  }
+
   /** The window the timeline is showing, in seconds of audio. */
   async window(): Promise<{ zoom: number; scrollSeconds: number }> {
     const zoom = await this.strip.getAttribute('data-zoom')

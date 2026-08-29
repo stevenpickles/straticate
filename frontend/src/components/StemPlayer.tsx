@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -47,6 +48,7 @@ const EMPTY_SNAPSHOT: StemEngineSnapshot = {
   playing: false,
   durationSeconds: 0,
   loopRegion: null,
+  scrubbing: false,
   error: null,
 }
 
@@ -259,23 +261,74 @@ export function StemPlayer({
   // scrubbing. The ref that makes "once per gesture" true lives in
   // `StemTimeline`, next to the pointer handlers; what lives here is the
   // displayed position it drives.
+  //
+  // Feature 052 made the drag *audible* without changing any of that: the
+  // moves now also sound a short grain of every stem at the cursor, which
+  // schedules throwaway nodes rather than rebuilding the transport, and the
+  // one commit on release is `endScrubPreview(seconds)` — that call is the
+  // gesture's seek.
   const [scrubValue, setScrubValue] = useState<number | null>(null)
 
-  const handleScrub = useCallback((seconds: number) => {
-    setScrubValue(seconds)
-  }, [])
+  /**
+   * Whether a preview session is open, i.e. whether the commit about to
+   * arrive is a *pointer* gesture's. A ref, and read and cleared inside the
+   * same handler, for the same reason the timeline's gesture ref is: the
+   * decision must be made before React has re-rendered anything.
+   *
+   * The timeline has one commit path (`onSeek`), deliberately; this is what
+   * turns that one path into the right engine transition. A drag commits
+   * through `endScrubPreview`, which **is** the gesture's seek — calling
+   * `seek` as well would rebuild every source node twice. A keypress with no
+   * drag under way commits through `seek`, which has no session to close.
+   */
+  const previewing = useRef(false)
+
+  const handleScrubStart = useCallback(() => {
+    previewing.current = true
+    engine?.beginScrubPreview()
+  }, [engine])
+
+  // Two things at once, and only two: the displayed position, and a grain of
+  // every stem at that position. The engine throttles the preview against its
+  // own clock, so this can fire on every pointer move — unlike a seek, which
+  // would rebuild the whole graph each time.
+  const handleScrub = useCallback(
+    (seconds: number) => {
+      setScrubValue(seconds)
+      engine?.scrubPreview(seconds)
+    },
+    [engine],
+  )
 
   /** A cancelled gesture commits nothing: the clock is the truth again. */
   const cancelScrub = useCallback(() => {
+    previewing.current = false
+    // No commit: the playhead goes back to wherever the session left it.
+    engine?.endScrubPreview()
     setScrubValue(null)
     setCurrentTime(engine?.currentTime() ?? 0)
   }, [engine])
 
   const commitSeek = useCallback(
     (seconds: number) => {
+      // Read and cleared before either call, so a keyboard commit *during* a
+      // drag ends the session (one transport move) and the release that
+      // follows finds nothing to commit.
+      const fromDrag = previewing.current
+      previewing.current = false
       setScrubValue(null)
       setCurrentTime(seconds)
-      engine?.seek(seconds)
+      // The engine can close the session underneath a drag — `play`, `pause`
+      // and `seek` all end one defensively, reachable through a second
+      // pointer or a programmatic caller. `endScrubPreview` would then be a
+      // no-op and the dragged-to position would silently never commit, so
+      // the live engine state decides alongside the ref, and a closed
+      // session falls back to a plain seek.
+      if (fromDrag && engine !== null && engine.getSnapshot().scrubbing) {
+        engine.endScrubPreview(seconds)
+      } else {
+        engine?.seek(seconds)
+      }
     },
     [engine],
   )
@@ -449,6 +502,7 @@ export function StemPlayer({
           positionSeconds={position}
           ready={ready}
           engine={engine}
+          onScrubStart={handleScrubStart}
           onScrub={handleScrub}
           onScrubCancel={cancelScrub}
           onSeek={commitSeek}

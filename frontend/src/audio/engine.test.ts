@@ -1132,6 +1132,451 @@ describe('StemAudioEngine loop regions', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Feature 052: the audible scrub preview
+//
+// Sound cannot be asserted, so every case here asserts on what was
+// *scheduled*: throwaway grain nodes with one shared start time, an envelope
+// with a real shape, and a routing that proves mute/solo/level apply to them
+// without any of it being recomputed. The throttle is asserted against the
+// fake clock — the engine reads `context.currentTime` and nothing else, so a
+// test moves time by assignment and never by waiting.
+// ---------------------------------------------------------------------------
+
+describe('StemAudioEngine scrub preview', () => {
+  /** Long enough to scrub around in. */
+  const longStems = { vocals: 30, instrumental: 30 }
+
+  /** The documented defaults, which are part of this feature's contract. */
+  const GRAIN = 0.09
+  const RETRIGGER = 0.06
+  const FADE = 0.008
+
+  /** The envelope events one grain's gain node should have received. */
+  function grainEnvelope(when: number) {
+    return [
+      { type: 'setValueAtTime', value: 0, time: when },
+      { type: 'linearRamp', value: 1, time: when + FADE },
+      { type: 'setValueAtTime', value: 1, time: when + GRAIN - FADE },
+      { type: 'linearRamp', value: 0, time: when + GRAIN },
+    ]
+  }
+
+  it('sounds a grain of every stem at the scrubbed position', async () => {
+    await loadEngine(longStems)
+    context.currentTime = 3
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+
+    const grains = context.sourcesFrom(0)
+    expect(grains).toHaveLength(2)
+    // One clock reading for the set, exactly as a transport generation gets:
+    // the two stems of a grain have to be aligned with each other too.
+    expect(startTimes(grains)).toEqual([3 + LOOKAHEAD])
+    expect(startOffsets(grains)).toEqual([12])
+    for (const grain of grains) {
+      expect(grain.buffer).not.toBeNull()
+      expect(grain.stops).toEqual([3 + LOOKAHEAD + GRAIN])
+    }
+  })
+
+  it('shapes every grain with a four-point envelope', async () => {
+    await loadEngine(longStems)
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+
+    // The stem gains came from the load; the envelopes are the two after them.
+    const envelopes = context.gains.slice(2)
+    expect(envelopes).toHaveLength(2)
+    for (const envelope of envelopes) {
+      expect(envelope.gain.events).toEqual(grainEnvelope(LOOKAHEAD))
+    }
+  })
+
+  it('routes each grain through its own stem gain node', async () => {
+    await loadEngine(longStems)
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+
+    const [vocalsGain, instrumentalGain, vocalsEnv, instrumentalEnv] =
+      context.gains
+    const [vocalsGrain, instrumentalGrain] = context.sources
+    // source → envelope → the stem's own gain: mute, solo and level are
+    // inherited by construction rather than recomputed for the preview.
+    expect(vocalsGrain?.connections).toEqual([vocalsEnv])
+    expect(vocalsEnv?.connections).toEqual([vocalsGain])
+    expect(instrumentalGrain?.connections).toEqual([instrumentalEnv])
+    expect(instrumentalEnv?.connections).toEqual([instrumentalGain])
+  })
+
+  it('auditions a muted stem through the gain that silences it', async () => {
+    await loadEngine(longStems)
+    engine.setMuted('vocals', true)
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+
+    // Not a second mute check — the routing above *is* the mechanism, so this
+    // asserts the grain lands in the node whose gain is already zero. Nothing
+    // in the preview path resolves mute, solo or level a second time.
+    expect(context.gains[2]?.connections).toEqual([context.gains[0]])
+    expect(gainOf('vocals', ['vocals', 'instrumental'])).toBe(0)
+    expect(gainOf('instrumental', ['vocals', 'instrumental'])).toBe(1)
+  })
+
+  it('drops previews inside the retrigger window, and takes the next one', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+
+    engine.scrubPreview(12)
+    engine.scrubPreview(13)
+    engine.scrubPreview(14)
+
+    // Three pointer moves inside one retrigger window are one grain set: the
+    // extra positions are dropped, not queued, because by the time a queued
+    // grain played the pointer would be somewhere else.
+    expect(context.sources).toHaveLength(2)
+    expect(startOffsets(context.sources)).toEqual([12])
+
+    // The window is the audio clock's, so moving the clock past it — and
+    // nothing else — is what admits the next grain.
+    context.currentTime = LOOKAHEAD + RETRIGGER
+    engine.scrubPreview(20)
+
+    const second = context.sourcesFrom(2)
+    expect(second).toHaveLength(2)
+    expect(startOffsets(second)).toEqual([20])
+  })
+
+  it('silences the transport at begin and remembers that it was playing', async () => {
+    await loadEngine(longStems)
+    await engine.play()
+    context.currentTime = 5 + LOOKAHEAD
+
+    engine.beginScrubPreview()
+
+    // Audacity pauses while you scrub: what is heard is the preview.
+    expect(engine.getSnapshot().playing).toBe(false)
+    expect(engine.getSnapshot().scrubbing).toBe(true)
+    expect(engine.currentTime()).toBeCloseTo(5, 6)
+    for (const source of context.sourcesFrom(0)) {
+      expect(source.stopCount).toBe(1)
+    }
+  })
+
+  it('commits the release as the gesture’s one transport move', async () => {
+    await loadEngine(longStems)
+    await engine.play()
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    const before = context.sources.length
+
+    engine.endScrubPreview(22)
+
+    const resumed = context.sourcesFrom(before)
+    expect(resumed).toHaveLength(2)
+    expect(startOffsets(resumed)).toEqual([22])
+    expect(startTimes(resumed)).toHaveLength(1)
+    expect(engine.getSnapshot().playing).toBe(true)
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+    expect(engine.currentTime()).toBeCloseTo(22, 6)
+  })
+
+  it('reapplies the loop region to the generation the commit starts', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+    engine.beginScrubPreview()
+    const before = context.sources.length
+
+    engine.endScrubPreview(12)
+
+    // Nothing here reapplies anything: `startSources` is the one place a
+    // generation is built, and the region lives there (feature 053).
+    for (const source of context.sourcesFrom(before)) {
+      expect([source.loop, source.loopStart, source.loopEnd]).toEqual([
+        true,
+        10,
+        20,
+      ])
+    }
+  })
+
+  it('never loops a grain, even inside a loop region', async () => {
+    await loadEngine(longStems)
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(15)
+
+    // A grain auditions one position and stops; a looping one would repeat a
+    // fragment under the pointer for as long as it was held (053, note 10).
+    // It ignores the region entirely, which is also why its offset may sit
+    // outside one.
+    for (const grain of context.sourcesFrom(2)) {
+      expect(grain.loop).toBe(false)
+      expect(grain.stops).toEqual([LOOKAHEAD + GRAIN])
+    }
+  })
+
+  it('fades the grains out and disconnects them when the session ends', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    // Mid-grain: the grain runs to LOOKAHEAD + GRAIN, so at 0.1 it is still
+    // sounding and the release must ramp it down rather than cut it.
+    context.currentTime = 0.1
+
+    engine.endScrubPreview(12)
+
+    for (const envelope of context.gains.slice(2)) {
+      expect(envelope.gain.events.slice(-2)).toEqual([
+        { type: 'cancel', time: 0.1 },
+        { type: 'linearRamp', value: 0, time: 0.1 + FADE },
+      ])
+      // Not yet: a disconnect now would sever the graph before the ramp
+      // finishes, so the teardown waits for the node to report it ended.
+      expect(envelope.disconnectCount).toBe(0)
+    }
+    for (const grain of context.sources) {
+      expect(grain.stops.at(-1)).toBe(0.1 + FADE)
+      expect(grain.disconnectCount).toBe(0)
+      grain.onended?.(new Event('ended'))
+      expect(grain.disconnectCount).toBe(1)
+    }
+    for (const envelope of context.gains.slice(2)) {
+      expect(envelope.disconnectCount).toBe(1)
+    }
+  })
+
+  it('disconnects a grain that already played out without waiting for it', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    // Past LOOKAHEAD + GRAIN: the grain ended on its own schedule, so its
+    // `onended` has already fired and would never fire again — a deferred
+    // disconnect would leak the envelope until the next load. It is silent,
+    // so the immediate cut costs nothing.
+    context.currentTime = 0.2
+
+    engine.endScrubPreview(12)
+
+    for (const grain of context.sources) {
+      expect(grain.disconnectCount).toBe(1)
+    }
+    for (const envelope of context.gains.slice(2)) {
+      expect(envelope.disconnectCount).toBe(1)
+    }
+  })
+
+  it('stays paused when the transport was paused at begin', async () => {
+    await loadEngine(longStems)
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    engine.endScrubPreview(22)
+
+    // The two sources are the grain; nothing was started for the transport.
+    expect(context.sources).toHaveLength(2)
+    expect(engine.getSnapshot().playing).toBe(false)
+    expect(engine.currentTime()).toBeCloseTo(22, 6)
+  })
+
+  it('leaves the playhead alone when a session ends with no commit', async () => {
+    await loadEngine(longStems)
+    engine.seek(8)
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(25)
+    engine.endScrubPreview()
+
+    // A cancelled gesture (pointercancel) commits nothing: auditioning 0:25
+    // never moved the playhead off 0:08.
+    expect(engine.currentTime()).toBeCloseTo(8, 6)
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+  })
+
+  it('clamps the auditioned position to the mix', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+
+    engine.scrubPreview(1000)
+
+    expect(startOffsets(context.sources)).toEqual([30])
+  })
+
+  it('ignores previews and ends with no session open', async () => {
+    await loadEngine(longStems)
+
+    engine.scrubPreview(12)
+    engine.endScrubPreview(22)
+
+    expect(context.sources).toHaveLength(0)
+    expect(engine.currentTime()).toBe(0)
+  })
+
+  it('is idempotent while a session is open', async () => {
+    await loadEngine(longStems)
+    await engine.play()
+    context.currentTime = 5 + LOOKAHEAD
+    engine.beginScrubPreview()
+
+    // A second begin must not decide, again, that the transport was playing —
+    // by now it is not, and the release would never resume.
+    engine.beginScrubPreview()
+    engine.endScrubPreview(22)
+
+    expect(engine.getSnapshot().playing).toBe(true)
+  })
+
+  it.each([
+    ['play', (target: StemPlayerEngine) => void target.play()],
+    [
+      'pause',
+      (target: StemPlayerEngine) => {
+        target.pause()
+      },
+    ],
+    [
+      'seek',
+      (target: StemPlayerEngine) => {
+        target.seek(25)
+      },
+    ],
+  ])('closes an open session on %s', async (_label, command) => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+
+    command(engine)
+    await Promise.resolve()
+
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+    for (const grain of context.sourcesFrom(0).slice(0, 2)) {
+      expect(grain.stopCount).toBeGreaterThan(0)
+      // Disconnection is deferred to the node's own end, past the fade.
+      grain.onended?.(new Event('ended'))
+      expect(grain.disconnectCount).toBe(1)
+    }
+  })
+
+  it('folds a mid-drag seek into one generation rather than two', async () => {
+    await loadEngine(longStems)
+    await engine.play()
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    const before = context.sources.length
+
+    // This is the keyboard commit that lands while a pointer drag is still in
+    // flight: the session closes without resuming, so the seek's own
+    // generation is the only one built.
+    engine.seek(25)
+
+    const after = context.sourcesFrom(before)
+    expect(after).toHaveLength(2)
+    expect(startOffsets(after)).toEqual([25])
+    expect(engine.getSnapshot().playing).toBe(true)
+  })
+
+  it('stops every grain when a new job is loaded', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    const grains = context.sourcesFrom(0)
+
+    await engine.load(sources(fourStems))
+
+    for (const grain of grains) {
+      // Two stops: the one the grain was scheduled with, and the teardown's.
+      expect(grain.stops).toEqual([LOOKAHEAD + GRAIN, undefined])
+      expect(grain.disconnectCount).toBe(1)
+    }
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+  })
+
+  it('stops every grain on disposal, and ignores everything after it', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    const grains = context.sourcesFrom(0)
+
+    engine.dispose()
+
+    for (const grain of grains) {
+      // Two stops: the one the grain was scheduled with, and the teardown's.
+      expect(grain.stops).toEqual([LOOKAHEAD + GRAIN, undefined])
+      expect(grain.disconnectCount).toBe(1)
+    }
+    engine.beginScrubPreview()
+    engine.scrubPreview(20)
+    engine.endScrubPreview(20)
+    expect(context.sources).toHaveLength(2)
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+  })
+
+  it('refuses a session until the stems are ready', async () => {
+    engine = makeEngine(longStems)
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+    expect(context.sources).toHaveLength(0)
+  })
+
+  it('publishes the session in the snapshot, and only on a change', async () => {
+    await loadEngine(longStems)
+    const listener = vi.fn()
+    engine.subscribe(listener)
+
+    engine.beginScrubPreview()
+    expect(engine.getSnapshot().scrubbing).toBe(true)
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    // Previews are not state: a grain a second does not publish a snapshot.
+    engine.scrubPreview(12)
+    expect(listener).toHaveBeenCalledTimes(1)
+
+    engine.endScrubPreview(12)
+    expect(engine.getSnapshot().scrubbing).toBe(false)
+    expect(listener).toHaveBeenCalledTimes(2)
+
+    engine.endScrubPreview(20)
+    expect(listener).toHaveBeenCalledTimes(2)
+  })
+
+  it('honours configured grain, retrigger and fade lengths', async () => {
+    context = new FakeAudioContext()
+    engine = createStemAudioEngine({
+      createContext: () => context,
+      loadStemAudio: loaderFor(longStems),
+      lookaheadSeconds: LOOKAHEAD,
+      scrubGrainSeconds: 0.2,
+      scrubRetriggerSeconds: 0.15,
+      scrubFadeSeconds: 0.02,
+    })
+    await engine.load(sources(longStems))
+
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    // Inside the configured window rather than the default one.
+    context.currentTime = LOOKAHEAD + 0.1
+    engine.scrubPreview(13)
+
+    expect(context.sources).toHaveLength(2)
+    expect(context.sources[0]?.stops).toEqual([LOOKAHEAD + 0.2])
+    expect(context.gains[2]?.gain.events[1]).toEqual({
+      type: 'linearRamp',
+      value: 1,
+      time: LOOKAHEAD + 0.02,
+    })
+  })
+})
+
 describe('createStemAudioEngine', () => {
   it('builds a StemAudioEngine', () => {
     engine = createStemAudioEngine({
