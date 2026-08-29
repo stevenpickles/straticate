@@ -9,6 +9,121 @@ Model weights are versioned separately from the application and are never
 bundled with it; the *Licensing* section of each release says what shipped in
 the catalog.
 
+## [0.2.0] — 2026-08-29
+
+The Inspect step becomes an editor's timeline. Everything from
+[the 0.1.0 notes](https://github.com/stevenpickles/straticate/blob/v0.1.0/CHANGELOG.md)
+still applies; this section covers what changed. (The reference matters when
+you are reading this as published release notes, where the 0.1.0 section is
+not on the page.)
+
+### What's new
+
+**A per-stem waveform timeline, drawn from the audio you already downloaded.**
+Every stem gets its own lane on a shared time axis, painted from the real
+decoded samples rather than a placeholder — the same picture for a two-stem
+and a four-stem result, drawn by hand on `<canvas>` with **no new runtime
+dependency**: the frontend still depends on exactly `react` and `react-dom`.
+The timeline *is* the accessible seek control — click or drag a lane to
+seek (a plain click on the ruler seeks too; dragging the ruler marks a loop
+region instead — see below), or drive it from the keyboard once it has
+focus: Left/Right moves a second, Shift+Left/Right five seconds, Home and
+End jump to the ends, and Space plays or pauses. The old range-input
+scrubber is gone.
+
+**Zoom and pan.** Ctrl+scroll zooms about the point under the cursor; a plain
+or shifted scroll pans once you are zoomed in (at full fit the wheel still
+belongs to the page); "Zoom in", "Zoom out" and "Zoom to fit" in the corner
+of the timeline (also `+`/`-` on the keyboard) zoom about the playhead
+instead. A scroll thumb under the ruler shows and drags the visible window
+against the whole file. Zoom far enough in and the lanes redraw themselves
+from the underlying samples instead of the whole-file overview, so the
+picture stays sharp rather than blocky.
+
+**Audible scrubbing, Audacity-style.** Press and drag the timeline while
+listening and you hear short preview grains of every stem at the position
+under the pointer, respecting whatever mute, solo and level you've already
+set — dragging *through* a muted stem stays silent. A plain click makes no
+sound. The main playback graph is never rebuilt while you drag; only the
+release moves the transport, the same one-seek-per-gesture behaviour the
+timeline already had.
+
+**Loop / A-B regions.** Drag across the ruler, or Shift-drag across the
+lanes, to mark a passage; drag either edge to adjust it once it exists; or
+use the transport's "Loop start", "Loop end" and "Clear loop" buttons. A
+`Loop m:ss – m:ss` badge announces the current region for screen readers. The
+loop is sample-accurate across every stem — all of them wrap on the exact
+same sample, not on a watched clock — and it is a **trap, not a fence**: a
+seek that lands past the end of the region plays straight through to the end
+of the file rather than being pulled back in. One Audacity idiom to know: a
+plain click on the ruler seeks *and discards* the current region — the
+transport's "Clear loop" button does the same thing deliberately.
+
+**Per-stem volume faders.** Each lane header has its own volume slider
+alongside its Mute and Solo buttons, reading and writing the level
+independently of whether that stem is currently muted or soloed out.
+
+### Fixed
+
+**A failed result fetch is now recoverable without a page reload.** 0.1.0
+shipped with the Inspect step permanently stuck on "Something went wrong.
+Please try again." if the one-shot request for a job's result ever dropped,
+with no control that actually retried anything (0.1.0's Known Limitations, "no
+control that tries again"). There is now a working "Try again" button that
+refetches the result and, on success, plays the stems normally.
+
+### What it cannot do
+
+Carried forward from what shipped in 0.1.0, plus what the timeline ships
+with:
+
+- **Nothing about the Inspect step survives leaving it.** The playhead
+  position, the loop region and the current zoom are all held in the
+  timeline's own state, not the job's — step away to Configure or Export and
+  back, or reload the page, and the audio engine rebuilds from 0:00 with the
+  stems re-downloaded and no region set. This was already true of the
+  playhead in 0.1.0; it now also covers the loop region and the zoom level.
+- **The lane headers are tight at larger browser font settings, and it is
+  measured, not estimated.** At a 16 px root font there is about 0.9 px of
+  slack in each 64 px lane header; at the 17–20 px root fonts a user's
+  browser zoom or accessibility settings can produce, the header's rows
+  outgrow the box by 1–7 px and the extra is clipped. The fader inside stays
+  clickable throughout (verified with `elementFromPoint`), and its own
+  pointer target is about 11 px tall — under the 24 px WCAG 2.2 (SC 2.5.8)
+  guideline, though keyboard operation of the fader is unaffected. The real
+  fix is a taller or font-relative lane height; it is not this release's.
+- **Auto-follow can page-flip twice a loop** when the visible window is
+  zoomed narrower than the loop region: the window jumps forward as playback
+  approaches the region's end, then jumps back when the wrap reopens it. This
+  is the zoom-follow behaviour working as designed, applied to a case that
+  looks busy on screen; it is not a defect on its own.
+- **Retry now covers the result fetch, not a failed stem download.** If the
+  audio itself fails to load after the result arrives, the Inspect step still
+  shows the same unhelpful "Something went wrong" text with no control that
+  does anything — the fix above widened retry to the result fetch only.
+- **The rest of 0.1.0's caveats still stand, unaffected by this release**:
+  `vocals` mode has no fast tier and runs at about 0.3× real time on a CPU;
+  Demucs loses the `bass` stem on wide-separation stereo mixes, with **Fold to
+  mono** as the verified workaround; the Demucs weights are research-use-only
+  (see *Licensing*, unchanged since 0.1.0); job records live in memory and do
+  not survive a restart; nothing prunes uploads, job outputs or exports; a
+  24-bit or 32-bit-float export re-encodes 16-bit audio rather than recovering
+  detail; there is still one job at a time with no history; model downloads
+  are not resumable; exports are still buffered in the browser tab with no
+  progress indicator and cannot be cancelled mid-download; cancelling a
+  running separation still takes effect at the next chunk boundary, not
+  instantly; there is still no model *update* path (remove and install
+  again); and installed weights are still verified only at install time, not
+  re-checked afterwards.
+
+### Licensing
+
+Unchanged from 0.1.0 — read the Licensing section of
+[the 0.1.0 notes](https://github.com/stevenpickles/straticate/blob/v0.1.0/CHANGELOG.md)
+in full if you have not; it is the limitation most likely to matter to you.
+Nothing about the model catalog, its licences or its weights changed in this
+release.
+
 ## [0.1.0] — 2026-08-26
 
 The first release. Straticate separates a mixed music file into stems, in a
@@ -237,3 +352,4 @@ licence before installing it.** The application being MIT does not make the
 models so.
 
 [0.1.0]: https://github.com/stevenpickles/straticate/releases/tag/v0.1.0
+[0.2.0]: https://github.com/stevenpickles/straticate/releases/tag/v0.2.0
