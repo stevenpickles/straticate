@@ -250,6 +250,19 @@ class FakeEngine implements StemPlayerEngine {
   playCount = 0
   pauseCount = 0
   readonly seeks: number[] = []
+  /**
+   * Every *real* transport move, in the order it happened, whichever call
+   * made it: a discrete `seek`, or a drag committing through
+   * `endScrubPreview`. The one-move-per-gesture invariant is about this list,
+   * not about either call on its own.
+   */
+  readonly moves: number[] = []
+  /** How many preview sessions were opened (feature 052). */
+  scrubStarts = 0
+  /** Every position auditioned, in order. */
+  readonly scrubPreviews: number[] = []
+  /** Every session end, in order: the committed position or `undefined`. */
+  readonly scrubEnds: (number | undefined)[] = []
   readonly muteToggles: string[] = []
   readonly soloToggles: string[] = []
   readonly levelSets: { name: string; value: number }[] = []
@@ -265,6 +278,7 @@ class FakeEngine implements StemPlayerEngine {
     playing: false,
     durationSeconds: 0,
     loopRegion: null,
+    scrubbing: false,
     error: null,
   }
 
@@ -286,6 +300,7 @@ class FakeEngine implements StemPlayerEngine {
 
   seek = (seconds: number): void => {
     this.seeks.push(seconds)
+    this.moves.push(seconds)
     this.time = seconds
   }
 
@@ -323,6 +338,29 @@ class FakeEngine implements StemPlayerEngine {
   clearLoopRegion = (): void => {
     this.loopRegions.push(null)
     this.update({ loopRegion: null })
+  }
+
+  beginScrubPreview = (): void => {
+    this.scrubStarts += 1
+    this.update({ scrubbing: true })
+  }
+
+  scrubPreview = (seconds: number): void => {
+    this.scrubPreviews.push(seconds)
+  }
+
+  /**
+   * Records the end *and*, when a position was committed, moves the playhead
+   * — because `endScrubPreview(commit)` **is** the gesture's seek, not a
+   * bookkeeping call alongside one.
+   */
+  endScrubPreview = (commitSeconds?: number): void => {
+    this.scrubEnds.push(commitSeconds)
+    if (commitSeconds !== undefined) {
+      this.moves.push(commitSeconds)
+      this.time = commitSeconds
+    }
+    this.update({ scrubbing: false })
   }
 
   currentTime = (): number => this.time
@@ -966,8 +1004,30 @@ describe('StemPlayer transport', () => {
 
     dragTimeline(18)
 
-    expect(engine.seeks).toEqual([18])
+    // A pointer gesture commits through `endScrubPreview`, which *is* its
+    // seek (feature 052) — hence `moves` rather than `seeks`.
+    expect(engine.moves).toEqual([18])
     expect(screen.getByText('0:18 / 1:00')).toBeInTheDocument()
+  })
+
+  it('still commits a drag whose session was closed underneath it', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(surface, { clientX: xFor(18), pointerId: 1 })
+    // The engine closes sessions defensively on play/pause/seek — reachable
+    // mid-drag through a second pointer or a programmatic caller. The
+    // release must not trust its own ref alone: `endScrubPreview` on a
+    // closed session is a no-op, and the dragged-to position would silently
+    // never commit.
+    act(() => {
+      engine.update({ scrubbing: false })
+    })
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+
+    expect(engine.seeks).toEqual([18])
+    expect(engine.moves).toEqual([18])
   })
 
   it('treats a motionless click as the degenerate drag: one seek', async () => {
@@ -977,7 +1037,7 @@ describe('StemPlayer transport', () => {
     fireEvent.pointerDown(surface, { clientX: xFor(42), pointerId: 1 })
     fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    expect(engine.seeks).toEqual([42])
+    expect(engine.moves).toEqual([42])
   })
 
   it.each([
@@ -1381,7 +1441,9 @@ describe('StemPlayer over the real engine', () => {
 
     dragTimeline(30)
 
-    const restarted = context.sourcesFrom(4)
+    // The last four are the transport's new generation; the ones before them
+    // are the press's preview grains (feature 052), which never touch it.
+    const restarted = context.sources.slice(-4)
     expect(restarted).toHaveLength(4)
     expect(new Set(restarted.map((s) => s.started?.when)).size).toBe(1)
     expect(new Set(restarted.map((s) => s.started?.offset))).toEqual(
@@ -1489,15 +1551,15 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
     for (const seconds of dragPath) {
       fireEvent.pointerMove(surface, { clientX: xFor(seconds), pointerId: 1 })
     }
-    expect(engine.seeks).toEqual([])
+    expect(engine.moves).toEqual([])
 
     fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    // One seek, at the position the pointer was released from. (Approximate
+    // One move, at the position the pointer was released from. (Approximate
     // because the value is `x / pxPerSecond` and 400 px does not divide a
     // minute; the *count* is the finding this test exists for.)
-    expect(engine.seeks).toHaveLength(1)
-    expect(engine.seeks[0]).toBeCloseTo(47, 6)
+    expect(engine.moves).toHaveLength(1)
+    expect(engine.moves[0]).toBeCloseTo(47, 6)
   })
 
   it('follows the drag on screen before the seek is committed', async () => {
@@ -1525,13 +1587,17 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
       fireEvent.pointerMove(surface, { clientX: xFor(seconds), pointerId: 1 })
     }
 
-    // Nothing was torn down or rescheduled while the pointer was still down:
-    // a rebuild per event would be seven silent 50 ms lookaheads.
-    expect(context.sources).toHaveLength(4)
+    // Eight moves, but the clock never advanced, so the retrigger throttle
+    // allowed exactly one grain per stem — and none of them is a transport
+    // rebuild, which is the finding this test exists for: a rebuild per event
+    // would be eight silent lookaheads.
+    const grains = context.sourcesFrom(4)
+    expect(grains).toHaveLength(4)
+    expect(grains.every((source) => !source.loop)).toBe(true)
 
     fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    const restarted = context.sourcesFrom(4)
+    const restarted = context.sourcesFrom(8)
     expect(restarted).toHaveLength(4)
     const offsets = restarted.map((source) => source.started?.offset ?? -1)
     expect(new Set(offsets).size).toBe(1)
@@ -1549,7 +1615,9 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
     fireEvent.pointerUp(surface, { pointerId: 1 })
     fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    expect(engine.seeks).toEqual([12])
+    expect(engine.moves).toEqual([12])
+    // …and the session was closed once, not once per release.
+    expect(engine.scrubEnds).toEqual([12])
   })
 
   it('lets a keyboard commit end a drag instead of doubling it', async () => {
@@ -1560,13 +1628,18 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
     fireEvent.pointerMove(surface, { clientX: xFor(12), pointerId: 1 })
     fireEvent.keyDown(surface, { key: 'ArrowRight' })
 
-    // The arrow key committed a seek; the ref must be cleared with it, or
-    // the release below would fire a second, stale seek over this one.
-    expect(engine.seeks).toHaveLength(1)
+    // The arrow key committed the move; the ref must be cleared with it, or
+    // the release below would fire a second, stale one over this one. It also
+    // has to end the preview session the drag opened (feature 052), which is
+    // why the commit goes through `endScrubPreview` rather than `seek`.
+    expect(engine.moves).toHaveLength(1)
+    expect(engine.scrubEnds).toHaveLength(1)
+    expect(engine.getSnapshot().scrubbing).toBe(false)
 
     fireEvent.pointerUp(surface, { pointerId: 1 })
 
-    expect(engine.seeks).toHaveLength(1)
+    expect(engine.moves).toHaveLength(1)
+    expect(engine.scrubEnds).toHaveLength(1)
   })
 
   it('commits nothing when the gesture is cancelled', async () => {
@@ -1580,7 +1653,7 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
 
     fireEvent.pointerCancel(surface, { pointerId: 1 })
 
-    expect(engine.seeks).toEqual([])
+    expect(engine.moves).toEqual([])
     // Snapped back to wherever the audio clock actually is.
     expect(screen.getByText('0:07 / 1:00')).toBeInTheDocument()
   })
@@ -1601,6 +1674,112 @@ describe('StemPlayer scrubbing (review finding 1)', () => {
     flushFrame()
 
     expect(screen.getByText('0:31 / 1:00')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Feature 052: the audible scrub preview
+//
+// The player is where a gesture is turned into engine calls, so this is where
+// "one real transport move per gesture, with sound during the drag" is pinned.
+// ---------------------------------------------------------------------------
+
+describe('StemPlayer audible scrub preview', () => {
+  const dragPath = [13, 21, 34, 47]
+
+  it('opens one session, previews every move, and commits once', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(6), pointerId: 1 })
+    for (const seconds of dragPath) {
+      fireEvent.pointerMove(surface, { clientX: xFor(seconds), pointerId: 1 })
+    }
+
+    expect(engine.scrubStarts).toBe(1)
+    // The press and every move, in order — the engine throttles these against
+    // its own clock, so the player is free to forward all of them.
+    expect(engine.scrubPreviews).toHaveLength(1 + dragPath.length)
+    for (const [index, seconds] of [6, ...dragPath].entries()) {
+      expect(engine.scrubPreviews[index]).toBeCloseTo(seconds, 6)
+    }
+    expect(engine.scrubEnds).toEqual([])
+
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+
+    // One session end carrying the commit — and no `seek` beside it, because
+    // `endScrubPreview(commit)` *is* this gesture's seek.
+    expect(engine.scrubEnds).toHaveLength(1)
+    expect(engine.scrubEnds[0]).toBeCloseTo(47, 6)
+    expect(engine.seeks).toEqual([])
+    expect(engine.moves).toHaveLength(1)
+  })
+
+  it('ends the session with no commit when the gesture is cancelled', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(40), pointerId: 1 })
+    fireEvent.pointerMove(surface, { clientX: xFor(44), pointerId: 1 })
+    fireEvent.pointerCancel(surface, { pointerId: 1 })
+
+    expect(engine.scrubEnds).toEqual([undefined])
+    expect(engine.moves).toEqual([])
+  })
+
+  it('leaves a keyboard seek with no drag under way a plain seek', async () => {
+    const { engine } = await renderReady(twoStemNames)
+
+    fireEvent.keyDown(timeline(), { key: 'ArrowRight' })
+
+    // Discrete, so there is nothing to audition and no session to close.
+    expect(engine.seeks).toHaveLength(1)
+    expect(engine.scrubStarts).toBe(0)
+    expect(engine.scrubEnds).toEqual([])
+  })
+
+  it('previews nothing for a loop-region gesture', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const ruler = screen.getByTestId('stem-timeline-ruler-row')
+
+    fireEvent.pointerDown(ruler, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(ruler, { clientX: xFor(30), pointerId: 1 })
+    fireEvent.pointerUp(ruler, { pointerId: 1 })
+
+    expect(engine.scrubStarts).toBe(0)
+    expect(engine.scrubPreviews).toEqual([])
+    expect(engine.loopRegions).toHaveLength(1)
+  })
+
+  it('silences the transport under the pointer and sounds grains instead', async () => {
+    await renderReal(fourStemNames)
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    const playing = context.sourcesFrom(0)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(21), pointerId: 1 })
+
+    // The mix stops — Audacity pauses while you scrub — and one grain per
+    // stem is scheduled at the position under the pointer instead.
+    for (const source of playing) {
+      expect(source.stopCount).toBe(1)
+    }
+    expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument()
+    const grains = context.sourcesFrom(4)
+    expect(grains).toHaveLength(4)
+    expect(new Set(grains.map((grain) => grain.started?.when)).size).toBe(1)
+    for (const grain of grains) {
+      expect(grain.started?.offset).toBeCloseTo(21, 6)
+      expect(grain.loop).toBe(false)
+    }
+
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+
+    // …and the release resumes the mix, once, where it was let go.
+    const resumed = context.sourcesFrom(8)
+    expect(resumed).toHaveLength(4)
+    expect(resumed[0]?.started?.offset).toBeCloseTo(21, 6)
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
   })
 })
 

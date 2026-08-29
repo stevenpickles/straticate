@@ -46,6 +46,7 @@ const EMPTY_SNAPSHOT: StemEngineSnapshot = {
   playing: false,
   durationSeconds: AXIS_SECONDS,
   loopRegion: null,
+  scrubbing: false,
   error: null,
 }
 
@@ -76,6 +77,9 @@ function bufferEngine(
     setLevel: () => undefined,
     setLoopRegion: () => undefined,
     clearLoopRegion: () => undefined,
+    beginScrubPreview: () => undefined,
+    scrubPreview: () => undefined,
+    endScrubPreview: () => undefined,
     currentTime: () => 0,
     getStemBuffer: (name: string) => buffers.get(name) ?? null,
     getSnapshot: () => EMPTY_SNAPSHOT,
@@ -114,6 +118,7 @@ function renderTimeline(options: RenderOptions) {
       positionSeconds={options.positionSeconds ?? 0}
       ready={options.ready ?? true}
       engine={engine}
+      onScrubStart={() => undefined}
       onScrub={() => undefined}
       onScrubCancel={() => undefined}
       onSeek={() => undefined}
@@ -249,6 +254,7 @@ describe('StemTimeline lanes', () => {
         positionSeconds={0}
         ready
         engine={view.engine}
+        onScrubStart={() => undefined}
         onScrub={() => undefined}
         onScrubCancel={() => undefined}
         onSeek={() => undefined}
@@ -308,6 +314,7 @@ describe('StemTimeline lane headers', () => {
         positionSeconds={0}
         ready
         engine={bufferEngine(['vocals'])}
+        onScrubStart={() => undefined}
         onScrub={() => undefined}
         onScrubCancel={() => undefined}
         onSeek={() => undefined}
@@ -494,6 +501,11 @@ async function fixture(options: FixtureOptions = {}) {
   const engine = options.engine ?? bufferEngine(stems.map((stem) => stem.name))
   const seeks: number[] = []
   const scrubs: number[] = []
+  /**
+   * How many times a gesture asked for a preview session (feature 052). An
+   * object rather than a `let`, so the caller reads the live count.
+   */
+  const preview = { starts: 0 }
   /** Every loop commit, in order: a region, or `null` for a clear. */
   const loopRegions: (LoopRegion | null)[] = []
   const props: StemTimelineProps = {
@@ -502,6 +514,9 @@ async function fixture(options: FixtureOptions = {}) {
     positionSeconds: options.positionSeconds ?? 0,
     ready: true,
     engine,
+    onScrubStart: () => {
+      preview.starts += 1
+    },
     onScrub: (seconds) => scrubs.push(seconds),
     onScrubCancel: () => undefined,
     onSeek: (seconds) => seeks.push(seconds),
@@ -518,6 +533,7 @@ async function fixture(options: FixtureOptions = {}) {
   return {
     seeks,
     scrubs,
+    preview,
     loopRegions,
     engine,
     /** Re-render with some props changed, as the player re-renders it. */
@@ -923,6 +939,83 @@ describe('StemTimeline loop regions', () => {
 
     expect(scrollSeconds()).toBeGreaterThan(3)
     expect(loopBand()).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Feature 052: the audible scrub preview
+//
+// The timeline knows nothing about audio — what it owes 052 is that a seek
+// drag *announces itself* before it reports a position, exactly once, and that
+// a loop-region gesture never does.
+// ---------------------------------------------------------------------------
+
+describe('StemTimeline scrub preview', () => {
+  it('opens one session per drag, before the first position', async () => {
+    const view = await fixture()
+
+    fireEvent.pointerDown(surface(), { clientX: xFor(9), pointerId: 1 })
+
+    // Once, on the press — and the press's own position arrives after it, so
+    // the player always has a session open to sound it into.
+    expect(view.preview.starts).toBe(1)
+    expect(view.scrubs).toHaveLength(1)
+    expect(view.scrubs[0]).toBeCloseTo(9, 6)
+
+    fireEvent.pointerMove(surface(), { clientX: xFor(20), pointerId: 1 })
+    fireEvent.pointerMove(surface(), { clientX: xFor(30), pointerId: 1 })
+
+    // Every move is a position to audition; still one session.
+    expect(view.preview.starts).toBe(1)
+    expect(view.scrubs).toHaveLength(3)
+
+    fireEvent.pointerUp(surface(), { pointerId: 1 })
+    expect(view.seeks).toHaveLength(1)
+    expect(view.preview.starts).toBe(1)
+  })
+
+  it.each([
+    [
+      'a ruler drag',
+      () => {
+        drag(rulerRow(), xFor(9), xFor(30))
+      },
+    ],
+    [
+      'a shifted lane drag',
+      () => {
+        fireEvent.pointerDown(surface(), {
+          clientX: xFor(6),
+          pointerId: 1,
+          shiftKey: true,
+        })
+        fireEvent.pointerMove(surface(), { clientX: xFor(24), pointerId: 1 })
+        fireEvent.pointerUp(surface(), { pointerId: 1 })
+      },
+    ],
+  ])('opens no session for %s', async (_label, gesture) => {
+    const view = await fixture()
+
+    gesture()
+
+    // Drawing a region is not auditioning a position: nothing is previewed,
+    // and nothing is scrubbed.
+    expect(view.preview.starts).toBe(0)
+    expect(view.scrubs).toEqual([])
+    expect(view.loopRegions).toHaveLength(1)
+  })
+
+  it('opens no session for an edge handle', async () => {
+    const view = await fixture({ loopRegion: { start: 10, end: 20 } })
+
+    drag(
+      screen.getByTestId('stem-timeline-loop-handle-end'),
+      xFor(20),
+      xFor(35),
+    )
+
+    expect(view.preview.starts).toBe(0)
+    expect(view.scrubs).toEqual([])
   })
 })
 
