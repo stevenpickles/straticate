@@ -3,7 +3,7 @@
 Branch: `055-release-preparation-v0.2.0`
 Status: PR OPEN
 Dependencies: 048, 049, 050, 051, 052, 053, 054
-PR: (not opened — see Out of scope)
+PR: #84
 
 ## Objective
 

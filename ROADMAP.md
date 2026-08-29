@@ -321,7 +321,7 @@ The first three are things the release ships *with*, recorded in
 | 052 | Audible scrub preview                        | MERGED  | 050, 053   | `052-scrub-preview` | #82 |
 | 053 | Loop / A-B region playback                   | MERGED  | 050, 051   | `053-loop-region` | #80 |
 | 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |
-| 055 | Release preparation for v0.2.0               | PR OPEN | 048–054    | `055-release-preparation-v0.2.0` | |
+| 055 | Release preparation for v0.2.0               | PR OPEN | 048–054    | `055-release-preparation-v0.2.0` | #84 |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
