@@ -19,7 +19,9 @@ Select → Configure → Separate → Inspect → Export
 4. Choose how granular the separation should be (e.g. Vocals/Instrumental, or Vocals/Drums/Bass/Other).
 5. Start the separation job.
 6. Watch real processing progress plus model, GPU, VRAM, and inference statistics.
-7. Preview the resulting stems with solo/mute.
+7. Inspect the stems on a per-stem waveform timeline — solo, mute and level
+   faders per stem, click/drag/keyboard seeking with audible scrubbing, zoom
+   and pan, and loop regions for listening to one passage repeatedly.
 8. Export individual stems or all of them.
 
 Straticate is deliberately focused on this workflow. It is an inspection and
@@ -113,10 +115,12 @@ a specific network architecture. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Status
 
-**v0.1.0 — first release.** The workflow above works end to end, on real models,
-on CPU or CUDA. [CHANGELOG.md](CHANGELOG.md) is the release note: what it does,
-what it needs, and — the section worth reading before you separate anything —
-what it cannot do.
+**v0.2.0 — the timeline release.** The workflow above works end to end, on
+real models, on CPU or CUDA, and the Inspect step is now an editor's
+timeline: per-stem waveforms, zoom and pan, audible scrubbing, loop regions
+and per-stem faders. [CHANGELOG.md](CHANGELOG.md) is the release note: what
+it does, what it needs, and — the section worth reading before you separate
+anything — what it cannot do.
 
 The four you are most likely to meet:
 

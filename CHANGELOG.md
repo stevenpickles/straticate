@@ -11,8 +11,11 @@ the catalog.
 
 ## [0.2.0] — 2026-08-29
 
-The Inspect step becomes an editor's timeline. Everything from 0.1.0 still
-applies below; this section covers what changed.
+The Inspect step becomes an editor's timeline. Everything from
+[the 0.1.0 notes](https://github.com/stevenpickles/straticate/blob/v0.1.0/CHANGELOG.md)
+still applies; this section covers what changed. (The reference matters when
+you are reading this as published release notes, where the 0.1.0 section is
+not on the page.)
 
 ### What's new
 
@@ -21,13 +24,16 @@ Every stem gets its own lane on a shared time axis, painted from the real
 decoded samples rather than a placeholder — the same picture for a two-stem
 and a four-stem result, drawn by hand on `<canvas>` with **no new runtime
 dependency**: the frontend still depends on exactly `react` and `react-dom`.
-The timeline *is* the accessible seek control — click or drag a lane or the
-ruler to seek, or drive it from the keyboard once it has focus: Left/Right
-moves a second, Shift+Left/Right five seconds, Home and End jump to the ends,
-and Space plays or pauses. The old range-input scrubber is gone.
+The timeline *is* the accessible seek control — click or drag a lane to
+seek (a plain click on the ruler seeks too; dragging the ruler marks a loop
+region instead — see below), or drive it from the keyboard once it has
+focus: Left/Right moves a second, Shift+Left/Right five seconds, Home and
+End jump to the ends, and Space plays or pauses. The old range-input
+scrubber is gone.
 
 **Zoom and pan.** Ctrl+scroll zooms about the point under the cursor; a plain
-or shifted scroll pans; "Zoom in", "Zoom out" and "Zoom to fit" in the corner
+or shifted scroll pans once you are zoomed in (at full fit the wheel still
+belongs to the page); "Zoom in", "Zoom out" and "Zoom to fit" in the corner
 of the timeline (also `+`/`-` on the keyboard) zoom about the playhead
 instead. A scroll thumb under the ruler shows and drags the visible window
 against the whole file. Zoom far enough in and the lanes redraw themselves
@@ -49,7 +55,9 @@ use the transport's "Loop start", "Loop end" and "Clear loop" buttons. A
 loop is sample-accurate across every stem — all of them wrap on the exact
 same sample, not on a watched clock — and it is a **trap, not a fence**: a
 seek that lands past the end of the region plays straight through to the end
-of the file rather than being pulled back in.
+of the file rather than being pulled back in. One Audacity idiom to know: a
+plain click on the ruler seeks *and discards* the current region — the
+transport's "Clear loop" button does the same thing deliberately.
 
 **Per-stem volume faders.** Each lane header has its own volume slider
 alongside its Mute and Solo buttons, reading and writing the level
@@ -101,13 +109,20 @@ with:
   not survive a restart; nothing prunes uploads, job outputs or exports; a
   24-bit or 32-bit-float export re-encodes 16-bit audio rather than recovering
   detail; there is still one job at a time with no history; model downloads
-  are not resumable; and exports are still buffered in the browser tab with no
-  progress indicator and cannot be cancelled mid-download.
+  are not resumable; exports are still buffered in the browser tab with no
+  progress indicator and cannot be cancelled mid-download; cancelling a
+  running separation still takes effect at the next chunk boundary, not
+  instantly; there is still no model *update* path (remove and install
+  again); and installed weights are still verified only at install time, not
+  re-checked afterwards.
 
 ### Licensing
 
-Unchanged from 0.1.0 — see that section above; nothing about the model
-catalog, its licences or its weights changed in this release.
+Unchanged from 0.1.0 — read the Licensing section of
+[the 0.1.0 notes](https://github.com/stevenpickles/straticate/blob/v0.1.0/CHANGELOG.md)
+in full if you have not; it is the limitation most likely to matter to you.
+Nothing about the model catalog, its licences or its weights changed in this
+release.
 
 ## [0.1.0] — 2026-08-26
 

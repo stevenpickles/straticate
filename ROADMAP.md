@@ -82,23 +82,26 @@ decisions and design in the feature docs.
 | CHANGELOG, version `0.2.0`, clean-clone verification | **done** — 055; see below |
 
 **M4 is complete: every requirement above is met.** What remains is the
-project owner's, per `AGENTS.md`: the release branch `release/v0.2.0` cut
-from `dev`, the release PR `dev → main`, its rebase-merge, and the annotated
-tag `v0.2.0`. Feature 055 prepares `dev` for that release and stops there —
-it does not create the release branch, open the release PR, merge anything,
-or tag, mirroring 043's precedent for v0.1.0 exactly.
+project owner's, per `CONTRIBUTING.md`'s release process: the release branch
+`release/v0.2.0` cut from `dev`, the release PR `release/v0.2.0 → main`, its
+rebase-merge, and the annotated tag `v0.2.0`. Feature 055 prepares `dev` for
+that release and stops there — it does not create the release branch, open
+the release PR, merge anything, or tag, mirroring 043's precedent for v0.1.0
+exactly.
 
 ## Current state (2026-08-29)
 
 **M1, M2 and M3 are met and v0.1.0 is released** (tag `v0.1.0`, PR #66,
 hotfix #69). **M4 is met and `dev` is prepared for the v0.2.0 release** —
-features 048–055 are all merged, `CHANGELOG.md` carries a `[0.2.0]` entry
-written from this ledger, `backend/pyproject.toml` is at `0.2.0`, and the
-workflow (including the new timeline surface) was verified from a clean
-clone. **What is left is the project owner's**, per `AGENTS.md`: the release
-branch `release/v0.2.0`, the release PR `dev → main`, its rebase-merge, and
-the annotated tag `v0.2.0`. Feature 055 does not create, merge or tag
-anything. Details in `docs/features/055-release-preparation-v0.2.0.md`.
+every feature 048–054 is merged, and 055 is the release preparation itself:
+`CHANGELOG.md` carries a `[0.2.0]` entry written from this ledger,
+`backend/pyproject.toml` is at `0.2.0`, and the workflow (including the new
+timeline surface) was verified from a clean clone. **What is left is the
+project owner's**, per `CONTRIBUTING.md`'s release process: the release
+branch `release/v0.2.0`, the release PR `release/v0.2.0 → main`, its
+rebase-merge, and the annotated tag `v0.2.0`. Feature 055 does not create,
+merge or tag anything. Details in
+`docs/features/055-release-preparation-v0.2.0.md`.
 
 The remainder of this section is the v0.1.0 state as recorded at release.
 
