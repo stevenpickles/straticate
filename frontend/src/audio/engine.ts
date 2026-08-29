@@ -43,10 +43,26 @@
  * looping: a generation started at or after `loopEnd` reports the raw
  * position, because its sources are running straight through.
  *
- * **A note for feature 052.** The scrub-preview grains that feature adds must
- * **not** set `loop`: a grain auditions one position and then stops, so a
- * looping grain would repeat a fragment under the pointer for as long as the
- * user held it. The region belongs to the transport, not to a preview.
+ * **Scrub preview (feature 052).** Dragging the playhead is audible: a session
+ * is opened (`beginScrubPreview`), every pointer move sounds a short **grain**
+ * of every stem at the cursor (`scrubPreview`), and the release closes the
+ * session and moves the transport (`endScrubPreview`). Three rules make that
+ * safe:
+ *
+ * - **A grain never touches the transport graph.** It is a throwaway
+ *   source → envelope pair connected into the stem's existing gain node, so
+ *   mute, solo and level apply to it for free and the running generation is
+ *   never torn down. The session pauses the transport at `begin` and starts
+ *   exactly one new generation at `end` — so the one-real-seek-per-gesture
+ *   contract survives, now with sound during the drag.
+ * - **Grains must not set `loop`.** A grain auditions one position and then
+ *   stops; a looping grain would repeat a fragment under the pointer for as
+ *   long as the user held it. The region belongs to the transport, not to a
+ *   preview — so a scrub inside a loop region simply ignores the region.
+ * - **The retrigger throttle is the audio clock, never a timer.** A call that
+ *   arrives before `previewBusyUntil` is *dropped*, not queued: the next
+ *   pointer move supersedes it anyway, and a queue would play positions the
+ *   pointer has already left.
  *
  * **Testability.** The `AudioContext` is a constructor parameter defaulting
  * to `new AudioContext()`, and so is the loader that turns a stem URL into
@@ -73,9 +89,24 @@ export interface StemSource {
   readonly url: string
 }
 
-/** The subset of `AudioParam` the engine uses. */
+/**
+ * The subset of `AudioParam` the engine uses. A real `AudioParam` satisfies
+ * it — its scheduling methods return the param itself, which is assignable to
+ * a `void` return.
+ *
+ * `value` is what mute/solo/level are written through ({@link
+ * StemAudioEngine.applyGains}); the three scheduling methods are used **only**
+ * by feature 052's grain envelopes, which need a ramp rather than a step so a
+ * ninety-millisecond burst does not click at both ends.
+ */
 export interface AudioEngineParam {
   value: number
+  /** Hold `value` from `startTime` onwards. */
+  setValueAtTime(value: number, startTime: number): void
+  /** Ramp linearly from the previous event to `value` by `endTime`. */
+  linearRampToValueAtTime(value: number, endTime: number): void
+  /** Drop every event scheduled at or after `cancelTime`. */
+  cancelScheduledValues(cancelTime: number): void
 }
 
 /** The subset of `AudioNode` the engine uses. */
@@ -206,6 +237,11 @@ export interface StemEngineSnapshot {
    */
   readonly loopRegion: LoopRegion | null
   /**
+   * Whether a scrub-preview session is open — the transport is silenced and
+   * grains are being auditioned under the pointer (feature 052).
+   */
+  readonly scrubbing: boolean
+  /**
    * The failure worth showing, or `null`. A transport failure (a rejected
    * `resume()`) shadows a load failure while it stands and is cleared by the
    * next `play()`; a load failure survives until the next `load()`.
@@ -258,6 +294,32 @@ export interface StemPlayerEngine {
   setLoopRegion(startSeconds: number, endSeconds: number): void
   /** Drop the loop region; playback carries on from where it is. */
   clearLoopRegion(): void
+  /**
+   * Begin a scrub session: silence the transport — remembering whether it was
+   * playing, because that decision cannot be made once it has stopped — and
+   * accept previews. Idempotent while a session is open, and a no-op unless
+   * the engine is `ready`.
+   */
+  beginScrubPreview(): void
+  /**
+   * Sound a short grain of every stem at `seconds`, respecting mute, solo and
+   * level (the grains run through the same per-stem gain nodes the transport
+   * does). Throttled against the **audio clock**: a call that arrives inside
+   * the previous grain's retrigger window is dropped, not queued — the next
+   * pointer move supersedes it. A no-op with no session open.
+   */
+  scrubPreview(seconds: number): void
+  /**
+   * End the session: fade the grains out, move the playhead to
+   * `commitSeconds` when one is given, and resume the transport if it was
+   * playing when the session began.
+   *
+   * **`endScrubPreview(commit)` *is* the gesture's seek** — the one real
+   * transport move a pointer drag is allowed. A UI that also called
+   * {@link StemPlayerEngine.seek} would rebuild every source node twice. With
+   * no session open it does nothing at all.
+   */
+  endScrubPreview(commitSeconds?: number): void
   /** The playhead in seconds, derived from the audio clock. */
   currentTime(): number
   /**
@@ -305,10 +367,36 @@ export interface StemAudioEngineOptions {
    * the shared start time arrives.
    */
   readonly lookaheadSeconds?: number
+  /**
+   * How long one scrub-preview grain sounds, in seconds. Long enough to carry
+   * pitch, short enough that the pointer has not moved far by the time it
+   * ends.
+   */
+  readonly scrubGrainSeconds?: number
+  /**
+   * The shortest gap between two grains, in seconds — the audio-clock
+   * throttle. Slightly under the grain length, so consecutive grains overlap
+   * rather than leaving a gap.
+   */
+  readonly scrubRetriggerSeconds?: number
+  /**
+   * The grain envelope's attack and release, in seconds. Without it a grain
+   * starts and stops on a discontinuity, which is an audible click.
+   */
+  readonly scrubFadeSeconds?: number
 }
 
 /** Default scheduling lookahead, in seconds. */
 const DEFAULT_LOOKAHEAD_SECONDS = 0.05
+
+/** Default length of one scrub-preview grain, in seconds. */
+const DEFAULT_SCRUB_GRAIN_SECONDS = 0.09
+
+/** Default gap between two grains, in seconds: a ~30 ms overlap. */
+const DEFAULT_SCRUB_RETRIGGER_SECONDS = 0.06
+
+/** Default grain attack/release, in seconds. */
+const DEFAULT_SCRUB_FADE_SECONDS = 0.008
 
 /**
  * The shortest loop region worth having, in seconds. Anything below it is
@@ -333,6 +421,14 @@ interface StemEntry {
   level: number
 }
 
+/** One scrub-preview grain in flight: its source and its own envelope. */
+interface PreviewGrain {
+  readonly source: AudioEngineSourceNode
+  readonly env: AudioEngineGainNode
+  /** When the grain's own schedule ends it — past this, `onended` has fired. */
+  readonly endsAt: number
+}
+
 /** Snapshot of an engine that has not loaded anything. */
 const IDLE_SNAPSHOT: StemEngineSnapshot = {
   status: 'idle',
@@ -340,6 +436,7 @@ const IDLE_SNAPSHOT: StemEngineSnapshot = {
   playing: false,
   durationSeconds: 0,
   loopRegion: null,
+  scrubbing: false,
   error: null,
 }
 
@@ -363,6 +460,9 @@ export class StemAudioEngine implements StemPlayerEngine {
     signal?: AbortSignal,
   ) => Promise<ArrayBuffer>
   private readonly lookaheadSeconds: number
+  private readonly scrubGrainSeconds: number
+  private readonly scrubRetriggerSeconds: number
+  private readonly scrubFadeSeconds: number
 
   private context: AudioEngineContext | null = null
   private entries: StemEntry[] = []
@@ -395,6 +495,23 @@ export class StemAudioEngine implements StemPlayerEngine {
   /** The region playback wraps within, or `null`. Always legal when set. */
   private loopRegion: LoopRegion | null = null
 
+  /** Whether a scrub-preview session is open (feature 052). */
+  private scrubbing = false
+  /**
+   * Whether the transport was playing when the open session began. Captured
+   * at `begin` because by `end` the transport is always paused — which is the
+   * whole reason the session has three calls rather than two.
+   */
+  private scrubWasPlaying = false
+  /**
+   * Context time the next grain may be scheduled at. Compared against the
+   * audio clock, never against a timer: a preview that arrives before it is
+   * dropped, and the next pointer move supersedes the position it carried.
+   */
+  private previewBusyUntil = 0
+  /** Grains currently scheduled, so a session end can silence them all. */
+  private previewGrains: PreviewGrain[] = []
+
   private snapshot: StemEngineSnapshot = IDLE_SNAPSHOT
 
   constructor(options: StemAudioEngineOptions = {}) {
@@ -402,6 +519,12 @@ export class StemAudioEngine implements StemPlayerEngine {
     this.loadStemAudio = options.loadStemAudio ?? fetchStemAudio
     this.lookaheadSeconds =
       options.lookaheadSeconds ?? DEFAULT_LOOKAHEAD_SECONDS
+    this.scrubGrainSeconds =
+      options.scrubGrainSeconds ?? DEFAULT_SCRUB_GRAIN_SECONDS
+    this.scrubRetriggerSeconds =
+      options.scrubRetriggerSeconds ?? DEFAULT_SCRUB_RETRIGGER_SECONDS
+    this.scrubFadeSeconds =
+      options.scrubFadeSeconds ?? DEFAULT_SCRUB_FADE_SECONDS
   }
 
   load = async (sources: readonly StemSource[]): Promise<void> => {
@@ -509,7 +632,14 @@ export class StemAudioEngine implements StemPlayerEngine {
   }
 
   play = async (): Promise<void> => {
-    if (this.disposed || this.playing || this.status !== 'ready') {
+    if (this.disposed) {
+      return
+    }
+    // A scrub session is a silenced transport, and this is the transport
+    // command that answers it: the grains go, and the start below is the
+    // resume — so the session must not schedule one of its own.
+    this.endScrubSession()
+    if (this.playing || this.status !== 'ready') {
       return
     }
     // This attempt answers the last one: an autoplay-policy rejection the
@@ -534,7 +664,13 @@ export class StemAudioEngine implements StemPlayerEngine {
   }
 
   pause = (): void => {
+    // Pausing a scrub session is just closing it: the transport is already
+    // stopped, and it must not resume on the way out.
+    const closed = this.endScrubSession().open
     if (!this.playing) {
+      if (closed) {
+        this.notify()
+      }
       return
     }
     const at = this.currentTime()
@@ -548,8 +684,12 @@ export class StemAudioEngine implements StemPlayerEngine {
     if (this.disposed) {
       return
     }
+    // A discrete seek (an arrow key, Home/End) supersedes any drag still in
+    // flight. The session is closed *without* resuming, so this seek is the
+    // one generation the move costs rather than the second of two.
+    const resume = this.endScrubSession().wasPlaying
     const target = clamp(seconds, 0, this.durationSeconds)
-    if (this.playing) {
+    if (this.playing || resume) {
       try {
         // An AudioBufferSourceNode is single-use: seeking means new sources,
         // started together at one new time with one new offset.
@@ -635,6 +775,103 @@ export class StemAudioEngine implements StemPlayerEngine {
       return
     }
     this.applyLoopRegion(null)
+  }
+
+  beginScrubPreview = (): void => {
+    if (this.disposed || this.status !== 'ready' || this.scrubbing) {
+      return
+    }
+    // Audacity pauses while you scrub: what you hear under the pointer is the
+    // preview, not the mix running on underneath it.
+    this.scrubWasPlaying = this.playing
+    if (this.playing) {
+      // Read before stopping, and read through `currentTime()` — under a loop
+      // region that value is the *wrapped* one, which is where the audio
+      // actually is and therefore where the playhead must stay.
+      const at = this.currentTime()
+      this.stopSources()
+      this.playing = false
+      this.position = at
+    }
+    this.scrubbing = true
+    // A fresh session owes nothing to the last one's retrigger window.
+    this.previewBusyUntil = 0
+    this.notify()
+  }
+
+  scrubPreview = (seconds: number): void => {
+    const context = this.context
+    if (this.disposed || !this.scrubbing || context === null) {
+      return
+    }
+    if (context.currentTime < this.previewBusyUntil) {
+      // Inside the last grain's retrigger window. Dropped rather than queued:
+      // by the time a queued position played, the pointer would be elsewhere.
+      return
+    }
+    // One clock reading for the whole set, exactly as `startSources` does —
+    // it is what keeps the stems of a grain aligned with each other.
+    const when = context.currentTime + this.lookaheadSeconds
+    const grain = this.scrubGrainSeconds
+    // A fade can never eat more than half the grain, however it is configured.
+    const fade = Math.min(this.scrubFadeSeconds, grain / 2)
+    const offset = clamp(seconds, 0, this.durationSeconds)
+    this.previewBusyUntil = when + this.scrubRetriggerSeconds
+    try {
+      for (const entry of this.entries) {
+        if (entry.buffer === null || entry.gain === null) {
+          continue
+        }
+        // Its own envelope, so the grain fades in and out without touching
+        // the stem's gain — which is carrying mute, solo and level, and which
+        // the transport is using too.
+        const env = context.createGain()
+        env.gain.setValueAtTime(0, when)
+        env.gain.linearRampToValueAtTime(1, when + fade)
+        env.gain.setValueAtTime(1, when + grain - fade)
+        env.gain.linearRampToValueAtTime(0, when + grain)
+        env.connect(entry.gain)
+        const source = context.createBufferSource()
+        source.buffer = entry.buffer
+        // Never `loop`: a grain auditions one position and stops. See the
+        // module docstring and feature 053's note.
+        source.connect(env)
+        // A stem shorter than `offset` simply produces silence; there is no
+        // special case, and no assumption about how many stems there are.
+        source.start(when, offset)
+        source.stop(when + grain)
+        this.previewGrains.push({ source, env, endsAt: when + grain })
+      }
+    } catch (reason) {
+      // The browser can close a context underneath us. A preview is not worth
+      // throwing out of a pointer handler for; it lands in the snapshot like
+      // every other transport failure.
+      this.transportError = reason
+      this.notify()
+    }
+  }
+
+  endScrubPreview = (commitSeconds?: number): void => {
+    if (this.disposed || !this.scrubbing) {
+      return
+    }
+    const { wasPlaying } = this.endScrubSession()
+    if (commitSeconds !== undefined) {
+      this.position = clamp(commitSeconds, 0, this.durationSeconds)
+    }
+    if (wasPlaying) {
+      try {
+        // The gesture's one real transport move — the same one-generation
+        // rebuild `seek` makes, under the same failure contract. A loop
+        // region reapplies here on its own, because `startSources` is where
+        // the flags are set.
+        this.startSources(this.position)
+      } catch (reason) {
+        this.transportError = reason
+        this.playing = false
+      }
+    }
+    this.notify()
   }
 
   currentTime = (): number => {
@@ -740,9 +977,77 @@ export class StemAudioEngine implements StemPlayerEngine {
     this.notify()
   }
 
+  /**
+   * Close any open scrub session without resuming the transport, and say what
+   * was closed: whether there was a session at all, and whether the transport
+   * was playing when it began.
+   *
+   * Every caller decides the resume for itself — `endScrubPreview` schedules
+   * one, `seek` folds it into its own generation, `play` starts anyway and
+   * `pause` wants none — which is why this helper never starts sources.
+   */
+  private endScrubSession(): { open: boolean; wasPlaying: boolean } {
+    if (!this.scrubbing) {
+      return { open: false, wasPlaying: false }
+    }
+    this.stopPreviewGrains(this.scrubFadeSeconds)
+    const wasPlaying = this.scrubWasPlaying
+    this.scrubbing = false
+    this.scrubWasPlaying = false
+    this.previewBusyUntil = 0
+    return { open: true, wasPlaying }
+  }
+
+  /**
+   * Silence, stop and disconnect every grain in flight. `fadeSeconds` ramps
+   * the envelopes down first; a teardown passes `0`, having no time to be
+   * polite about it.
+   */
+  private stopPreviewGrains(fadeSeconds: number): void {
+    const grains = this.previewGrains
+    this.previewGrains = []
+    const context = this.context
+    const now = context?.currentTime ?? 0
+    for (const grain of grains) {
+      const disconnect = (): void => {
+        try {
+          grain.source.disconnect()
+          grain.env.disconnect()
+        } catch {
+          // A closed context refuses; the nodes are unreachable either way.
+        }
+      }
+      try {
+        if (context !== null && fadeSeconds > 0 && now < grain.endsAt) {
+          grain.env.gain.cancelScheduledValues(now)
+          grain.env.gain.linearRampToValueAtTime(0, now + fadeSeconds)
+          grain.source.stop(now + fadeSeconds)
+          // Disconnecting here and now would sever the graph at the next
+          // render quantum — milliseconds before the ramp finishes — turning
+          // the fade into dead code and the release back into the click it
+          // exists to prevent. The node reports when it is actually done.
+          // (A grain past `endsAt` has already fired `onended` and would
+          // never report again — it is silent, so it disconnects below.)
+          grain.source.onended = disconnect
+          continue
+        }
+        grain.source.stop()
+      } catch {
+        // A grain that has already ended refuses a second stop, and so does
+        // any node whose context the browser closed.
+      }
+      disconnect()
+    }
+  }
+
   /** Stop every source and drop every gain node the last load built. */
   private teardownGraph(): void {
     this.stopSources()
+    // Grains outlive nothing: a new job or a disposal takes them with it.
+    this.stopPreviewGrains(0)
+    this.scrubbing = false
+    this.scrubWasPlaying = false
+    this.previewBusyUntil = 0
     for (const entry of this.entries) {
       try {
         entry.gain?.disconnect()
@@ -872,6 +1177,7 @@ export class StemAudioEngine implements StemPlayerEngine {
       playing: this.playing,
       durationSeconds: this.durationSeconds,
       loopRegion: this.loopRegion,
+      scrubbing: this.scrubbing,
       // A transient transport failure shadows a load failure while it stands
       // and clears on the next transport command; a load failure has no such
       // remedy and survives until the next load.
