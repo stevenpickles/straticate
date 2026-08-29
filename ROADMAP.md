@@ -301,7 +301,7 @@ The first three are things the release ships *with*, recorded in
 | 049 | Waveform foundation (peaks, geometry, engine seam) | MERGED  | 023        | `049-waveform-foundation` | #71 |
 | 050 | Stem timeline with per-stem waveform lanes   | MERGED  | 049        | `050-stem-timeline-lanes` | #74 |
 | 051 | Timeline zoom and pan                        | MERGED  | 050        | `051-timeline-zoom-pan` | #78 |
-| 052 | Audible scrub preview                        | PR OPEN | 050, 053   | `052-scrub-preview` | #82 |
+| 052 | Audible scrub preview                        | MERGED  | 050, 053   | `052-scrub-preview` | #82 |
 | 053 | Loop / A-B region playback                   | MERGED  | 050, 051   | `053-loop-region` | #80 |
 | 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |
 | 055 | Release preparation for v0.2.0               | PLANNED | 048–054    | `055-release-preparation-v0.2.0` | |
