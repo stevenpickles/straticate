@@ -70,21 +70,35 @@ loop regions, per-stem level faders — and the one known defect v0.1.0
 shipped with (the unrecoverable result fetch) fixed. Features 048–055;
 decisions and design in the feature docs.
 
-| Requirement | Feature(s) |
+| Requirement | State |
 | --- | --- |
-| Result fetch failure is recoverable in place | 048 |
-| Per-stem waveform lanes on a shared time axis (hand-rolled canvas, no new runtime dependency) | 049, 050 |
-| Click/drag seek preserving the one-seek-per-gesture contract | 050 |
-| Horizontal zoom + pan, keyboard transport, accessible seek control | 050, 051 |
-| Audible Audacity-style scrub preview | 052 |
-| Loop / A-B region playback, sample-accurate across stems | 053 |
-| Per-stem volume faders over the existing `setLevel` | 054 |
-| CHANGELOG, version `0.2.0`, clean-clone verification | 055 |
+| Result fetch failure is recoverable in place | **done** — 048 (#72), a "Try again" button refetches the result |
+| Per-stem waveform lanes on a shared time axis (hand-rolled canvas, no new runtime dependency) | **done** — 049 (#71) the peaks/geometry/engine seam, 050 (#74) the visible lanes; frontend still depends on exactly `react`/`react-dom` |
+| Click/drag seek preserving the one-seek-per-gesture contract | **done** — 050 (#74); the timeline itself is the `role="slider"` seek control |
+| Horizontal zoom + pan, keyboard transport, accessible seek control | **done** — 050 (#74) keyboard transport and the accessible control, 051 (#78) Ctrl+wheel zoom anchored at the cursor, toolbar/keyboard zoom anchored at the playhead, pan by wheel and scroll thumb, high-res tiles past base resolution |
+| Audible Audacity-style scrub preview | **done** — 052 (#82); throwaway preview grains respect mute/solo/level and never rebuild the transport graph mid-drag |
+| Loop / A-B region playback, sample-accurate across stems | **done** — 053 (#80); ruler drag, shift-drag, edge handles and transport buttons all reach one native loop set on every stem before one shared `start()`; a region is a trap, not a fence |
+| Per-stem volume faders over the existing `setLevel` | **done** — 054 (#76); one fader per stem in the lane header, independent of mute/solo |
+| CHANGELOG, version `0.2.0`, clean-clone verification | **done** — 055; see below |
 
-## Current state (2026-08-27)
+**M4 is complete: every requirement above is met.** What remains is the
+project owner's, per `AGENTS.md`: the release branch `release/v0.2.0` cut
+from `dev`, the release PR `dev → main`, its rebase-merge, and the annotated
+tag `v0.2.0`. Feature 055 prepares `dev` for that release and stops there —
+it does not create the release branch, open the release PR, merge anything,
+or tag, mirroring 043's precedent for v0.1.0 exactly.
+
+## Current state (2026-08-29)
 
 **M1, M2 and M3 are met and v0.1.0 is released** (tag `v0.1.0`, PR #66,
-hotfix #69). **M4 (v0.2.0) is defined and in progress** — features 048–055.
+hotfix #69). **M4 is met and `dev` is prepared for the v0.2.0 release** —
+features 048–055 are all merged, `CHANGELOG.md` carries a `[0.2.0]` entry
+written from this ledger, `backend/pyproject.toml` is at `0.2.0`, and the
+workflow (including the new timeline surface) was verified from a clean
+clone. **What is left is the project owner's**, per `AGENTS.md`: the release
+branch `release/v0.2.0`, the release PR `dev → main`, its rebase-merge, and
+the annotated tag `v0.2.0`. Feature 055 does not create, merge or tag
+anything. Details in `docs/features/055-release-preparation-v0.2.0.md`.
 
 The remainder of this section is the v0.1.0 state as recorded at release.
 
@@ -304,7 +318,7 @@ The first three are things the release ships *with*, recorded in
 | 052 | Audible scrub preview                        | MERGED  | 050, 053   | `052-scrub-preview` | #82 |
 | 053 | Loop / A-B region playback                   | MERGED  | 050, 051   | `053-loop-region` | #80 |
 | 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |
-| 055 | Release preparation for v0.2.0               | PLANNED | 048–054    | `055-release-preparation-v0.2.0` | |
+| 055 | Release preparation for v0.2.0               | PR OPEN | 048–054    | `055-release-preparation-v0.2.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
