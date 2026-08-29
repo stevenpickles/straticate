@@ -81,27 +81,29 @@ decisions and design in the feature docs.
 | Per-stem volume faders over the existing `setLevel` | **done** — 054 (#76); one fader per stem in the lane header, independent of mute/solo |
 | CHANGELOG, version `0.2.0`, clean-clone verification | **done** — 055; see below |
 
-**M4 is complete: every requirement above is met.** What remains is the
-project owner's, per `CONTRIBUTING.md`'s release process: the release branch
-`release/v0.2.0` cut from `dev`, the release PR `release/v0.2.0 → main`, its
-rebase-merge, and the annotated tag `v0.2.0`. Feature 055 prepares `dev` for
-that release and stops there — it does not create the release branch, open
-the release PR, merge anything, or tag, mirroring 043's precedent for v0.1.0
-exactly.
+**M4 is complete: v0.2.0 is released.** The release branch `release/v0.2.0`
+was cut from `dev`, locally rebased onto `main` (patch-id dropped the
+already-released commits, exactly as `CONTRIBUTING.md`'s rationale predicts),
+and the release PR (#86) rebase-merged; `main`'s tip tree is byte-identical
+to `dev`'s. The annotated tag `v0.2.0` triggered the release workflow, which
+published **Straticate v0.2.0** on 2026-08-29. Feature 055 prepared `dev`
+and stopped there, mirroring 043; the release steps were the owner's,
+executed with the owner's explicit authorization.
 
 ## Current state (2026-08-29)
 
-**M1, M2 and M3 are met and v0.1.0 is released** (tag `v0.1.0`, PR #66,
-hotfix #69). **M4 is met and `dev` is prepared for the v0.2.0 release** —
-every feature 048–054 is merged, and 055 is the release preparation itself:
-`CHANGELOG.md` carries a `[0.2.0]` entry written from this ledger,
+**Every milestone is met and v0.2.0 is released** (tag `v0.2.0`, release PR
+#86 rebase-merged 2026-08-29; v0.1.0: tag `v0.1.0`, PR #66, hotfix #69).
+Every feature 048–054 is merged and 055 was the release preparation:
+`CHANGELOG.md` carries the `[0.2.0]` entry written from this ledger,
 `backend/pyproject.toml` is at `0.2.0`, and the workflow (including the new
-timeline surface) was verified from a clean clone. **What is left is the
-project owner's**, per `CONTRIBUTING.md`'s release process: the release
-branch `release/v0.2.0`, the release PR `release/v0.2.0 → main`, its
-rebase-merge, and the annotated tag `v0.2.0`. Feature 055 does not create,
-merge or tag anything. Details in
-`docs/features/055-release-preparation-v0.2.0.md`.
+timeline surface) was verified from a clean clone. No release-branch fixes
+were made, so there is nothing to reconcile back into `dev`. Details in
+`docs/features/055-release-preparation-v0.2.0.md`. Nothing after v0.2.0 is
+numbered yet; candidate follow-ups live in the feature docs' known
+limitations (lane-height/fader-target sizing, stem-download retry, playhead
+persistence across phases, auto-follow under a loop) and in the
+still-standing items under "After v0.1.0" below.
 
 The remainder of this section is the v0.1.0 state as recorded at release.
 
