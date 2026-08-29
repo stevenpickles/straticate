@@ -318,8 +318,14 @@ export function StemPlayer({
       previewing.current = false
       setScrubValue(null)
       setCurrentTime(seconds)
-      if (fromDrag) {
-        engine?.endScrubPreview(seconds)
+      // The engine can close the session underneath a drag — `play`, `pause`
+      // and `seek` all end one defensively, reachable through a second
+      // pointer or a programmatic caller. `endScrubPreview` would then be a
+      // no-op and the dragged-to position would silently never commit, so
+      // the live engine state decides alongside the ref, and a closed
+      // session falls back to a plain seek.
+      if (fromDrag && engine !== null && engine.getSnapshot().scrubbing) {
+        engine.endScrubPreview(seconds)
       } else {
         engine?.seek(seconds)
       }

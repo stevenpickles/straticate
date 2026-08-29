@@ -1010,6 +1010,26 @@ describe('StemPlayer transport', () => {
     expect(screen.getByText('0:18 / 1:00')).toBeInTheDocument()
   })
 
+  it('still commits a drag whose session was closed underneath it', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    const surface = timeline()
+
+    fireEvent.pointerDown(surface, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(surface, { clientX: xFor(18), pointerId: 1 })
+    // The engine closes sessions defensively on play/pause/seek — reachable
+    // mid-drag through a second pointer or a programmatic caller. The
+    // release must not trust its own ref alone: `endScrubPreview` on a
+    // closed session is a no-op, and the dragged-to position would silently
+    // never commit.
+    act(() => {
+      engine.update({ scrubbing: false })
+    })
+    fireEvent.pointerUp(surface, { pointerId: 1 })
+
+    expect(engine.seeks).toEqual([18])
+    expect(engine.moves).toEqual([18])
+  })
+
   it('treats a motionless click as the degenerate drag: one seek', async () => {
     const { engine } = await renderReady(twoStemNames)
     const surface = timeline()

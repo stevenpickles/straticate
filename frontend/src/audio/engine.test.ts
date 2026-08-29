@@ -1327,20 +1327,49 @@ describe('StemAudioEngine scrub preview', () => {
     await loadEngine(longStems)
     engine.beginScrubPreview()
     engine.scrubPreview(12)
-    context.currentTime = 0.2
+    // Mid-grain: the grain runs to LOOKAHEAD + GRAIN, so at 0.1 it is still
+    // sounding and the release must ramp it down rather than cut it.
+    context.currentTime = 0.1
 
     engine.endScrubPreview(12)
 
     for (const envelope of context.gains.slice(2)) {
       expect(envelope.gain.events.slice(-2)).toEqual([
-        { type: 'cancel', time: 0.2 },
-        { type: 'linearRamp', value: 0, time: 0.2 + FADE },
+        { type: 'cancel', time: 0.1 },
+        { type: 'linearRamp', value: 0, time: 0.1 + FADE },
       ])
-      expect(envelope.disconnectCount).toBe(1)
+      // Not yet: a disconnect now would sever the graph before the ramp
+      // finishes, so the teardown waits for the node to report it ended.
+      expect(envelope.disconnectCount).toBe(0)
     }
     for (const grain of context.sources) {
-      expect(grain.stops.at(-1)).toBe(0.2 + FADE)
+      expect(grain.stops.at(-1)).toBe(0.1 + FADE)
+      expect(grain.disconnectCount).toBe(0)
+      grain.onended?.(new Event('ended'))
       expect(grain.disconnectCount).toBe(1)
+    }
+    for (const envelope of context.gains.slice(2)) {
+      expect(envelope.disconnectCount).toBe(1)
+    }
+  })
+
+  it('disconnects a grain that already played out without waiting for it', async () => {
+    await loadEngine(longStems)
+    engine.beginScrubPreview()
+    engine.scrubPreview(12)
+    // Past LOOKAHEAD + GRAIN: the grain ended on its own schedule, so its
+    // `onended` has already fired and would never fire again — a deferred
+    // disconnect would leak the envelope until the next load. It is silent,
+    // so the immediate cut costs nothing.
+    context.currentTime = 0.2
+
+    engine.endScrubPreview(12)
+
+    for (const grain of context.sources) {
+      expect(grain.disconnectCount).toBe(1)
+    }
+    for (const envelope of context.gains.slice(2)) {
+      expect(envelope.disconnectCount).toBe(1)
     }
   })
 
@@ -1429,6 +1458,8 @@ describe('StemAudioEngine scrub preview', () => {
     expect(engine.getSnapshot().scrubbing).toBe(false)
     for (const grain of context.sourcesFrom(0).slice(0, 2)) {
       expect(grain.stopCount).toBeGreaterThan(0)
+      // Disconnection is deferred to the node's own end, past the fade.
+      grain.onended?.(new Event('ended'))
       expect(grain.disconnectCount).toBe(1)
     }
   })

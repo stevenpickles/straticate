@@ -425,6 +425,8 @@ interface StemEntry {
 interface PreviewGrain {
   readonly source: AudioEngineSourceNode
   readonly env: AudioEngineGainNode
+  /** When the grain's own schedule ends it — past this, `onended` has fired. */
+  readonly endsAt: number
 }
 
 /** Snapshot of an engine that has not loaded anything. */
@@ -838,7 +840,7 @@ export class StemAudioEngine implements StemPlayerEngine {
         // special case, and no assumption about how many stems there are.
         source.start(when, offset)
         source.stop(when + grain)
-        this.previewGrains.push({ source, env })
+        this.previewGrains.push({ source, env, endsAt: when + grain })
       }
     } catch (reason) {
       // The browser can close a context underneath us. A preview is not worth
@@ -1007,24 +1009,34 @@ export class StemAudioEngine implements StemPlayerEngine {
     const context = this.context
     const now = context?.currentTime ?? 0
     for (const grain of grains) {
+      const disconnect = (): void => {
+        try {
+          grain.source.disconnect()
+          grain.env.disconnect()
+        } catch {
+          // A closed context refuses; the nodes are unreachable either way.
+        }
+      }
       try {
-        if (context !== null && fadeSeconds > 0) {
+        if (context !== null && fadeSeconds > 0 && now < grain.endsAt) {
           grain.env.gain.cancelScheduledValues(now)
           grain.env.gain.linearRampToValueAtTime(0, now + fadeSeconds)
           grain.source.stop(now + fadeSeconds)
-        } else {
-          grain.source.stop()
+          // Disconnecting here and now would sever the graph at the next
+          // render quantum — milliseconds before the ramp finishes — turning
+          // the fade into dead code and the release back into the click it
+          // exists to prevent. The node reports when it is actually done.
+          // (A grain past `endsAt` has already fired `onended` and would
+          // never report again — it is silent, so it disconnects below.)
+          grain.source.onended = disconnect
+          continue
         }
+        grain.source.stop()
       } catch {
         // A grain that has already ended refuses a second stop, and so does
         // any node whose context the browser closed.
       }
-      try {
-        grain.source.disconnect()
-        grain.env.disconnect()
-      } catch {
-        // Same again: the nodes are unreachable either way.
-      }
+      disconnect()
     }
   }
 

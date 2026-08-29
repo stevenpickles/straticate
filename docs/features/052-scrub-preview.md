@@ -241,3 +241,36 @@ audio.
     053's note 13 (auto-follow flipping the window once per loop pass at high
     zoom) is also unaddressed and unrelated to this branch. The two jsdom
     `getContext` warnings `StemPlayer.test.tsx` prints predate this work.
+
+13. **Grain disconnection waits for the node (review fix).** The first cut
+    disconnected grains synchronously after scheduling the 8 ms release ramp
+    — but a `disconnect()` severs the graph at the next render quantum,
+    milliseconds before the ramp finishes, so the fade was dead code and the
+    release was the very click it existed to prevent. A still-sounding grain
+    now defers its disconnect to its own `onended`; a grain already past its
+    scheduled end has fired `onended` once and never will again, so it is
+    disconnected immediately (it is silent — nothing to fade). Both paths
+    are pinned by tests.
+
+14. **A drag whose session was closed underneath it still commits (review
+    fix).** `play`/`pause`/`seek` all close an open session defensively, and
+    a second pointer or a programmatic caller can do that mid-drag. The
+    release used to trust the player's own `previewing` ref alone;
+    `endScrubPreview` on a closed session is a no-op, so the dragged-to
+    position silently never committed. The commit now also consults the live
+    snapshot's `scrubbing` and falls back to a plain `seek`. Pinned by a
+    test that closes the session between move and release.
+
+## Known limitations
+
+- **A grain-creation failure partway through the stem loop can orphan up to
+  one stem's nodes** (created, connected, then the throw lands before the
+  grain is tracked). The orphan settles to silence via its own scheduled
+  envelope and becomes collectable after its stop time; no session-end path
+  disconnects it explicitly. Self-healing and hard to reach — recorded
+  rather than engineered around.
+- **The motionless-click-stays-silent property rests on
+  `scrubFadeSeconds < lookaheadSeconds`** (the release's stop lands before
+  the grain's start). True of the defaults (8 ms vs 50 ms) and argued in
+  note 5, but no test pins the numeric relationship; changing either default
+  independently could reintroduce a click on plain clicks.
