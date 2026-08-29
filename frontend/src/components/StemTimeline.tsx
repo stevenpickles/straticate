@@ -76,10 +76,19 @@
  * lookahead, which is audible gapping rather than scrubbing. So a drag moves
  * only what is *displayed* — the playhead and the readout — and the seek is
  * committed once, on release, through a ref that is cleared **synchronously**
- * so a duplicate release event cannot commit a second one. Feature 052 adds
- * the audible preview by extending the same three gesture functions
- * (`beginGesture` / `updateGesture` / `commitGesture`); it does not need
- * another seek path.
+ * so a duplicate release event cannot commit a second one.
+ *
+ * ## The audible preview (feature 052)
+ *
+ * A seek drag is now heard as well as seen, and it needed no second seek path:
+ * `beginGesture` fires `onScrubStart` (the player opens a preview session),
+ * every `onScrub` sounds a grain as well as moving the playhead, and
+ * `commitGesture` still fires exactly one `onSeek` — the player decides
+ * whether that commit is `endScrubPreview(seconds)` (a pointer gesture) or a
+ * plain `seek` (a keypress). `abandonGesture` fires `onScrubCancel`, which
+ * ends the session with nothing committed. Loop-region gestures — the ruler,
+ * the handles, a shifted drag — never enter any of this, so they preview
+ * nothing.
  *
  * **The playhead is not a repaint.** It is one absolutely-positioned div moved
  * with `transform: translateX(…)` from the position the player already updates
@@ -193,11 +202,26 @@ export interface StemTimelineProps {
   readonly ready: boolean
   /** The engine whose decoded buffers the lanes are drawn from. */
   readonly engine: StemPlayerEngine | null
-  /** A drag moved: update the displayed position, do not seek. */
+  /**
+   * A seek drag began. Fires once, on `pointerdown`, **before** the first
+   * {@link StemTimelineProps.onScrub} — feature 052 opens the audible preview
+   * session here, and a preview that arrived first would find none open. A
+   * loop-region gesture never fires it.
+   */
+  readonly onScrubStart: () => void
+  /**
+   * A drag moved: update the displayed position, do not seek. Fires on the
+   * press as well as on every move, which is what makes the press itself
+   * audible.
+   */
   readonly onScrub: (seconds: number) => void
   /** A drag was cancelled: drop the displayed position. */
   readonly onScrubCancel: () => void
-  /** Commit a seek. Fires **once** per pointer gesture, and once per keypress. */
+  /**
+   * Commit the gesture. Fires **once** per pointer gesture, and once per
+   * keypress — the single commit path, whichever transport move the player
+   * decides that is.
+   */
   readonly onSeek: (seconds: number) => void
   /**
    * The committed loop region, straight from the engine snapshot — the single
@@ -297,6 +321,7 @@ export function StemTimeline({
   positionSeconds,
   ready,
   engine,
+  onScrubStart,
   onScrub,
   onScrubCancel,
   onSeek,
@@ -529,9 +554,13 @@ export function StemTimeline({
       gesture.current = seconds
       // Capture so a drag that leaves the strip keeps arriving here.
       capturePointer(event)
+      // Open the preview session *before* the first position reaches the
+      // player: `onScrub` is what sounds a grain, and there would be nothing
+      // to sound it into yet.
+      onScrubStart()
       onScrub(seconds)
     },
-    [ready, secondsAt, onScrub, beginRulerDrag],
+    [ready, secondsAt, onScrubStart, onScrub, beginRulerDrag],
   )
 
   const updateGesture = useCallback(

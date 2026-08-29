@@ -286,6 +286,46 @@ test.describe.serial('a separation, end to end', () => {
     await expect(workflow.clearLoop).toBeDisabled()
   })
 
+  test('scrubs the playhead while playing, and lands where it is released', async () => {
+    // Feature 052. Sound cannot be asserted from here, so this stage pins the
+    // two things that are observable in a real browser: a drag over a *live*
+    // transport raises nothing (the grains are scheduled on the same context
+    // the mix is using), and the release lands the playhead where the pointer
+    // let go and carries on playing from there.
+    const consoleErrors: string[] = []
+    page.on('console', (message) => {
+      if (message.type() === 'error') {
+        consoleErrors.push(message.text())
+      }
+    })
+
+    expect(await workflow.window()).toEqual({ zoom: 1, scrollSeconds: 0 })
+    const play = workflow.player.getByRole('button', { name: 'Play' })
+    const pause = workflow.player.getByRole('button', { name: 'Pause' })
+    await play.click()
+    await expect(pause).toBeVisible()
+
+    await workflow.dragSeek(0.2, 0.6)
+
+    // The transport was silenced for the drag and resumed on release, so the
+    // player is still playing — the gesture is one transport move, not a stop.
+    await expect(pause).toBeVisible()
+
+    // Six tenths of a fitted 60 s file is 0:36. Playback has been running
+    // since the release, so the reading is at or a little past it rather than
+    // exactly on it; a few seconds of headroom covers a loaded runner.
+    await pause.click()
+    await expect(play).toBeVisible()
+    const landed = Number(await workflow.seek.getAttribute('aria-valuenow'))
+    expect(
+      landed,
+      'the release lands the playhead where the pointer let go',
+    ).toBeGreaterThan(35)
+    expect(landed).toBeLessThan(45)
+
+    expect(consoleErrors, 'scrubbing raised nothing in the console').toEqual([])
+  })
+
   test('exports the stems as a real download', async () => {
     // FLAC by choice: it exercises the format picker, and a lossless encode
     // of four minute-long stems is a fraction of the 24-bit WAV zip to build

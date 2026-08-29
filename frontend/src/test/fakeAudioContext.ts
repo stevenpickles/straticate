@@ -25,6 +25,7 @@ import type {
   AudioEngineContext,
   AudioEngineGainNode,
   AudioEngineNode,
+  AudioEngineParam,
   AudioEngineSourceNode,
 } from '../audio/engine'
 
@@ -89,9 +90,37 @@ export class FakeAudioBuffer implements AudioEngineBuffer {
   }
 }
 
-/** A recording `AudioParam`. */
-export class FakeAudioParam {
+/**
+ * One scheduled `AudioParam` event, exactly as the engine asked for it.
+ * `cancel` carries no value, which is why it is optional.
+ */
+export interface ParamEvent {
+  readonly type: 'setValueAtTime' | 'linearRamp' | 'cancel'
+  readonly value?: number
+  readonly time: number
+}
+
+/**
+ * A recording `AudioParam`: the value mute/solo/level write directly, plus
+ * every scheduling call in the order it arrived — which is how feature 052's
+ * grain envelopes are asserted on.
+ */
+export class FakeAudioParam implements AudioEngineParam {
   value = 1
+  /** Every scheduling call this param received, in call order. */
+  readonly events: ParamEvent[] = []
+
+  setValueAtTime(value: number, time: number): void {
+    this.events.push({ type: 'setValueAtTime', value, time })
+  }
+
+  linearRampToValueAtTime(value: number, time: number): void {
+    this.events.push({ type: 'linearRamp', value, time })
+  }
+
+  cancelScheduledValues(time: number): void {
+    this.events.push({ type: 'cancel', time })
+  }
 }
 
 /** A recording `AudioNode`: remembers what it was connected to. */
