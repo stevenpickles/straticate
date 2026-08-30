@@ -42,7 +42,7 @@ const fixture = FIXTURES.standard
  * changes, the "starts cleanly" test below fails loudly rather than
  * silently testing nothing — it asserts the key it planted was consumed.
  */
-const SESSION_KEY = 'straticate.session.v1'
+const SESSION_KEY = 'straticate.session.v2'
 
 /** Read the app's stored session snapshot, or `null` when there is none. */
 async function storedSession(
@@ -153,8 +153,12 @@ test('reloading mid-run returns to the running job, which runs on to completion'
     'audioId',
     'jobId',
     'phase',
+    'view',
   ])
   expect(stored).toMatchObject({ jobId: job.id, phase: 'separate' })
+  // No Inspect view yet — the job is still running, so nothing has been
+  // there to record a playhead, a loop or a window (feature 066).
+  expect(stored?.view).toBeNull()
 
   // Every `POST /jobs` from here on would be a *second* separation: resuming
   // means re-reading the one that is already running, never starting another.

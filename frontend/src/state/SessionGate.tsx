@@ -204,10 +204,15 @@ export function useSessionRestore(): RestoreStatus {
     if (status !== 'settled') {
       return
     }
+    // `view` is read fresh rather than carried in state: it is written far
+    // more often than this effect re-runs (feature 066's `stemSession.tsx`
+    // writes it on every seek, loop edit and viewport move), and this write
+    // must not clobber whatever the most recent one left on disk.
     writeSessionSnapshot({
       jobId: job?.id ?? null,
       audioId: upload.status === 'uploaded' ? upload.file.id : null,
       phase,
+      view: readSessionSnapshot().view,
     })
     // Only the tracked job's *id* is persisted; depending on the whole `job`
     // would rewrite the snapshot on every progress event for no gain.

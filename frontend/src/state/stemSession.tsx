@@ -72,6 +72,41 @@
  * That is the price of not re-downloading, and it is bounded — one session,
  * freed the moment the job stops being tracked. Lazy opening is the mitigation
  * that keeps a job the user never listened to at zero.
+ *
+ * ## View persistence (feature 066)
+ *
+ * The engine cannot survive a page reload — the mix has to be re-downloaded
+ * and re-decoded regardless, which is C12/v0.4.0's problem, not this one's —
+ * but the *view* of it can: the playhead, the loop region and the timeline's
+ * zoom/scroll window are written to `sessionStorage` (`persistence.ts`'s
+ * `ViewSnapshot`, keyed by `jobId`) at every discrete commit — a seek, a loop
+ * set or clear, a named viewport movement, a pause — plus one `pagehide`
+ * flush for "reload while playing", where the last commit is stale by
+ * however long the mix has been running since.
+ *
+ * The view for the job `sessionStorage` names when this provider first
+ * mounts is read exactly **once**, into `initialView` — a fresh read per
+ * mount, which is what makes it a "since the last reload" view rather than a
+ * live subscription. Two consequences:
+ *
+ * - **The window is seeded before the first `StemTimeline` mount.**
+ *   `windowStore` is rebuilt by a `useMemo` keyed on `jobId`, and the local
+ *   its closure starts from — never a ref, so nothing here writes one during
+ *   render — already holds the restored `{ zoom, scrollSeconds }` (or {@link
+ *   WHOLE_FILE}) by the time anything downstream can call `get()`.
+ *   `useTimelineGeometry` reads it exactly once, on its own mount (065's
+ *   handoff note), so seeding it any later would lose the race.
+ * - **The playhead and loop region wait for the engine.** `engine.seek()` on
+ *   a paused engine just sets a position — there is nothing to schedule until
+ *   `play()` — but `setLoopRegion` reads and clamps against the engine's
+ *   `durationSeconds`, which is `0` until a stem has decoded. Both therefore
+ *   wait for the engine to reach `ready` for the **matching** `jobId`, and
+ *   fire exactly once per page load — never again for that job, even across
+ *   a 048 retry that reloads the same engine instance.
+ *
+ * A view for a job that is not the one being restored is exactly as stale as
+ * an unknown job id and is dropped the same way: `initialView.jobId` simply
+ * never matches, so nothing about it is ever applied.
  */
 
 import {
@@ -94,6 +129,11 @@ import {
   type TimelineWindowStore,
 } from '../components/useTimelineGeometry'
 import { useJobState } from './jobState'
+import {
+  readSessionSnapshot,
+  writeViewSnapshot,
+  type ViewSnapshot,
+} from './persistence'
 
 /** Envelope-shaped view of any rejection. */
 export interface ErrorInfo {
@@ -178,6 +218,15 @@ export interface StemSessionValue {
    * is, definitionally, worth retrying.
    */
   readonly retryResult: () => void
+  /**
+   * Persist the current view — playhead, loop region, zoom/scroll — for the
+   * tracked job (feature 066). A no-op with no open session. Every discrete
+   * commit calls this once: `StemPlayer`'s seek, loop set/clear and pause, and
+   * the `windowStore`'s own `set`. Reads the engine and the window store
+   * fresh each time rather than taking a snapshot as an argument, so callers
+   * never have to assemble a {@link ViewSnapshot} themselves.
+   */
+  readonly persistView: () => void
 }
 
 const StemSessionContext = createContext<StemSessionValue | undefined>(
@@ -207,6 +256,11 @@ export function StemSessionProvider({
 }: StemSessionProviderProps) {
   const { job } = useJobState()
   const jobId = job?.id ?? null
+
+  // Read exactly once, at mount — before anything here can have written a
+  // newer one. This is "the view since the last reload"; a later job change
+  // in the same page load must not re-read it (see the module docstring).
+  const [initialView] = useState(() => readSessionSnapshot().view)
 
   const [settled, setSettled] = useState<SettledResult | null>(null)
   const [engine, setEngine] = useState<StemPlayerEngine | null>(null)
@@ -245,15 +299,77 @@ export function StemSessionProvider({
    * nothing above the timeline needs to re-render when it does.
    */
   const timelineWindowRef = useRef<TimelineWindow>(WHOLE_FILE)
+
+  /**
+   * Seed (or reset) {@link timelineWindowRef} for whichever job is now
+   * tracked — the restored `{ zoom, scrollSeconds }` when `initialView`
+   * matches `jobId`, {@link WHOLE_FILE} otherwise (including "no job",
+   * which is what a job change used to reset the window from, in the
+   * teardown effect's cleanup, before this feature; that reset moved here).
+   *
+   * An effect, not a render-time write — refs may not be written during
+   * render (`react-hooks/refs`) — and it is safe as one: nothing downstream
+   * ever calls `windowStore.get()` in the *same* render pass this runs in.
+   * `StemTimeline` only mounts once `result` has loaded, which needs a
+   * `GET /jobs/{id}/result` round trip that has not even started the first
+   * time `jobId` takes this value — there is no render, let alone a mount,
+   * for this effect to race.
+   */
+  useEffect(() => {
+    timelineWindowRef.current =
+      jobId !== null && initialView !== null && initialView.jobId === jobId
+        ? { zoom: initialView.zoom, scrollSeconds: initialView.scrollSeconds }
+        : WHOLE_FILE
+  }, [jobId, initialView])
+
+  /**
+   * The freshest {@link persistView} (declared below), reachable from
+   * {@link windowStore}'s `set` without making `set`'s own identity depend
+   * on it — `set` has to stay stable across renders (065: "written back
+   * through it," read by `useTimelineGeometry` as a stable callback), and
+   * `persistView` changes identity with `jobId`. Updated after every render,
+   * the same as `StemTimeline`'s own `wheelHandler` ref.
+   */
+  const persistViewRef = useRef<() => void>(() => undefined)
+
   const windowStore = useMemo<TimelineWindowStore>(
     () => ({
       get: () => timelineWindowRef.current,
       set: (next) => {
         timelineWindowRef.current = next
+        persistViewRef.current()
       },
     }),
     [],
   )
+
+  /**
+   * Persist the current view for the tracked job — see
+   * {@link StemSessionValue.persistView}. Reads the engine and the window
+   * store fresh rather than being handed a snapshot, which is what lets
+   * every commit site call it with no arguments.
+   */
+  const persistView = useCallback((): void => {
+    const instance = engineRef.current
+    if (jobId === null || instance === null) {
+      return
+    }
+    const loop = instance.getSnapshot().loopRegion
+    const window_ = timelineWindowRef.current
+    const view: ViewSnapshot = {
+      jobId,
+      positionSeconds: instance.currentTime(),
+      loopStart: loop?.start ?? null,
+      loopEnd: loop?.end ?? null,
+      zoom: window_.zoom,
+      scrollSeconds: window_.scrollSeconds,
+    }
+    writeViewSnapshot(view)
+  }, [jobId])
+
+  useEffect(() => {
+    persistViewRef.current = persistView
+  }, [persistView])
 
   // Identity changes with the tracked job, deliberately: a view that calls
   // this from a mount effect re-opens the session when the job changes
@@ -341,6 +457,68 @@ export function StemSessionProvider({
     )
   }, [jobId, open, result, createEngine])
 
+  /**
+   * Which job the persisted view has already been applied to, or `null`
+   * before it has. Guards against applying it twice — once the engine
+   * reaches `ready` and again on every snapshot change afterwards
+   * (mute/solo/pause all notify the same subscription) — and against
+   * re-applying it on a later `load()` for the same job (a 048 retry that
+   * finally succeeds). Feature 066's "one seek, no gestures": exactly one
+   * `seek` and, when the view carried one, exactly one `setLoopRegion`, ever,
+   * per page load.
+   */
+  const restoredViewForRef = useRef<string | null>(null)
+
+  // Restore the playhead and loop region once the engine is actually able to
+  // take them: `seek` on a paused engine is a plain position write, but
+  // `setLoopRegion` clamps against `durationSeconds`, which is `0` until a
+  // stem has decoded. "Ready" is also the earliest point the *right* job's
+  // engine can be told apart from a stale one still finishing a teardown.
+  useEffect(() => {
+    if (
+      engine === null ||
+      jobId === null ||
+      initialView === null ||
+      initialView.jobId !== jobId
+    ) {
+      return
+    }
+    const view = initialView
+    const tryRestore = (): void => {
+      if (
+        restoredViewForRef.current === jobId ||
+        engine.getSnapshot().status !== 'ready'
+      ) {
+        return
+      }
+      restoredViewForRef.current = jobId
+      engine.seek(view.positionSeconds)
+      if (view.loopStart !== null && view.loopEnd !== null) {
+        engine.setLoopRegion(view.loopStart, view.loopEnd)
+      }
+    }
+    tryRestore()
+    return engine.subscribe(tryRestore)
+  }, [engine, jobId, initialView])
+
+  // The one flush that is not a discrete commit: `currentTime()` while
+  // playing is a moving target, so the position at every seek/pause is
+  // already stale by the time a reload actually happens mid-playback. This
+  // is the remedy — read the live clock once, right before the page goes
+  // away. Registered only while a session is open, and removed with it.
+  useEffect(() => {
+    if (!open || typeof window === 'undefined') {
+      return
+    }
+    const flush = (): void => {
+      persistView()
+    }
+    window.addEventListener('pagehide', flush)
+    return () => {
+      window.removeEventListener('pagehide', flush)
+    }
+  }, [open, persistView])
+
   // The session's teardown, and the only one. It runs when the tracked job
   // changes — to another job or to none, which is what `job/clear` does — and
   // when the provider itself unmounts. Nothing here is keyed to a view, which
@@ -358,16 +536,28 @@ export function StemSessionProvider({
       setSettled(null)
       setAttempt(0)
       setOpenedFor(null)
-      // A new job is a new timeline: a window measured against the last one
-      // would name seconds that no longer mean anything — the same reasoning
-      // the engine applies to a loop region in `load()`.
-      timelineWindowRef.current = WHOLE_FILE
+      // The persisted view belonged to *this* job — `jobId` here is the value
+      // this effect instance closed over, i.e. the job that is going away,
+      // never the incoming one. Guarded on it being a real job so the very
+      // first render (jobId starts `null` until `SessionGate` rehydrates one)
+      // does not wipe a view a reload just restored before anything has had
+      // a chance to read it back — see the module docstring.
+      if (jobId !== null) {
+        writeViewSnapshot(null)
+      }
     }
   }, [jobId])
 
   const value = useMemo<StemSessionValue>(
-    () => ({ result, engine, windowStore, openSession, retryResult }),
-    [result, engine, windowStore, openSession, retryResult],
+    () => ({
+      result,
+      engine,
+      windowStore,
+      openSession,
+      retryResult,
+      persistView,
+    }),
+    [result, engine, windowStore, openSession, retryResult, persistView],
   )
 
   return (

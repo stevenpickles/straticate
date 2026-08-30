@@ -6,7 +6,9 @@ import {
   isEmptySessionSnapshot,
   readSessionSnapshot,
   writeSessionSnapshot,
+  writeViewSnapshot,
   type SessionSnapshot,
+  type ViewSnapshot,
 } from './persistence'
 
 /** A storage double whose every method throws, as a blocked store does. */
@@ -44,10 +46,22 @@ function blockStorageProperty(): () => void {
   }
 }
 
+const sampleJobId = '01SAMPLEJOBULID00000000000'
+
 const snapshot: SessionSnapshot = {
-  jobId: '01SAMPLEJOBULID00000000000',
+  jobId: sampleJobId,
   audioId: '01SAMPLEAUDIOULID0000000000',
   phase: 'separate',
+  view: null,
+}
+
+const view: ViewSnapshot = {
+  jobId: sampleJobId,
+  positionSeconds: 12.5,
+  loopStart: 10,
+  loopEnd: 35,
+  zoom: 2.25,
+  scrollSeconds: 4,
 }
 
 afterEach(() => {
@@ -69,6 +83,7 @@ describe('session snapshot round trip', () => {
       'audioId',
       'jobId',
       'phase',
+      'view',
     ])
     // The fields a cached record would have brought with it. A `Job` that
     // survives a reload races the event stream on the way back in, which is
@@ -84,7 +99,12 @@ describe('session snapshot round trip', () => {
 
   it('removes the key rather than storing an empty snapshot', () => {
     writeSessionSnapshot(snapshot)
-    writeSessionSnapshot({ jobId: null, audioId: null, phase: 'select' })
+    writeSessionSnapshot({
+      jobId: null,
+      audioId: null,
+      phase: 'select',
+      view: null,
+    })
 
     expect(sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull()
   })
@@ -98,9 +118,29 @@ describe('session snapshot round trip', () => {
 
   it('treats a snapshot with only a phase as nothing to restore', () => {
     expect(
-      isEmptySessionSnapshot({ jobId: null, audioId: null, phase: 'inspect' }),
+      isEmptySessionSnapshot({
+        jobId: null,
+        audioId: null,
+        phase: 'inspect',
+        view: null,
+      }),
     ).toBe(true)
     expect(isEmptySessionSnapshot(snapshot)).toBe(false)
+  })
+
+  it('treats a snapshot with only a view as something worth restoring', () => {
+    // `writeViewSnapshot` can be the first writer to touch a fresh store —
+    // its read-modify-write starts from whatever is already on disk, which
+    // may be nothing. The view it just wrote must not be discarded as if it
+    // were empty.
+    expect(
+      isEmptySessionSnapshot({
+        jobId: null,
+        audioId: null,
+        phase: null,
+        view,
+      }),
+    ).toBe(false)
   })
 })
 
@@ -124,6 +164,7 @@ describe('session snapshot validation', () => {
       jobId: null,
       audioId: null,
       phase: 'separate',
+      view: null,
     })
   })
 
@@ -133,6 +174,82 @@ describe('session snapshot validation', () => {
       JSON.stringify({ ...snapshot, phase: 'transcribe' }),
     )
     expect(readSessionSnapshot()).toEqual({ ...snapshot, phase: null })
+  })
+})
+
+describe('view snapshot (feature 066)', () => {
+  it('round-trips a snapshot that carries a view', () => {
+    writeSessionSnapshot({ ...snapshot, view })
+    expect(readSessionSnapshot()).toEqual({ ...snapshot, view })
+  })
+
+  it('round-trips a snapshot with no view', () => {
+    writeSessionSnapshot(snapshot)
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('restores a v1-shaped record — jobId/audioId/phase, no `view` key at all', () => {
+    sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({
+        jobId: snapshot.jobId,
+        audioId: snapshot.audioId,
+        phase: snapshot.phase,
+      }),
+    )
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('tolerates a view of the wrong shape, restoring the rest of the snapshot', () => {
+    sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ ...snapshot, view: { jobId: view.jobId } }),
+    )
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('tolerates a view that is not an object', () => {
+    sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ ...snapshot, view: 'soon' }),
+    )
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('tolerates a loop bound with no matching partner', () => {
+    sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ ...snapshot, view: { ...view, loopEnd: null } }),
+    )
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('writeViewSnapshot updates the view without touching the identifiers', () => {
+    writeSessionSnapshot(snapshot)
+    writeViewSnapshot(view)
+
+    expect(readSessionSnapshot()).toEqual({ ...snapshot, view })
+  })
+
+  it('writeViewSnapshot(null) clears the view, keeping the identifiers', () => {
+    writeSessionSnapshot({ ...snapshot, view })
+    writeViewSnapshot(null)
+
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('drops a view recorded for a different job — the caller matches jobIds', () => {
+    // persistence.ts stores exactly what it is given; it is `stemSession.tsx`
+    // that refuses to apply a view whose `jobId` does not match the job being
+    // restored (see its module docstring). This just pins that the module
+    // itself keeps the mismatched view intact rather than guessing — the
+    // consumer is the one with the authoritative `jobId` to compare against.
+    const otherJobView: ViewSnapshot = { ...view, jobId: 'a-different-job' }
+    writeSessionSnapshot({ ...snapshot, view: otherJobView })
+
+    const restored = readSessionSnapshot()
+    expect(restored.view?.jobId).toBe('a-different-job')
+    expect(restored.view?.jobId).not.toBe(restored.jobId)
   })
 })
 

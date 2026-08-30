@@ -310,6 +310,7 @@ describe('SessionGate persistence', () => {
         jobId: sampleJobId,
         audioId: sampleAudioFile.id,
         phase: 'inspect',
+        view: null,
       })
     })
   })
