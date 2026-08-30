@@ -126,6 +126,11 @@ release.
 
 ## [0.1.0] — 2026-08-26
 
+> This section is the historical record of the 0.1.0 release, frozen as
+> published. Later releases fix some of what it describes — its Known
+> limitations in particular are superseded where a newer section above says
+> so — and it is deliberately not edited to keep up.
+
 The first release. Straticate separates a mixed music file into stems, in a
 browser, on your own machine, with no account and no cloud service.
 
