@@ -362,7 +362,7 @@ verbatim as the planning record they were.
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | READY | 041 | `062-band-limited-fold` | |
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
 | 064 | Stem-audio retry + player hygiene            | MERGED  | 048, 052   | `064-stem-retry-hygiene` | #91 |
-| 065 | Job-scoped stem session (engine hoist)       | PLANNED | 064        | `065-stem-session` | |
+| 065 | Job-scoped stem session (engine hoist)       | PR OPEN | 064        | `065-stem-session` | #96 |
 | 066 | View state survives a reload                 | PLANNED | 033, 065   | `066-view-state-reload` | |
 | 067 | Lane height + fader accessibility            | PR OPEN | 050, 054   | `067-lane-height-a11y` | #94 |
 | 068 | Auto-follow suppressed inside a loop region  | PLANNED | 051, 053, 067 | `068-auto-follow-loop` | |

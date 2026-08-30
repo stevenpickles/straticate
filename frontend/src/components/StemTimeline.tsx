@@ -129,7 +129,10 @@ import {
   timeToX,
 } from './timelineGeometry'
 import { useMeasuredHeight } from './useMeasuredHeight'
-import { useTimelineGeometry } from './useTimelineGeometry'
+import {
+  useTimelineGeometry,
+  type TimelineWindowStore,
+} from './useTimelineGeometry'
 import { useWaveformPeaks, useWaveformTiles } from './useWaveformPeaks'
 import './StemTimeline.css'
 
@@ -203,6 +206,14 @@ export interface StemTimelineProps {
   readonly ready: boolean
   /** The engine whose decoded buffers the lanes are drawn from. */
   readonly engine: StemPlayerEngine | null
+  /**
+   * Where the `{ zoom, scrollSeconds }` window is kept between mounts, when
+   * something outlives this component and holds one — the stem session does
+   * (feature 065), so leaving the Inspect UI and coming back finds the same
+   * seconds on screen. Omitted, the window is this component's own and opens
+   * on the whole file.
+   */
+  readonly windowStore?: TimelineWindowStore | null
   /**
    * A seek drag began. Fires once, on `pointerdown`, **before** the first
    * {@link StemTimelineProps.onScrub} — feature 052 opens the audible preview
@@ -322,6 +333,7 @@ export function StemTimeline({
   positionSeconds,
   ready,
   engine,
+  windowStore = null,
   onScrubStart,
   onScrub,
   onScrubCancel,
@@ -343,7 +355,7 @@ export function StemTimeline({
     zoomToFit,
     panBy,
     scrollTo,
-  } = useTimelineGeometry(durationSeconds)
+  } = useTimelineGeometry(durationSeconds, windowStore)
 
   // Feature 067: the lane height is `rem`-relative (`LANE_HEIGHT_REM`), so
   // the header and lane *boxes* scale with the browser's root font size for
