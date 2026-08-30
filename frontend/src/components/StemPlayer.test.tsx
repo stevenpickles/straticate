@@ -16,6 +16,7 @@ import {
   useJobState,
   type JobStateValue,
 } from '../state/jobState'
+import { StemSessionProvider } from '../state/stemSession'
 import type { Job, SeparationResult, Stem } from '../api/types'
 import {
   createStemAudioEngine,
@@ -525,6 +526,11 @@ function inspectingState(overrides: Partial<AppState> = {}): AppState {
   }
 }
 
+/**
+ * The player under the session that owns its engine and its result (feature
+ * 065). The engine injection moved up with them: the player takes no factory
+ * any more, so a test hands its `FakeEngine` to the provider instead.
+ */
 function renderPlayer(
   engine: StemPlayerEngine,
   jobState: Partial<JobStateValue> = { job: completedJob },
@@ -534,8 +540,10 @@ function renderPlayer(
   return render(
     <AppStateProvider initialState={appState}>
       <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
-        <StemPlayer createEngine={createEngine} />
-        <WorkflowState />
+        <StemSessionProvider createEngine={createEngine}>
+          <StemPlayer />
+          <WorkflowState />
+        </StemSessionProvider>
       </JobStateProvider>
     </AppStateProvider>,
   )
@@ -961,13 +969,16 @@ describe('StemPlayer result-fetch retry (feature 048)', () => {
       )
     }
 
+    const engine = new FakeEngine()
     render(
       <AppStateProvider initialState={inspectingState()}>
         <JobStateProvider
           initialState={{ ...initialJobState, job: completedJob }}
         >
-          <StemPlayer createEngine={() => new FakeEngine()} />
-          <Retracker job={completedJob} />
+          <StemSessionProvider createEngine={() => engine}>
+            <StemPlayer />
+            <Retracker job={completedJob} />
+          </StemSessionProvider>
         </JobStateProvider>
       </AppStateProvider>,
     )
