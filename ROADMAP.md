@@ -97,24 +97,46 @@ ROADMAP item, every Known Limitations section in features 006–055, every
 CHANGELOG caveat). Three themes, features 056–069; designs and stop
 conditions in the feature docs.
 
-| Requirement | Feature(s) |
+| Requirement | State |
 | --- | --- |
-| Job records, the upload registry and model-install failures survive a restart (JSON sidecars + read-only startup sweep; interrupted jobs become `failed`/`job_interrupted`, never re-queued) | 056, 057, 061 |
-| Everything is deletable and disk use is visible: `DELETE /jobs/{id}` (stems + exports, one tree), disk-usage report, typed manual prune — never deleting unasked | 058, 059, 060 |
-| Band-limited fold measured against 041's baselines — shipped as `mono_bass` only if it beats them, else a documented rejection | 062 |
-| Wide-stereo detection per 041's handoff: suggest, never apply; false-positive rate measured on user-supplied ordinary tracks before the UI ships | 063 |
-| A failed stem download is recoverable in place (engine reload path) | 064 |
-| Playhead, loop, zoom and decoded stems survive leaving the Inspect step (engine lifetime = tracked job) and a page reload (persisted view state) | 065, 066 |
-| Lane headers stop clipping at large browser fonts; fader target ≥ 24 px (WCAG 2.2), verified by a multi-root-font layout harness | 067 |
-| Auto-follow no longer page-flips while looping inside a region | 068 |
-| CHANGELOG, version `0.3.0`, clean-clone verification incl. restart survival | 069 |
+| Job records, the upload registry and model-install failures survive a restart (JSON sidecars + read-only startup sweep; interrupted jobs become `failed`/`job_interrupted`, never re-queued) | **done** — 056 (#90), 057 (#92), 061 (#89) |
+| Everything is deletable and disk use is visible: `DELETE /jobs/{id}` (stems + exports, one tree), disk-usage report, typed manual prune — never deleting unasked | **done** — 058 (#98), 059 (#95), 060 (#101) |
+| Band-limited fold measured against 041's baselines — shipped as `mono_bass` only if it beats them, else a documented rejection | **done** — 062 (#100); beat the full fold on every axis 041 recorded, shipped as `mono_bass`, measured on one track |
+| Wide-stereo detection per 041's handoff: suggest, never apply; false-positive rate measured on user-supplied ordinary tracks before the UI ships | **done, suggestion held** — 063 (#104); `GET /audio/{id}/analysis` ships, the suggestion is built, wording-tested and disabled behind `WIDE_STEREO_SUGGESTION_ENABLED = false` pending the false-positive measurement (protocol recorded in 063's doc) |
+| A failed stem download is recoverable in place (engine reload path) | **done** — 064 (#91) |
+| Playhead, loop, zoom and decoded stems survive leaving the Inspect step (engine lifetime = tracked job) and a page reload (persisted view state) | **done** — 065 (#96), 066 (#102) |
+| Lane headers stop clipping at large browser fonts; fader target ≥ 24 px (WCAG 2.2), verified by a multi-root-font layout harness | **done** — 067 (#94) |
+| Auto-follow no longer page-flips while looping inside a region | **done** — 068 (#97) |
+| CHANGELOG, version `0.3.0`, clean-clone verification incl. restart survival | **done** — 069; see below |
+
+**M5's requirements are all met.** Feature 069 prepared `dev`:
+`CHANGELOG.md` carries the `[0.3.0]` entry written from this ledger,
+`backend/pyproject.toml` is at `0.3.0`, and the workflow — restart
+survival, job deletion, disk-usage reporting, prune, `mono_bass`, and the
+timeline's job-scoped session and reload persistence — was verified from a
+clean clone. Details in `docs/features/069-release-preparation-v0.3.0.md`.
+What remains is the project owner's, per `AGENTS.md`: the release PR
+`dev → main`, the merge, and the annotated tag `v0.3.0`.
 
 Deferred to v0.4.0, deliberately: job history/multi-job UI, opt-in
 auto-prune policies, resumable model downloads / update path /
 re-verification, export transport (progress/cancel), streaming stem decode
 (C12) and the zipper-noise level ramp (C9).
 
-## Current state (2026-08-29)
+## Current state (2026-08-30)
+
+**v0.3.0 is prepared on `dev`.** Every feature 056–068 is merged, and 069 is
+the release preparation: `CHANGELOG.md` carries the `[0.3.0]` entry written
+from this ledger, `backend/pyproject.toml` is at `0.3.0`, and the workflow —
+including restart survival, job deletion, disk-usage reporting, prune, the
+`mono_bass` stereo-handling option, and the timeline's job-scoped session
+and reload persistence — was verified from a clean clone. Details in
+`docs/features/069-release-preparation-v0.3.0.md`. What remains is the
+project owner's, per `AGENTS.md`: the release PR `dev → main`, the merge,
+and the annotated tag `v0.3.0`.
+
+The remainder of this section is the v0.2.0 state as recorded at its
+release.
 
 **Every milestone is met and v0.2.0 is released** (tag `v0.2.0`, release PR
 #86 rebase-merged 2026-08-29; v0.1.0: tag `v0.1.0`, PR #66, hotfix #69).
@@ -236,7 +258,11 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 (fixed, #72); retention/pruning and job-record persistence became **056–060**;
 wide-stereo detection became **063** and the band-limited fold **062**; the
 fast-vocals question stays licence-blocked (027's reopen criterion stands,
-re-checked at each release prep). Still unnumbered: the `scripts/`/`testdata/`
+re-checked at each release prep — most recently 2026-08-30 for 069, still
+unmet: `Anjok07/ultimatevocalremovergui` issue #2341 remains open and
+unanswered by a maintainer, and that repository's `LICENSE` file still
+404s on its default branch, issue #1798 also still open; see
+`CHANGELOG.md`'s `[0.3.0]` *Licensing* section). Still unnumbered: the `scripts/`/`testdata/`
 doc drift. The final two bullets below are resolution records (037's
 quality-tier decision; 032's history), not open items. The bullets are kept
 verbatim as the planning record they were.
@@ -360,13 +386,13 @@ verbatim as the planning record they were.
 | 060 | Prune endpoint                               | MERGED  | 058, 059   | `060-prune-endpoint` | #101 |
 | 061 | Persist model install failures               | MERGED  | —          | `061-persist-install-failures` | #89 |
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | MERGED | 041 | `062-band-limited-fold` | #100 |
-| 063 | Wide-stereo detection + suggestion           | PR OPEN | 041        | `063-wide-stereo-detection` | #104 |
+| 063 | Wide-stereo detection + suggestion           | MERGED  | 041        | `063-wide-stereo-detection` | #104 |
 | 064 | Stem-audio retry + player hygiene            | MERGED  | 048, 052   | `064-stem-retry-hygiene` | #91 |
 | 065 | Job-scoped stem session (engine hoist)       | MERGED  | 064        | `065-stem-session` | #96 |
 | 066 | View state survives a reload                 | MERGED  | 033, 065   | `066-view-state-reload` | #102 |
 | 067 | Lane height + fader accessibility            | MERGED  | 050, 054   | `067-lane-height-a11y` | #94 |
 | 068 | Auto-follow suppressed inside a loop region  | MERGED  | 051, 053, 067 | `068-auto-follow-loop` | #97 |
-| 069 | Release preparation for v0.3.0               | PLANNED | 056–068    | `069-release-preparation-v0.3.0` | |
+| 069 | Release preparation for v0.3.0               | PR OPEN | 056–068    | `069-release-preparation-v0.3.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
