@@ -3,7 +3,7 @@
 Branch: `057-durable-job-records`
 Status: PR OPEN
 Dependencies: —
-PR: —
+PR: #92
 
 ## Objective
 
