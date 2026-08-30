@@ -19,6 +19,9 @@ Public surface (consumed by features 015/019/026):
   into uploads/job stems/job exports/orphans and reports the holding
   filesystem's free/total bytes (feature 059). See
   :mod:`straticate.system.disk_usage`.
+- :func:`plan_prune` / :func:`execute_prune` — the write half of that read:
+  decide what a requested prune would remove (measuring every target first),
+  then remove exactly that (feature 060). See :mod:`straticate.system.prune`.
 
 PyTorch is **not** a dependency of this package; see
 :mod:`straticate.system.devices` for the rationale.
@@ -44,8 +47,19 @@ from straticate.system.devices import (
 )
 from straticate.system.disk_usage import (
     AUDIO_DIRECTORY,
+    DEBRIS_DIR_PREFIX,
     EXPORTS_DIRECTORY,
+    WalkResult,
     disk_usage_report,
+    is_debris,
+    walk_files,
+)
+from straticate.system.prune import (
+    PrunePlan,
+    PruneTarget,
+    execute_prune,
+    is_expired,
+    plan_prune,
 )
 from straticate.system.storage import (
     UNKNOWN_STORAGE,
@@ -61,6 +75,7 @@ __all__ = [
     "CPU_BACKEND",
     "CPU_DEVICE_ID",
     "CUDA_BACKEND",
+    "DEBRIS_DIR_PREFIX",
     "EXPORTS_DIRECTORY",
     "UNKNOWN_STORAGE",
     "ComputeDeviceProbe",
@@ -70,16 +85,24 @@ __all__ = [
     "DeviceDetectorDep",
     "DiskUsageLike",
     "DiskUsageReader",
+    "PrunePlan",
+    "PruneTarget",
     "TorchCudaProbe",
     "TorchLoader",
     "TorchModuleLike",
+    "WalkResult",
     "cpu_device",
     "cpu_name",
     "disk_usage_report",
+    "execute_prune",
     "get_device_detector",
+    "is_debris",
+    "is_expired",
     "load_torch",
     "nearest_existing_dir",
+    "plan_prune",
     "read_disk_usage",
     "storage_report",
     "total_system_memory_bytes",
+    "walk_files",
 ]

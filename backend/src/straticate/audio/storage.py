@@ -85,6 +85,7 @@ class AudioStore:
     def __init__(self, data_dir: Path) -> None:
         self._audio_root = data_dir / "audio"
         self._records: dict[str, AudioFile] = {}
+        self._pending: set[str] = set()
 
     def new_id(self) -> str:
         """Generate a new ULID string to identify an upload."""
@@ -109,9 +110,20 @@ class AudioStore:
 
         The one place the store creates directories, called from the upload
         write path. The file itself is not created.
+
+        Creating the directory also **reserves** ``audio_id`` as a pending
+        upload (:meth:`pending_ids`) until :meth:`register` or
+        :meth:`remove_files` resolves it. That reservation is what keeps
+        ``POST /system/prune`` from deleting an upload that is still
+        streaming: between this call and ``register``, the directory holds
+        real bytes but no record, which is precisely feature 059's definition
+        of an orphan. Nothing else in the application can tell the two apart
+        from the filesystem alone — a 40-minute upload of a large file looks,
+        for 40 minutes, exactly like the leftovers of one that died.
         """
         path = self.original_path(audio_id, filename)
         path.parent.mkdir(parents=True, exist_ok=True)
+        self._pending.add(audio_id)
         return path
 
     def register(self, record: AudioFile) -> None:
@@ -140,6 +152,9 @@ class AudioStore:
         tmp.write_text(record.model_dump_json())
         os.replace(tmp, sidecar)
         self._records[record.id] = record
+        # The upload is no longer pending: it now has a record, which is what
+        # every other reader (including prune) recognises it by.
+        self._pending.discard(record.id)
 
     def load(self) -> None:
         """Rebuild the registry from sidecars a previous run left on disk.
@@ -230,6 +245,29 @@ class AudioStore:
         """
         return list(self._records)
 
+    def pending_ids(self) -> list[str]:
+        """Return the IDs of uploads that are being written but not yet registered.
+
+        An upload occupies ``{data_dir}/audio/{audio_id}/`` from
+        :meth:`prepare_original_path` until :meth:`register` — the whole
+        duration of the multipart stream and the ffprobe that follows it —
+        and during that window it has a directory and no record. Feature
+        059's classification calls a directory with no record an *orphan*,
+        which is right for what it does (report) and dangerous for what
+        feature 060 does (delete): pruning orphans would remove the file a
+        client is still uploading, and the upload would then fail on a
+        ``os.replace`` into a directory that no longer exists.
+
+        ``POST /system/prune`` therefore treats these IDs as live. The
+        reservation is dropped by :meth:`register` (it has a record now) and
+        by :meth:`remove_files` (its files are gone) — which
+        ``api/audio.py`` calls on **every** failure path, so no crash between
+        the two leaks a permanent exemption. A process that dies mid-upload
+        leaves the directory a genuine orphan, and the next process, with an
+        empty reservation set, prunes it exactly as it should.
+        """
+        return sorted(self._pending)
+
     def delete(self, audio_id: str) -> bool:
         """Remove the record and its files; return whether it existed."""
         record = self._records.pop(audio_id, None)
@@ -240,8 +278,11 @@ class AudioStore:
         """Delete the upload's directory from disk (no-op if absent).
 
         Used both by :meth:`delete` and to clean up rejected uploads that
-        were never registered.
+        were never registered. Also releases any :meth:`pending_ids`
+        reservation: the files this protected are gone, so protecting the ID
+        further would exempt an empty directory from pruning forever.
         """
+        self._pending.discard(audio_id)
         directory = self._audio_root / audio_id
         if directory.exists():
             shutil.rmtree(directory, ignore_errors=True)

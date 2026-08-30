@@ -33,7 +33,15 @@ from straticate.schemas.jobs import (
     Stem,
     StereoHandling,
 )
-from straticate.schemas.maintenance import DiskUsageReport, UsageBucket
+from straticate.schemas.maintenance import (
+    DiskUsageReport,
+    PruneClassReport,
+    PruneFailure,
+    PruneReport,
+    PruneRequest,
+    ReclaimClass,
+    UsageBucket,
+)
 from straticate.schemas.models import (
     Model,
     ModelInstallation,
@@ -74,8 +82,13 @@ __all__ = [
     "ModelLicensing",
     "ModelRequirements",
     "ProcessingMetrics",
+    "PruneClassReport",
+    "PruneFailure",
+    "PruneReport",
+    "PruneRequest",
     "QualityOption",
     "QualityTier",
+    "ReclaimClass",
     "RuntimeMetricsEvent",
     "SeparationConfiguration",
     "SeparationMode",
