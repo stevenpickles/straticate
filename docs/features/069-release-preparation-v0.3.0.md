@@ -88,20 +88,22 @@ described below:
 ### Version-string drift, grepped rather than assumed
 
 `grep -rn "0\.2\.0"` across the repository (excluding `node_modules`,
-`.venv` and `package-lock.json`) turned up nine files. Two needed a change
-and were fixed: `backend/pyproject.toml` (above) and `backend/uv.lock`
-(regenerated to match). The remaining seven are **historical references,
-correctly left alone**: `CHANGELOG.md`'s own `[0.2.0]` section (the
-previous release's frozen record); `docs/features/046-release-workflow.md`,
+`.venv` and `package-lock.json`) turned up ten files. Three needed a change
+and were fixed: `backend/pyproject.toml` (above), `backend/uv.lock`
+(regenerated to match), and `README.md`, whose one occurrence was the
+current-version status header (`**v0.2.0 — the timeline release.**`),
+rewritten for v0.3.0 — on this head `README.md` contains no `0.2.0` string
+at all. The remaining seven are **historical references, correctly left
+alone**: `CHANGELOG.md`'s own `[0.2.0]` section (the previous release's
+frozen record); `docs/features/046-release-workflow.md`,
 `055-release-preparation-v0.2.0.md`, `067-lane-height-a11y.md` and
 `068-auto-follow-loop.md` (merged feature docs, historical records per
 064's own precedent — "Merged feature docs are historical records… left as
 written"); `frontend/e2e/layout.spec.ts`'s one comment naming "the 17/18/20
 px v0.2.0 clipping" it regression-tests against (describing when a bug
-shipped, not a current version string); and `README.md`/`ROADMAP.md`, both
-of which carry the v0.2.0 *history* deliberately below their now-updated
-v0.3.0 headers, mirroring exactly how 055 kept v0.1.0's history below its
-own update. `frontend/package.json` and `frontend/package-lock.json` were
+shipped, not a current version string); and `ROADMAP.md`, which carries the
+v0.2.0 *history* deliberately below its now-updated v0.3.0 state, mirroring
+exactly how 055 kept v0.1.0's history below its own update. `frontend/package.json` and `frontend/package-lock.json` were
 checked and are unaffected either way — both are `0.0.0`, undisturbed by
 this bump, per the standing decision below.
 

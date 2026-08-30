@@ -37,7 +37,7 @@ wide-stereo mixes without folding the whole track to mono.** Where **Fold to
 mono** (0.1.0) recovers a near-silent `bass` stem by discarding every stem's
 stereo image, `mono_bass` folds only the material below 500 Hz — on the one
 mix measured, it recovers slightly more of the source's low end than a full
-fold (19.4% against 16.0%) at under a third of the cost to `drums` and
+fold (19.4% against 16.0%) at about a third of the cost to `drums` and
 `other` (about 1 dB against about 3 dB), and every stem comes back in
 stereo. See *What it cannot do* for the caveat this measurement carries.
 

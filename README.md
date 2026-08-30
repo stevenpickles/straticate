@@ -137,7 +137,7 @@ The four you are most likely to meet:
 - **Demucs loses the bass stem on wide-separation stereo mixes** (early stereo
   records with near-independent channels). **Fold to mono** and the new
   **`mono_bass`** both recover that stem — `mono_bass` slightly better, at
-  under a third of the cost to the other stems, and it keeps every stem in
+  about a third of the cost to the other stems, and it keeps every stem in
   stereo — but neither fixes the separation, and both are measured on one
   track, not a survey. Nothing suggests either one to you yet: a detector
   exists (`GET /audio/{id}/analysis`) but its in-app suggestion is held
