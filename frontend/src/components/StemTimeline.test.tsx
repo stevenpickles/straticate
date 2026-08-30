@@ -867,24 +867,30 @@ describe('StemTimeline pan', () => {
 
 describe('StemTimeline auto-follow inside a loop region', () => {
   it('does not page-flip while the playhead loops inside a region narrower than the window', async () => {
+    // The region deliberately does not start at 0 (review finding): with a
+    // region at the origin, the wrap-back assertion could never fail — an
+    // unsuppressed flip toward a near-zero position clamps to 0, the same
+    // reading the suppression produces. Starting at 10 makes both halves of
+    // the pass discriminating.
     const view = await fixture({
-      positionSeconds: 0,
-      loopRegion: { start: 0, end: 40 },
+      positionSeconds: 12,
+      loopRegion: { start: 10, end: 50 },
     })
     ctrlWheel(-100, 0, 2)
     // 1.5² is 2.25, so 26.667 s are on screen — narrower than the 40 s region.
-    expect(scrollSeconds()).toBe(0)
+    const settled = scrollSeconds()
 
     // Approaching loopEnd would ordinarily flip the window forward (051's
-    // rule): 35 s is inside the region but outside this window.
-    view.show({ positionSeconds: 35 })
-    expect(scrollSeconds()).toBe(0)
+    // rule): 45 s is inside the region but outside this window.
+    view.show({ positionSeconds: 45 })
+    expect(scrollSeconds()).toBe(settled)
 
     // The wrap back to loopStart would ordinarily flip the window back again
     // — the "visually busy" behaviour 053 note 13 flagged. Suppressed, so
-    // nothing moves.
-    view.show({ positionSeconds: 2 })
-    expect(scrollSeconds()).toBe(0)
+    // nothing moves. An unsuppressed flip would land at 10 − 2.667 ≈ 7.3,
+    // which no clamp can mask.
+    view.show({ positionSeconds: 10 })
+    expect(scrollSeconds()).toBe(settled)
   })
 
   it('still flips the window on the same playhead move when no region is set', async () => {
