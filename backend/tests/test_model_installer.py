@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import socket
 import threading
@@ -37,6 +38,7 @@ from straticate.models import (
     ModelCatalog,
     ModelCatalogError,
     ModelInstaller,
+    install_failure_path,
     partial_weights_path,
     weights_path,
 )
@@ -50,7 +52,7 @@ from straticate.models.installer import (
     SIZE_MISMATCH,
     UNEXPECTED_ERROR,
 )
-from straticate.schemas import ModelInstallState
+from straticate.schemas import ErrorInfo, ModelInstallState
 from tests.test_model_catalog import make_model, write_catalog
 from tests.weights_server import ServedArtifact, WeightsServer
 
@@ -155,6 +157,20 @@ class Builder:
             httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test")
         )
         return Harness(app=app, client=client, models_dir=models_dir)
+
+    async def restart(self, harness: Harness) -> Harness:
+        """Start a fresh app over ``harness``'s existing ``models_dir``.
+
+        Simulates a backend restart: same ``catalog.json`` and weights
+        directory, but a brand-new ``ModelInstaller`` with nothing carried
+        over in process memory — only what the first app left on disk.
+        """
+        app = create_app(Settings(models_dir=harness.models_dir, data_dir=self._tmp / "data"))
+        await self._stack.enter_async_context(app.router.lifespan_context(app))
+        client = await self._stack.enter_async_context(
+            httpx2.AsyncClient(transport=httpx2.ASGITransport(app=app), base_url="http://test")
+        )
+        return Harness(app=app, client=client, models_dir=harness.models_dir)
 
     def downloadable(
         self,
@@ -851,6 +867,130 @@ async def test_a_retry_after_a_failure_clears_the_error(build: Builder) -> None:
     installation = await harness.settle()
     assert installation["state"] == "installed"
     assert installation["error"] is None
+
+
+# -- surviving a restart (feature 061) ----------------------------------------
+
+
+async def test_a_failed_install_survives_a_restart(build: Builder) -> None:
+    """The whole point of 061: a restart must not erase a recorded failure.
+
+    Before 061 ``ModelInstaller`` kept failures only in ``self._failures``, so
+    a fresh process over the same ``models_dir`` reported the model bare
+    ``available`` again, the error gone. Restart is simulated the only way it
+    can be from a test: a brand-new app, built over the same ``models_dir``,
+    with nothing shared in process memory.
+    """
+    body = blob(1024)
+    wrong = sha256(b"not the right bytes")
+    harness = await build.start([build.downloadable(body, sha=wrong)])
+
+    assert (await harness.install()).status_code == 202
+    before = await harness.settle()
+    assert before["state"] == "failed"
+    assert before["error"]["code"] == CHECKSUM_MISMATCH
+
+    restarted = await build.restart(harness)
+    after = await restarted.installation()
+    assert after["state"] == "failed"
+    assert after["error"] == before["error"]
+
+
+async def test_a_successful_install_clears_the_persisted_failure(build: Builder) -> None:
+    """A retry that succeeds must not leave a stale sidecar for the next boot."""
+    body = blob(1024)
+    served = ServedArtifact(body=body, status=503)
+    harness = await build.start([build.downloadable(body, served=served)])
+
+    assert (await harness.install()).status_code == 202
+    assert (await harness.settle())["state"] == "failed"
+    sidecar = install_failure_path(harness.models_dir, MODEL_ID)
+    assert sidecar.is_file(), "the failure was not persisted"
+
+    served.status = 200
+    assert (await harness.install()).status_code == 202
+    assert (await harness.settle())["state"] == "installed"
+    assert not sidecar.exists(), "a stale sidecar survived a successful install"
+
+    restarted = await build.restart(harness)
+    after = await restarted.installation()
+    assert after["state"] == "installed"
+    assert after["error"] is None
+
+
+async def test_a_new_attempt_clears_the_sidecar_before_downloading(build: Builder) -> None:
+    """The sidecar is cleared at the *start* of the next attempt, synchronously.
+
+    The retry pinned by the catalog fails again (same wrong digest), but that
+    is beside the point here: the sidecar must already be gone the moment the
+    attempt is registered, before a single byte of the retry is fetched.
+    """
+    body = blob(1024)
+    wrong = sha256(b"still wrong")
+    harness = await build.start([build.downloadable(body, sha=wrong)])
+
+    assert (await harness.install()).status_code == 202
+    assert (await harness.settle())["state"] == "failed"
+    sidecar = install_failure_path(harness.models_dir, MODEL_ID)
+    assert sidecar.is_file()
+
+    assert (await harness.install()).status_code == 202
+    assert not sidecar.exists(), "the sidecar outlived the start of the next attempt"
+    assert (await harness.settle())["state"] == "failed"
+
+
+async def test_weights_present_with_a_stale_sidecar_is_cleaned_up_on_restart(
+    build: Builder,
+) -> None:
+    """A crash between publishing weights and clearing the sidecar heals itself.
+
+    Nothing in the real pipeline leaves weights installed *and* a failure
+    sidecar behind — the sidecar is always cleared before the download that
+    published those weights even started. This state can only be reached by a
+    crash between the ``os.replace`` that published ``weights.bin`` and the
+    delete that should have followed a prior failure's clear, so it is
+    injected directly here.
+    """
+    body = blob(1024)
+    harness = await build.start([build.downloadable(body)])
+    assert (await harness.install()).status_code == 202
+    assert (await harness.settle())["state"] == "installed"
+
+    sidecar = install_failure_path(harness.models_dir, MODEL_ID)
+    sidecar.write_text(
+        ErrorInfo(code=DOWNLOAD_FAILED, message="stale", detail={}).model_dump_json(),
+        encoding="utf-8",
+    )
+    assert sidecar.is_file()
+
+    restarted = await build.restart(harness)
+    after = await restarted.installation()
+    assert after["state"] == "installed"
+    assert after["error"] is None
+    assert not sidecar.exists(), "the stale sidecar was not cleaned up at boot"
+
+
+async def test_a_corrupt_sidecar_boots_clean_with_a_warning(
+    build: Builder, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A truncated or hand-edited sidecar must not crash startup or the route.
+
+    Treated as absent for this boot: the model reports ``available``, exactly
+    as if the sidecar were not there at all, and a warning is logged so the
+    corruption is not silent.
+    """
+    harness = await build.start([build.downloadable(blob(512))])
+    sidecar = install_failure_path(harness.models_dir, MODEL_ID)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{not valid json", encoding="utf-8")
+
+    caplog.set_level(logging.WARNING, logger="straticate.models.installer")
+    restarted = await build.restart(harness)
+    after = await restarted.installation()
+
+    assert after["state"] == "available"
+    assert after["error"] is None
+    assert any("corrupt" in record.message for record in caplog.records)
 
 
 # -- cancellation ------------------------------------------------------------

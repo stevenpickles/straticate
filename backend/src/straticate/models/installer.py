@@ -74,6 +74,39 @@ Three further rules this module keeps:
 
 Resumable downloads are **out of scope** (see
 ``docs/features/025-model-download-manager.md``): a failed install starts over.
+
+**A failure survives a restart (feature 061).** ``self._failures`` alone does
+not: it is process memory, and a backend restart used to hand back a bare
+``available`` for a model that had, in fact, just failed — the error gone,
+with nothing to tell a user why the install they watched fail is now silently
+being offered again. Every write to ``self._failures`` is now mirrored to a
+sidecar, :func:`~straticate.models.layout.install_failure_path`, right beside
+``weights.bin``:
+
+- **Recorded** (:meth:`ModelInstaller._run`) → the sidecar is written,
+  atomically, in the same ``.part``-then-:func:`os.replace` shape the weights
+  themselves use, minus the ``fsync``. That omission is deliberate: unlike
+  weights, a lost sidecar write to a very recent power cut is not silently
+  wrong forever, it is merely *forgotten* — the next boot reports ``available``
+  instead of ``failed``, which is the pre-061 behaviour, not data corruption.
+  Paying a synchronous ``fsync`` on the event loop for every failed install to
+  protect against that narrow a window was judged not worth it.
+- **Cleared** (:meth:`ModelInstaller.start_install`, on success, and
+  :meth:`ModelInstaller.remove`) → the sidecar is unlinked, same as
+  ``self._failures.pop(...)``.
+- **Loaded** (:meth:`ModelInstaller.__init__`) → for every catalogued model,
+  the sidecar is read once at construction. Weights already installed beats a
+  stale sidecar (a later attempt must have succeeded after a crash lost the
+  delete); otherwise a valid sidecar restores the in-memory failure so
+  :meth:`describe` reports ``failed`` exactly as it did before the restart. A
+  sidecar that fails to parse is logged and treated as absent — it is not
+  deleted here, only lazily, the next time an install for that model is
+  attempted or succeeds, which is the same path every other clear already
+  goes through.
+
+This sidecar is the **only** thing this feature touches under ``models_dir``:
+never a ``.part`` file, never ``weights.bin`` itself. Resumable downloads and
+re-verifying installed weights remain out of scope, as above.
 """
 
 from __future__ import annotations
@@ -88,10 +121,12 @@ from pathlib import Path
 from typing import IO, Any, Self
 
 import httpx2
+from pydantic import ValidationError
 
 from straticate.errors import ApplicationError
 from straticate.models.catalog import CatalogEntry, ModelArtifact, ModelCatalog
 from straticate.models.layout import (
+    install_failure_path,
     partial_weights_path,
     remove_weights,
     weights_installed,
@@ -241,6 +276,29 @@ class ModelInstaller:
         self._client_factory = client_factory or self._default_client
         self._running: dict[str, _RunningInstall] = {}
         self._failures: dict[str, ErrorInfo] = {}
+        self._restore_failures()
+
+    def _restore_failures(self) -> None:
+        """Load persisted install failures at construction (feature 061).
+
+        For every downloadable catalog entry: weights already on disk beat a
+        sidecar (a later attempt must have succeeded after a crash lost the
+        clear), so a stale one is removed and nothing is restored. Otherwise a
+        sidecar that parses becomes this process's in-memory failure, exactly
+        as if the process had never restarted. A sidecar that does not parse
+        is logged and left as absent *and on disk* — see
+        :func:`_read_failure_sidecar`.
+        """
+        for entry in self._catalog.list_entries():
+            if entry.artifact is None:
+                continue
+            model_id = entry.model.id
+            if weights_installed(self._models_dir, model_id):
+                _delete_failure_sidecar(self._models_dir, model_id)
+                continue
+            failure = _read_failure_sidecar(self._models_dir, model_id)
+            if failure is not None:
+                self._failures[model_id] = failure
 
     def _default_client(self) -> httpx2.AsyncClient:
         """Build the client a download runs on.
@@ -336,6 +394,7 @@ class ModelInstaller:
             return self.describe(entry)
 
         self._failures.pop(model_id, None)
+        _delete_failure_sidecar(self._models_dir, model_id)
         # Registration is a plain dict write with no ``await`` in front of it,
         # so on a single-threaded event loop two requests cannot both decide
         # they are the first one.
@@ -372,6 +431,8 @@ class ModelInstaller:
             raise _model_not_downloadable(model_id)
         await self._cancel(model_id)
         self._failures.pop(model_id, None)
+        # ``remove_weights`` deletes the whole model directory when it exists,
+        # sidecar included, so there is no separate sidecar delete here.
         remove_weights(self._models_dir, model_id)
         return self.describe(entry)
 
@@ -442,14 +503,18 @@ class ModelInstaller:
                 exc.detail.get("reason", "-"),
                 exc.message,
             )
-            self._failures[model_id] = exc.to_error_info()
+            failure = exc.to_error_info()
+            self._failures[model_id] = failure
+            _write_failure_sidecar(self._models_dir, model_id, failure)
         except Exception:
             logger.exception("Installing model %r raised an unclassified error", model_id)
-            self._failures[model_id] = ModelInstallError(
+            failure = ModelInstallError(
                 DOWNLOAD_FAILED,
                 f"Installing model {model_id!r} failed unexpectedly; see the server log.",
                 {"model_id": model_id, "reason": UNEXPECTED_ERROR},
             ).to_error_info()
+            self._failures[model_id] = failure
+            _write_failure_sidecar(self._models_dir, model_id, failure)
         finally:
             # Dropped last, and never before the failure is recorded: a client
             # polling between the two would otherwise see ``available`` for an
@@ -674,6 +739,91 @@ def _discard(part: Path) -> None:
         part.unlink(missing_ok=True)
     except OSError:  # pragma: no cover - a locked or vanished temporary file
         logger.warning("Could not remove the partial weights file %s", part, exc_info=True)
+
+
+# -- the install-failure sidecar (feature 061) --------------------------------
+#
+# See the module docstring's "A failure survives a restart" section for the
+# write/clear/load contract these three functions implement. All three treat
+# every failure mode as non-fatal to the install: a sidecar is a convenience
+# for surviving a restart, never something an install attempt's own outcome
+# depends on.
+
+
+def _write_failure_sidecar(models_dir: Path, model_id: str, failure: ErrorInfo) -> None:
+    """Persist ``failure`` for ``model_id``, atomically and without an fsync.
+
+    Same ``.tmp``-then-:func:`os.replace` shape as the weights artifact
+    itself, same directory so the rename is same-filesystem — but with no
+    ``fsync`` of either the file or the directory. Unlike weights, losing this
+    write to a very-recently-preceding crash does not corrupt anything
+    silently and permanently; it only reverts one model, for one boot, to the
+    pre-061 behaviour of reporting ``available`` instead of ``failed``. See the
+    module docstring.
+    """
+    path = install_failure_path(models_dir, model_id)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(failure.model_dump_json(), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning(
+            "Could not persist the install failure for model %r", model_id, exc_info=True
+        )
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - a locked or vanished temporary file
+            logger.warning("Could not remove the temporary sidecar file %s", tmp, exc_info=True)
+
+
+def _read_failure_sidecar(models_dir: Path, model_id: str) -> ErrorInfo | None:
+    """Read ``model_id``'s persisted failure, or ``None`` if absent or unusable.
+
+    A missing file is the ordinary case (most models never failed) and is not
+    logged. A file that exists but will not parse — truncated by the same
+    crash window :func:`_write_failure_sidecar` accepts, or hand-edited — is
+    logged as a warning and treated exactly like a missing one; it is **not**
+    deleted here (:class:`ModelInstaller._restore_failures` runs before
+    anything else touches ``models_dir``, and deleting during startup reads
+    would make a read-only inspection of the directory mutate it). The next
+    install attempt or success for the model clears it, the same path every
+    other sidecar clear already goes through.
+    """
+    path = install_failure_path(models_dir, model_id)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning(
+            "Could not read the install-failure sidecar for model %r", model_id, exc_info=True
+        )
+        return None
+    try:
+        return ErrorInfo.model_validate_json(raw)
+    except ValidationError:
+        logger.warning(
+            "Install-failure sidecar for model %r is corrupt; treating as absent", model_id
+        )
+        return None
+
+
+def _delete_failure_sidecar(models_dir: Path, model_id: str) -> None:
+    """Remove ``model_id``'s persisted failure, tolerating a filesystem that refuses.
+
+    Called wherever ``self._failures.pop(model_id, None)`` already is: the
+    start of an install attempt, a successful install (implicitly, since it is
+    already gone by then), and a weights removal.
+    """
+    path = install_failure_path(models_dir, model_id)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:  # pragma: no cover - a locked or vanished sidecar file
+        logger.warning(
+            "Could not remove the install-failure sidecar for model %r", model_id, exc_info=True
+        )
 
 
 __all__ = [

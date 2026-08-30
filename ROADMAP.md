@@ -358,7 +358,7 @@ verbatim as the planning record they were.
 | 058 | Job deletion + exports authority in layout   | PLANNED | 057        | `058-job-deletion` | |
 | 059 | Disk-usage endpoint                          | PLANNED | 056, 057   | `059-disk-usage-endpoint` | |
 | 060 | Prune endpoint                               | PLANNED | 058, 059   | `060-prune-endpoint` | |
-| 061 | Persist model install failures               | READY   | —          | `061-persist-install-failures` | |
+| 061 | Persist model install failures               | PR OPEN | —          | `061-persist-install-failures` | |
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | READY | 041 | `062-band-limited-fold` | |
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
 | 064 | Stem-audio retry + player hygiene            | READY   | 048, 052   | `064-stem-retry-hygiene` | |

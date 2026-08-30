@@ -20,9 +20,11 @@ from straticate.models.catalog import (
 )
 from straticate.models.installer import ModelInstaller, ModelInstallError
 from straticate.models.layout import (
+    INSTALL_FAILURE_FILENAME,
     MODEL_ID_PATTERN,
     WEIGHTS_DIRECTORY,
     WEIGHTS_FILENAME,
+    install_failure_path,
     model_weights_dir,
     partial_weights_path,
     remove_weights,
@@ -34,6 +36,7 @@ from straticate.models.layout import (
 
 __all__ = [
     "CATALOG_FILENAME",
+    "INSTALL_FAILURE_FILENAME",
     "MODEL_ID_PATTERN",
     "WEIGHTS_DIRECTORY",
     "WEIGHTS_FILENAME",
@@ -43,6 +46,7 @@ __all__ = [
     "ModelCatalogError",
     "ModelInstallError",
     "ModelInstaller",
+    "install_failure_path",
     "model_weights_dir",
     "partial_weights_path",
     "remove_weights",

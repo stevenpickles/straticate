@@ -6,6 +6,7 @@ load them (feature 026) cannot drift apart::
 
     {models_dir}/weights/{model_id}/weights.bin
     {models_dir}/weights/{model_id}/weights.bin.part   (in flight only)
+    {models_dir}/weights/{model_id}/install-failure.json  (feature 061)
 
 This mirrors :mod:`straticate.inference.layout`, which owns the same question
 for a job's stems. Two deliberate choices:
@@ -53,6 +54,14 @@ WEIGHTS_FILENAME = "weights.bin"
 
 PARTIAL_SUFFIX = ".part"
 """Suffix of the in-flight download, renamed away only after verification."""
+
+INSTALL_FAILURE_FILENAME = "install-failure.json"
+"""Name of a model's persisted install-failure sidecar (feature 061).
+
+Lives beside ``weights.bin`` in the model's own directory, never inside it, so
+:func:`remove_weights`'s directory delete clears it along with everything
+else without a second code path.
+"""
 
 
 def validate_model_id(model_id: str) -> str:
@@ -107,6 +116,20 @@ def partial_weights_path(models_dir: Path, model_id: str) -> Path:
     return weights_path(models_dir, model_id).with_name(WEIGHTS_FILENAME + PARTIAL_SUFFIX)
 
 
+def install_failure_path(models_dir: Path, model_id: str) -> Path:
+    """Return ``model_id``'s persisted install-failure sidecar (feature 061).
+
+    A sibling of :func:`weights_path`, holding the serialized
+    :class:`~straticate.schemas.ErrorInfo` of the last failed install attempt,
+    so it survives a backend restart. Computed, never created: it exists only
+    once an install has actually failed.
+
+    Raises:
+        ValueError: ``model_id`` is not a valid model ID.
+    """
+    return model_weights_dir(models_dir, model_id) / INSTALL_FAILURE_FILENAME
+
+
 def weights_installed(models_dir: Path, model_id: str) -> bool:
     """Whether ``model_id``'s weights are present on disk.
 
@@ -137,10 +160,12 @@ def remove_weights(models_dir: Path, model_id: str) -> bool:
 
 
 __all__ = [
+    "INSTALL_FAILURE_FILENAME",
     "MODEL_ID_PATTERN",
     "PARTIAL_SUFFIX",
     "WEIGHTS_DIRECTORY",
     "WEIGHTS_FILENAME",
+    "install_failure_path",
     "model_weights_dir",
     "partial_weights_path",
     "remove_weights",
