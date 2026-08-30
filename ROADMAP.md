@@ -392,7 +392,7 @@ verbatim as the planning record they were.
 | 066 | View state survives a reload                 | MERGED  | 033, 065   | `066-view-state-reload` | #102 |
 | 067 | Lane height + fader accessibility            | MERGED  | 050, 054   | `067-lane-height-a11y` | #94 |
 | 068 | Auto-follow suppressed inside a loop region  | MERGED  | 051, 053, 067 | `068-auto-follow-loop` | #97 |
-| 069 | Release preparation for v0.3.0               | PR OPEN | 056–068    | `069-release-preparation-v0.3.0` | #105 |
+| 069 | Release preparation for v0.3.0               | MERGED  | 056–068    | `069-release-preparation-v0.3.0` | #105 |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
