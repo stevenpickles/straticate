@@ -461,6 +461,7 @@ hidden development fixture — is not derived at all, so an empty
 | GET | `/jobs` | List jobs, oldest first | `200` |
 | GET | `/jobs/{job_id}` | Fetch `Job` (reconnect/refresh source of truth) | `200` |
 | POST | `/jobs/{job_id}/cancel` | Request cooperative cancellation → `Job` | `200` |
+| DELETE | `/jobs/{job_id}` | Delete a **terminal** job's whole directory (record, stems, exports) | `204` |
 
 Create request (`SeparationConfiguration`):
 
@@ -569,6 +570,28 @@ WebSocket event. Cancelling a job that already reached a terminal state is a
 **no-op that still returns `200`** — the operation is idempotent and never
 produces a conflict.
 
+**`DELETE /jobs/{job_id}` removes a terminal job wholesale** (feature 058): the
+record, every stem and every built export in one filesystem removal of
+`{data_dir}/jobs/{job_id}`. Before this endpoint existed nothing could remove
+the stems and exports a completed job produced — only the audio *upload* it
+was separated from could be deleted (`DELETE /audio/{audio_id}`), leaving
+derived output as orphaned disk usage forever; this is what finally answers
+that worst case. Deleting is refused on a job that has not reached a terminal
+state (`job_active`, 409) — cancel it and wait for the `job_cancelled` (or
+other terminal) event first. Deleting under a running executor is exactly the
+corruption this endpoint exists to prevent, not a case it introduces. A
+deleted job never resurrects on the next restart: its record died with the
+directory, and startup only lists what it finds on disk (feature 057).
+
+Removal is **best-effort** on platforms — practically, Windows — where a file
+can be open elsewhere (most notably a stem or export mid-download through
+`FileResponse`) when the delete request arrives: an open handle cannot be
+unlinked, so whatever it is holding onto is left behind as debris rather than
+failing the request. The job is gone from every other endpoint immediately
+(`GET` on it is `job_not_found` from that instant on) and still answers `204`;
+any surviving file is exactly the kind of debris a later pruning feature (060)
+is responsible for sweeping, not a defect of this endpoint.
+
 Job error codes:
 
 | code | status | when |
@@ -582,7 +605,8 @@ Job error codes:
 | `separator_unavailable` | 501 | no separator implementation exists for the resolved model's architecture |
 | `model_weights_invalid` | 500 | the installed weights do not load into this build's architecture |
 | `model_parameters_invalid` | 500 | the resolved model's catalog entry carries inference parameters this build cannot use |
-| `job_not_found` | 404 | unknown `job_id` (get/cancel) |
+| `job_not_found` | 404 | unknown `job_id` (get/cancel/delete) |
+| `job_active` | 409 | `DELETE /jobs/{job_id}` on a job that has not reached a terminal state. `detail` carries `job_id` and the job's current `state` |
 | `service_unavailable` | 503 | the job manager is shutting down (create/cancel) |
 | `job_interrupted` | — | **not a response status.** The `error.code` on a `failed` job whose server stopped while it was queued or running (feature 057); it is read from the job record, never returned as an HTTP error |
 
