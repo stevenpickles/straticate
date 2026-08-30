@@ -48,6 +48,7 @@ from tests.test_api_jobs import (
     manager_of,
     register_audio,
 )
+from tests.test_jobs_manager import instant_executor
 
 # -- helpers ----------------------------------------------------------------
 
@@ -545,10 +546,16 @@ async def test_restore_emits_nothing() -> None:
     assert recorder.types(restored.id) == []
 
 
-async def test_a_failing_store_never_fails_a_job(
+async def test_a_failing_store_refuses_the_submission(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Persistence is a promise about the future, not a precondition for work."""
+    """A submit-time persist failure fails the POST, not the promise.
+
+    Review finding: swallowing here quietly re-opened the "201 then gone"
+    window — a job the API confirmed but that no future process would ever
+    hear of. Nothing has run at submit time, so refusing is honest and the
+    manager holds no half-registered entry afterwards.
+    """
     store = JobStore(tmp_path)
 
     def explode(job: Job) -> None:
@@ -557,10 +564,49 @@ async def test_a_failing_store_never_fails_a_job(
     monkeypatch.setattr(store, "save", explode)
     manager = JobManager(store=store)
     try:
+        with pytest.raises(OSError, match="no space left"):
+            manager.submit(
+                SeparationConfiguration(
+                    audio_id="01AUDIO", mode_id="vocals", quality_id="balanced"
+                ),
+                _parks,
+            )
+        assert manager.list_jobs() == []
+    finally:
+        await manager.aclose()
+
+
+async def test_a_failing_store_never_fails_a_terminal_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once work ran, persistence stays a promise, never a precondition.
+
+    The store fails only *after* the successful submit-time write: a full
+    disk at completion must not turn a separation that really finished into
+    ``separation_failed``.
+    """
+    store = JobStore(tmp_path)
+    real_save = store.save
+    calls = {"count": 0}
+
+    def explode_after_submit(job: Job) -> None:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            real_save(job)
+            return
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(store, "save", explode_after_submit)
+    manager = JobManager(store=store)
+    recorder = EventRecorder()
+    manager.add_listener(recorder)
+    manager.start()
+    try:
         job = manager.submit(
             SeparationConfiguration(audio_id="01AUDIO", mode_id="vocals", quality_id="balanced"),
-            _parks,
+            instant_executor,
         )
-        assert manager.get(job.id).state is JobState.QUEUED
+        await recorder.wait_for_terminal(job.id)
+        assert manager.get(job.id).state is JobState.COMPLETED
     finally:
         await manager.aclose()

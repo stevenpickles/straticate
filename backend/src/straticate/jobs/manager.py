@@ -353,8 +353,13 @@ class JobManager:
 
         **The record is written before the job is enqueued or announced**, so a
         job the API answered ``201`` for cannot be one the next process has
-        never heard of. A store that cannot write is logged and the job runs
-        anyway (see :meth:`_persist`).
+        never heard of — and, unlike the terminal transitions, a store that
+        cannot write here **fails the submission**: nothing has run yet, the
+        entry is removed, and the caller's error path answers the client
+        honestly. Swallowing at submit would quietly re-open the exact "201
+        then gone" window this feature closes (review finding); swallowing at
+        the terminal transitions stays right, because a full disk must never
+        turn work that really completed into a failure (see :meth:`_persist`).
 
         Args:
             configuration: The requested separation configuration.
@@ -382,7 +387,11 @@ class JobManager:
             error=None,
             result=None,
         )
-        self._persist(job)
+        store = self._store
+        if store is not None:
+            # Deliberately not _persist(): submit is the one transition where
+            # a write failure is recoverable by refusing, so it propagates.
+            store.save(job)
         self._entries[job.id] = _JobEntry(job=job, executor=executor)
         self._queue.put_nowait(job.id)
         self._dispatch(
@@ -702,14 +711,17 @@ class JobManager:
     def _persist(self, job: Job) -> None:
         """Write ``job``'s durable record, if this manager has a store.
 
-        **A failing store never fails a job.** The manager's whole defensive
-        posture is that no single job can stall the queue or die half-way
-        through a terminal transition, and a full disk is exactly the moment
-        that matters: raising here would turn a separation that really did
-        complete into ``separation_failed`` (the worker's own catch-all), and
-        raising from ``submit`` would turn a resolvable request into a 500. The
-        failure is logged with its traceback and the job carries on in memory,
-        behaving precisely as it did before feature 057.
+        **A failing store never fails a *running or finished* job.** The
+        manager's whole defensive posture is that no single job can stall the
+        queue or die half-way through a terminal transition, and a full disk
+        is exactly the moment that matters: raising here would turn a
+        separation that really did complete into ``separation_failed`` (the
+        worker's own catch-all). The failure is logged with its traceback and
+        the job carries on in memory. ``submit`` is deliberately different —
+        it calls the store directly and lets a write failure refuse the
+        submission, because at that point nothing has run and a refused POST
+        is honest where an unpersisted 201 is the defect this feature exists
+        to close.
         """
         store = self._store
         if store is None:
