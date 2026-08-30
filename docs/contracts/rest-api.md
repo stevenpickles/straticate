@@ -36,6 +36,7 @@ and stem streaming (audio bytes). IDs are ULIDs.
 | GET | `/version` | `{ "version": "0.1.0" }` |
 | GET | `/system/devices` | `ComputeDevice[]` |
 | GET | `/system/storage` | `StorageReport` |
+| GET | `/system/disk-usage` | `DiskUsageReport` |
 
 `ComputeDevice`:
 
@@ -99,6 +100,63 @@ Nothing refuses an install on the strength of this report; see
 blocks. `POST /models/{id}/install` is unchanged, and an install that runs out
 of disk still fails the way it always did (`download_failed` with
 `detail.reason: "filesystem_error"`), leaving nothing behind.
+
+### Disk usage (feature 059)
+
+`GET /system/disk-usage` reports what Straticate holds under
+`Settings.data_dir` — uploads (feature 056), job records and stems, job
+exports (feature 022) — and the free/total bytes of the filesystem holding
+`data_dir`. It is read-only: nothing here deletes anything (058 is deletion,
+060 is prune).
+
+`DiskUsageReport`:
+
+```json
+{
+  "uploads": { "count": 2, "bytes": 10485760 },
+  "job_stems": { "count": 5, "bytes": 52428800 },
+  "job_exports": { "count": 1, "bytes": 3145728 },
+  "orphans": { "count": 0, "bytes": 0 },
+  "free_bytes": 2147483648,
+  "total_bytes": 512110190592
+}
+```
+
+Each `UsageBucket`'s `count` is a **file** count (an upload's original media
+plus its `audio.json` sidecar is two files; a job's record plus three stems is
+four), not a directory or "item" count.
+
+- `uploads`: files inside an audio directory the upload registry (056) still
+  recognises.
+- `job_stems`: a known job's own files — its `job.json` record and its
+  separated stems — everything in the job's directory *except* its
+  `exports/` subtree.
+- `job_exports`: built export artifacts under a known job's `exports/`
+  subtree (feature 022).
+- `orphans`: everything else — a directory whose `audio_id`/`job_id` no
+  longer has a live record (an interrupted upload, output from a run older
+  than the durable registries, or a deleted job's leftovers), and stray build
+  debris found anywhere in the swept trees: a `*.tmp` sidecar an interrupted
+  write never renamed into place, a `*.part` export an interrupted build never
+  published, or a `.build-*` staging directory a crashed archive build left
+  behind. Debris counts as orphaned even inside an otherwise-live upload or
+  job directory.
+- A job that is still **queued or running** is not an orphan: it is live from
+  the moment `POST /jobs` returns `201` (feature 057 writes the record before
+  any executor runs), so its directory is classified exactly like a completed
+  job's — just with less (or nothing) written under `stems/` yet.
+- `free_bytes`/`total_bytes` follow the same null-means-unknown doctrine as
+  `StorageReport` above, and reuse the same underlying read against
+  `data_dir` — a `data_dir` that does not exist yet (nothing has been
+  uploaded or separated) reports on its nearest existing ancestor, exactly as
+  `models_dir` does.
+- The response is always `200`. An unreadable subtree is logged and
+  undercounted rather than failing the request; unlike the free/total
+  figures, a bucket count has no "unknown" state to express — it degrades
+  toward zero, never toward an error.
+- The read is a *blocking* filesystem walk (`os.walk`/`os.stat`), so the route
+  runs it in a worker thread, the same discipline `GET /system/storage`
+  documents for `shutil.disk_usage`.
 
 ## Audio
 

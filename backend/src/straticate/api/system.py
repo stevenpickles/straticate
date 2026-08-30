@@ -1,13 +1,20 @@
-"""System endpoints: health, version, compute devices, and storage."""
+"""System endpoints: health, version, compute devices, storage, disk usage."""
 
 import asyncio
 
 from fastapi import APIRouter
 
 from straticate import __version__
-from straticate.api.audio import SettingsDep
-from straticate.schemas import ComputeDevice, HealthStatus, StorageReport, VersionInfo
-from straticate.system import DeviceDetectorDep, storage_report
+from straticate.api.audio import SettingsDep, StoreDep
+from straticate.api.results import ManagerDep
+from straticate.schemas import (
+    ComputeDevice,
+    DiskUsageReport,
+    HealthStatus,
+    StorageReport,
+    VersionInfo,
+)
+from straticate.system import DeviceDetectorDep, disk_usage_report, storage_report
 
 router = APIRouter(tags=["system"])
 
@@ -77,3 +84,51 @@ async def read_storage(settings: SettingsDep) -> StorageReport:
     spelled ``0`` here the way an unknown device memory total is.
     """
     return await asyncio.to_thread(storage_report, settings.models_dir)
+
+
+@router.get("/system/disk-usage")
+async def read_disk_usage(
+    settings: SettingsDep, store: StoreDep, manager: ManagerDep
+) -> DiskUsageReport:
+    """Report what Straticate holds under the data directory, and where.
+
+    Four buckets partition every file under ``{data_dir}/audio`` and
+    ``{data_dir}/jobs``: ``uploads`` (registered audio, feature 056),
+    ``job_stems`` (a known job's own record and stems), ``job_exports`` (its
+    built export artifacts, feature 022), and ``orphans`` (everything with
+    no live record, plus stray build debris an interrupted write or export
+    build left behind — see :mod:`straticate.system.disk_usage`). This is
+    the visibility that makes manual-only retention livable before a prune
+    endpoint (060) exists to act on it: nothing here deletes anything.
+
+    "Live" is read from the running application at request time — the audio
+    store's registry and the job manager's list, in whatever state each job
+    is currently in — so a job still queued or running is classified exactly
+    like a completed one's, never as an orphan.
+
+    ``free_bytes``/``total_bytes`` describe the filesystem holding
+    ``data_dir`` and follow the same null-means-unknown doctrine as
+    ``GET /system/storage`` (feature 040): both fields are ``null`` together
+    when the host cannot answer, and a missing ``data_dir`` (nothing has ever
+    been uploaded or separated) reports on its nearest existing ancestor
+    rather than as unknown — see :mod:`straticate.system.storage`.
+
+    **It runs in a worker thread.** ``os.walk`` and ``os.stat`` over
+    ``data_dir`` are filesystem calls with the same blocking-on-a-network-
+    mount shape ``GET /system/storage`` already offloads (see its
+    docstring), on the very directory every upload and every job also writes
+    through — so this endpoint follows the same discipline.
+
+    **Degrades rather than errors.** A ``data_dir`` that does not exist yet
+    reports all-zero buckets (nothing has ever written under it) alongside
+    the real free/total figures for its nearest existing ancestor; a subtree
+    this process cannot read is logged and simply undercounted rather than
+    failing the request — every bucket count is a plain, non-nullable
+    integer, so there is no "unknown" to express there the way there is for
+    the free/total figures. The response is always ``200``.
+    """
+    audio_ids = store.ids()
+    job_ids = [job.id for job in manager.list_jobs()]
+    return await asyncio.to_thread(
+        disk_usage_report, settings.data_dir, audio_ids=audio_ids, job_ids=job_ids
+    )

@@ -218,6 +218,18 @@ class AudioStore:
         """Return the record for ``audio_id``, or ``None`` if unknown."""
         return self._records.get(audio_id)
 
+    def ids(self) -> list[str]:
+        """Return the IDs of every currently registered upload.
+
+        A read-only view of the registry, in registration order (the
+        ``dict``'s own iteration order). Feature 059's disk-usage walker uses
+        this to tell a live upload directory from an orphan without handing
+        the store — or any other application state — to a function that is
+        otherwise a pure filesystem read; it takes the ID collection, not
+        the store.
+        """
+        return list(self._records)
+
     def delete(self, audio_id: str) -> bool:
         """Remove the record and its files; return whether it existed."""
         record = self._records.pop(audio_id, None)
