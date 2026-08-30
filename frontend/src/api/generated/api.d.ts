@@ -1318,11 +1318,11 @@ export interface components {
          *
          *     Feature 062 added the third value. 041 shipped the whole-spectrum fold and
          *     recorded the band-limited one as "the most promising unexplored option";
-         *     062 explored it on the same track against the same baselines and it is
-         *     better on every axis that was measured — a *louder* ``bass`` stem than the
-         *     full fold, more of the source's low band in it, a third of the fold's cost
-         *     to ``drums`` and ``other``, and stereo stems instead of mono ones. The
-         *     table is in ``docs/features/062-band-limited-fold.md``.
+         *     062 measured it on the same single track against the same baselines,
+         *     where it recovered at least as much ``bass`` as the full fold at a third
+         *     of the cost to ``drums`` and ``other``, with the stems coming back stereo
+         *     instead of mono. One track, not a survey — the table and its caveats are
+         *     in ``docs/features/062-band-limited-fold.md``.
          * @enum {string}
          */
         StereoHandling: "as_is" | "mono" | "mono_bass";
