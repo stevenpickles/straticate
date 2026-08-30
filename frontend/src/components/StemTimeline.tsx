@@ -748,12 +748,26 @@ export function StemTimeline({
    * Keep a moving playhead in view, and only a moving one. The position has to
    * have *changed* for this to fire, so a pan that leaves the playhead behind
    * is left alone until playback next carries it out of the window.
+   *
+   * Suppressed while the playhead is inside a set loop region (068): a window
+   * zoomed narrower than the region would otherwise page-flip forward
+   * approaching `loopEnd` and back at the wrap, twice per pass. Follow still
+   * runs for the run-up into the region and for a seek trapped past `loopEnd`
+   * (053 note 2) — the guard only narrows the gate, it never widens it, so the
+   * user's zoom/pan is never fought (051's philosophy).
    */
   const followedPosition = useRef(positionSeconds)
   useEffect(() => {
     const previous = followedPosition.current
     followedPosition.current = positionSeconds
     if (positionSeconds === previous || viewport.zoom <= 1) {
+      return
+    }
+    if (
+      loopRegion !== null &&
+      positionSeconds >= loopRegion.start &&
+      positionSeconds < loopRegion.end
+    ) {
       return
     }
     const visible = visibleSeconds(viewport)
@@ -764,7 +778,7 @@ export function StemTimeline({
       return
     }
     scrollTo(positionSeconds - visible * FOLLOW_MARGIN)
-  }, [positionSeconds, viewport, scrollTo])
+  }, [positionSeconds, viewport, scrollTo, loopRegion])
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
