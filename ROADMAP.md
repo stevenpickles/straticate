@@ -365,7 +365,7 @@ verbatim as the planning record they were.
 | 065 | Job-scoped stem session (engine hoist)       | PR OPEN | 064        | `065-stem-session` | #96 |
 | 066 | View state survives a reload                 | PLANNED | 033, 065   | `066-view-state-reload` | |
 | 067 | Lane height + fader accessibility            | PR OPEN | 050, 054   | `067-lane-height-a11y` | #94 |
-| 068 | Auto-follow suppressed inside a loop region  | PLANNED | 051, 053, 067 | `068-auto-follow-loop` | |
+| 068 | Auto-follow suppressed inside a loop region  | PR OPEN | 051, 053, 067 | `068-auto-follow-loop` | #97 |
 | 069 | Release preparation for v0.3.0               | PLANNED | 056–068    | `069-release-preparation-v0.3.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
