@@ -452,7 +452,46 @@ export interface paths {
         get: operations["get_job_api_v1_jobs__job_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Job
+         * @description Delete a terminal job wholesale: its record, stems and exports together.
+         *
+         *     This answers A1's worst case (see ``docs/features/058-job-deletion.md``):
+         *     before this endpoint existed, nothing could remove the stems and exports a
+         *     completed job produced — only the audio *upload* it was separated from
+         *     could be deleted, leaving derived output as orphaned disk usage forever.
+         *     ``manager.remove()`` drops the in-memory (and, since it is terminal, only)
+         *     entry first — refusing a non-terminal job before anything on disk is
+         *     touched — and then this handler removes the whole
+         *     ``{data_dir}/jobs/{job_id}`` directory in one ``shutil.rmtree``. Because
+         *     :func:`straticate.jobs.layout.job_output_dir` is the one place that
+         *     directory is built, and :func:`~straticate.jobs.layout.job_exports_dir`
+         *     (feature 058) is the one place exports live inside it, this single removal
+         *     reaches the record, every stem and every built export — there is no
+         *     surviving path an export could have been written to instead.
+         *
+         *     A restarted server never resurrects a deleted job: the record died with
+         *     the directory, and startup only lists what :mod:`straticate.jobs.store`
+         *     finds on disk.
+         *
+         *     **Best-effort on Windows.** A file this job's own ``export`` route just
+         *     streamed out via :class:`~fastapi.responses.FileResponse` can still be
+         *     open when this handler runs, and Windows refuses to unlink an open file.
+         *     ``shutil.rmtree(..., ignore_errors=True)`` tolerates that (and any other
+         *     per-file removal failure) rather than turning a real deletion into a
+         *     500: the job is gone from the API — ``GET`` on it is ``job_not_found`` from
+         *     this instant on — and whatever a locked handle left behind is debris a
+         *     later pruning feature (060) is responsible for sweeping, not a defect of
+         *     this endpoint. Every other supported platform removes the directory in
+         *     full.
+         *
+         *     Errors: ``job_not_found`` (404) for an unknown job, ``job_active`` (409,
+         *     with the job's current ``state`` in ``detail``) for a job that has not
+         *     reached a terminal state — cancel it and wait for the terminal event
+         *     before deleting; deleting underneath a running executor is exactly the
+         *     corruption this endpoint exists to prevent, not a case it introduces.
+         */
+        delete: operations["delete_job_api_v1_jobs__job_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2078,6 +2117,35 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["Job"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_job_api_v1_jobs__job_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

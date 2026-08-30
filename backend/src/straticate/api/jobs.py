@@ -1,4 +1,4 @@
-"""Job endpoints: create, list, fetch, and cancel separation jobs.
+"""Job endpoints: create, list, fetch, cancel, and delete separation jobs.
 
 This router is the join between the two halves of the application. Creating a
 job resolves the uploaded audio (feature 006), the model behind the requested
@@ -20,6 +20,8 @@ Two rules the handlers here obey:
   (AGENTS.md principles 1 and 6).
 """
 
+import asyncio
+import shutil
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Request
@@ -29,6 +31,7 @@ from straticate.api.models import CatalogDep
 from straticate.errors import ApplicationError
 from straticate.inference import SeparatorJobExecutor, SeparatorRegistry
 from straticate.jobs import JobManager, get_job_manager
+from straticate.jobs.layout import job_output_dir, job_record_path
 from straticate.jobs.resolution import resolve_audio, resolve_device, resolve_model
 from straticate.schemas import Job, SeparationConfiguration
 from straticate.system import DeviceDetectorDep
@@ -175,3 +178,102 @@ async def cancel_job(job_id: str, manager: ManagerDep) -> Job:
         return manager.cancel(job_id)
     except RuntimeError as exc:
         raise _shutting_down(exc) from exc
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(job_id: str, manager: ManagerDep, settings: SettingsDep) -> None:
+    """Delete a terminal job wholesale: its record, stems and exports together.
+
+    This answers A1's worst case (see ``docs/features/058-job-deletion.md``):
+    before this endpoint existed, nothing could remove the stems and exports a
+    completed job produced — only the audio *upload* it was separated from
+    could be deleted, leaving derived output as orphaned disk usage forever.
+    ``manager.remove()`` drops the in-memory (and, since it is terminal, only)
+    entry first — refusing a non-terminal job before anything on disk is
+    touched. Because :func:`straticate.jobs.layout.job_output_dir` is the one
+    place a job's directory is built, and
+    :func:`~straticate.jobs.layout.job_exports_dir` (feature 058) is the one
+    place exports live inside it, removing that whole directory reaches the
+    record, every stem and every built export — there is no second
+    path-building function anywhere that could still be pointing at a
+    survivor (barring the export race described below).
+
+    **The record is unlinked first, synchronously, and its failure aborts the
+    delete.** :mod:`straticate.jobs.store`'s module docstring invariant is
+    that a job directory is self-describing: it must never hold a record that
+    names stems which are gone, nor stems that no record mentions. A bare
+    ``shutil.rmtree(..., ignore_errors=True)`` over the whole directory can
+    violate the second half of that: it may remove every stem while failing
+    silently on a locked ``job.json``, leaving a ``completed`` record on disk
+    whose stems a restart would then serve as 404s. Unlinking
+    :func:`~straticate.jobs.layout.job_record_path` *before* the ``rmtree``
+    makes the record the thing whose removal is unconditional: if it cannot be
+    removed, ``manager.remove()``'s entry is re-seeded via
+    ``manager.restore()`` (safe — the popped job is terminal, which is the one
+    state ``restore()`` accepts) and the ``OSError`` is re-raised, so the
+    client gets an honest 500 and the job is left exactly as it was — served,
+    listed, and untouched on disk — rather than half-deleted. This all happens
+    before the first ``await`` below, so no concurrent request can ever
+    observe the job as briefly gone.
+
+    Once the record is gone, ``shutil.rmtree(..., ignore_errors=True)`` best-
+    effort removes whatever is left (stems, exports, the now-empty directory)
+    in a worker thread — a 1.17 GB job directory measured a 175 ms event-loop
+    stall run inline, which every other connected client would feel. Offloading
+    it to :func:`asyncio.to_thread` is safe *because* ``manager.remove()``
+    already popped the entry synchronously, before this or any other await: no
+    other request can submit, cancel or re-delete this job id while the thread
+    runs, so nothing races the removal except, as ever, a download already
+    holding a file open.
+
+    A restarted server never resurrects a deleted job: the record died first,
+    synchronously, and startup only lists what :mod:`straticate.jobs.store`
+    finds on disk.
+
+    **Best-effort on Windows** for everything past the record. A stem or
+    export file this job's own ``export`` route just streamed out via
+    :class:`~fastapi.responses.FileResponse` can still be open when this
+    handler runs, and Windows refuses to unlink an open file (POSIX does not:
+    an unlink there detaches the directory entry regardless of open handles).
+    ``ignore_errors=True`` tolerates that rather than turning a real deletion
+    into a 500: the job is gone from the API — ``GET`` on it is
+    ``job_not_found`` from the record's removal on — and whatever a locked
+    handle left behind is debris a later pruning feature (060) is responsible
+    for sweeping, not a defect of this endpoint. Every other supported
+    platform removes the directory in full.
+
+    **Known limitation: an export build racing this delete can leave an empty
+    orphan directory.** ``build_artifact`` (feature 022) calls
+    ``artifact.parent.mkdir(parents=True, exist_ok=True)`` before it writes; if
+    that runs after this handler's ``rmtree`` has already removed the job
+    directory, it recreates an empty ``exports/`` (and job) directory that
+    nothing then populates, because the stems it needs to transcode are gone.
+    This is not a resurrection — the record is already gone by the time the
+    ``rmtree`` even starts, so the job stays deleted from every endpoint's
+    point of view — it is the same debris category as a locked file, left for
+    060 to prune, and the racing export answers its own request with
+    ``export_failed`` rather than serving something stale.
+
+    Errors: ``job_not_found`` (404) for an unknown job, ``job_active`` (409,
+    with the job's current ``state`` in ``detail``) for a job that has not
+    reached a terminal state — cancel it and wait for the terminal event
+    before deleting; deleting underneath a running executor is exactly the
+    corruption this endpoint exists to prevent, not a case it introduces.
+    """
+    job = manager.remove(job_id)
+    try:
+        job_record_path(settings.data_dir, job.id).unlink(missing_ok=True)
+    except OSError:
+        # The entry is already popped, and it is terminal (remove() only ever
+        # succeeds for a terminal job), so restore() re-seeds it cleanly. The
+        # client sees the honest failure instead of a job whose record is gone
+        # but whose entry, stems and exports are not.
+        manager.restore([job])
+        raise
+    # manager.remove() popped the entry synchronously above, before this first
+    # await, so no concurrent request can submit, cancel or re-delete this job
+    # id while the thread below runs — offloading the (possibly large) tree
+    # removal is safe.
+    await asyncio.to_thread(
+        shutil.rmtree, job_output_dir(settings.data_dir, job.id), ignore_errors=True
+    )

@@ -32,6 +32,17 @@ JOBS_DIRECTORY = "jobs"
 JOB_RECORD_FILENAME = "job.json"
 """Name of a job's durable record inside its own directory (feature 057)."""
 
+EXPORTS_DIRECTORY = "exports"
+"""Name of the export-artifact directory inside a job's own directory (feature 022).
+
+Defined here rather than in :mod:`straticate.api.export` (which built every
+export path itself before feature 058) so that a job's directory tree has
+exactly one author. That is what makes the feature 058 guarantee possible: a
+whole-job delete that removes ``{data_dir}/jobs/{job_id}`` in one ``rmtree``
+takes the exports with it by construction — there is no second path-building
+function anywhere that could still be pointing at a survivor.
+"""
+
 
 def jobs_root(data_dir: Path) -> Path:
     """Return ``{data_dir}/jobs`` — the directory holding every job's outputs."""
@@ -55,9 +66,23 @@ def job_record_path(data_dir: Path, job_id: str) -> Path:
     return job_output_dir(data_dir, job_id) / JOB_RECORD_FILENAME
 
 
+def job_exports_dir(data_dir: Path, job_id: str) -> Path:
+    """Return ``{data_dir}/jobs/{job_id}/exports`` — this job's built export artifacts.
+
+    The sole authority on where a job's exports live (feature 058); see
+    :data:`EXPORTS_DIRECTORY`. :mod:`straticate.api.export` reads and writes
+    through this function rather than building the path itself, and
+    ``DELETE /jobs/{job_id}`` never has to know exports exist at all — it
+    removes the job's whole directory, this one included.
+    """
+    return job_output_dir(data_dir, job_id) / EXPORTS_DIRECTORY
+
+
 __all__ = [
+    "EXPORTS_DIRECTORY",
     "JOBS_DIRECTORY",
     "JOB_RECORD_FILENAME",
+    "job_exports_dir",
     "job_output_dir",
     "job_record_path",
     "jobs_root",
