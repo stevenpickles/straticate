@@ -9,6 +9,123 @@ Model weights are versioned separately from the application and are never
 bundled with it; the *Licensing* section of each release says what shipped in
 the catalog.
 
+## [0.3.0] — 2026-08-30
+
+Durability, measured separation quality, and a round of timeline hardening.
+Everything from [the 0.2.0 notes](https://github.com/stevenpickles/straticate/blob/v0.2.0/CHANGELOG.md)
+still applies; this section covers what changed.
+
+### What's new
+
+**Job records and uploads survive a restart, and disk usage is visible and
+reclaimable.** A completed job's record, result, stems and exports are now
+reachable through the API in the next process, and a previous upload can
+still be found and re-separated after a restart. A job that was queued or
+running when the server stopped comes back `failed`, with the error code
+`job_interrupted`, rather than vanishing or being silently re-queued — and a
+failed model install now survives a restart the same way, instead of quietly
+reporting the model available again. Three things follow from that:
+`DELETE /jobs/{id}` removes a finished job's record, stems and exports in one
+call; `GET /system/disk-usage` reports what's on disk under four headings —
+uploads, job stems, job exports, orphans — alongside free and total space for
+the drive; and `POST /system/prune` reclaims space in three opt-in classes
+(export caches, orphaned files, old finished jobs) that never touches a job
+that is still queued or running.
+
+**A new stereo-handling option, `mono_bass`, recovers the bass stem on
+wide-stereo mixes without folding the whole track to mono.** Where **Fold to
+mono** (0.1.0) recovers a near-silent `bass` stem by discarding every stem's
+stereo image, `mono_bass` folds only the material below 500 Hz — on the one
+mix measured, it recovers slightly more of the source's low end than a full
+fold (19.4% against 16.0%) at about a third of the cost to `drums` and
+`other` (about 1 dB against about 3 dB), and every stem comes back in
+stereo. See *What it cannot do* for the caveat this measurement carries.
+
+**Straticate can now measure how independent an upload's left and right
+channels are.** `GET /audio/{id}/analysis` reports a correlation figure and
+whether a file looks wide enough to be a candidate for **Fold to mono** or
+`mono_bass`. The in-app note that would point this out to a user at the
+moment it matters is built and tested, but is not shown to anyone yet — see
+*What it cannot do*.
+
+**The Inspect timeline survived a round of hardening.** The audio engine,
+the playhead, the loop region and the zoom/scroll window now belong to the
+job you're inspecting rather than to the Inspect screen itself: leaving
+Inspect and coming back restores exactly where you left off instead of
+rebuilding the engine from 0:00 and re-downloading every stem, and a page
+reload now restores the playhead, loop region and zoom/scroll window once
+the stems finish loading again. Lane headers no longer clip their own
+content at larger browser font sizes, and every per-stem level fader's
+pointer target now reaches the WCAG 2.2 24 px minimum at every size tested.
+Auto-follow no longer page-flips the timeline twice per pass when the
+visible window is zoomed narrower than an active loop region.
+
+### Fixed
+
+**A failed stem-audio download is now recoverable in place.** 0.2.0 fixed a
+failed *result* fetch; a stem whose audio itself failed to download still
+left the Inspect step showing unhelpful text with no working control. There
+is now a "Try again" button for that case too, and recovering a stem never
+disturbs the stems that already loaded — their buffers, gain nodes and
+playback keep running untouched.
+
+### What it cannot do
+
+Carried forward from what shipped in 0.2.0, plus what this release ships
+with:
+
+- **An interrupted job does not resume.** Job records now survive a
+  restart, so a *finished* separation and its stems are still there
+  afterward — but a job that was queued or actively running when the server
+  stopped comes back `failed` (`job_interrupted`) rather than being
+  re-queued or resumed. Start it again when you want it.
+- **Nothing prunes automatically.** `POST /system/prune` reclaims space, but
+  only when something calls it: there is no retention policy, no schedule
+  and no background sweep. A file held open by an in-progress download can
+  also survive a delete or a prune as debris on Windows, until whatever held
+  it closes and a later prune sweeps it.
+- **`mono_bass` is measured on one track, the same wide-stereo mix used to
+  measure 0.1.0's "Fold to mono."** It is the right track for the
+  comparison — it is the failure case — but it is not a survey, and the
+  500 Hz crossover is fixed for the filter measured, not user-adjustable.
+  `bass` is recovered, not cleanly separated: it still holds only 19.4% of
+  the source's low-frequency energy, and `other` still holds 37.5% of it.
+- **The wide-stereo suggestion is built but held disabled.** `GET
+  /audio/{id}/analysis` serves a real measurement, but the note that would
+  tell a user their recording is a candidate for folding is switched off
+  pending a false-positive measurement on ordinary, user-supplied tracks —
+  everything the threshold rests on so far is one record. Nothing about the
+  measurement is ever applied automatically, disabled or not.
+- **The rest of 0.2.0's caveats still stand, unaffected by this release**:
+  `vocals` mode has no fast tier and runs at about 0.3× real time on a CPU
+  (the licence gate on a fast model is unchanged — see *Licensing*); Demucs
+  loses the `bass` stem on wide-separation stereo mixes without **Fold to
+  mono** or `mono_bass`; the Demucs weights are research-use-only; a 24-bit
+  or 32-bit-float export re-encodes 16-bit audio rather than recovering
+  detail; there is still one job at a time with no history; model downloads
+  are not resumable and installed weights are not re-verified after
+  install; exports are still buffered in the browser tab with no progress
+  indicator and cannot be cancelled mid-download; cancelling a running
+  separation still takes effect at the next chunk boundary, not instantly;
+  and there is still no model *update* path (remove and install again).
+  Playhead, loop region and zoom state no longer reset on leaving Inspect or
+  reloading the page — the one 0.2.0 caveat this release does resolve.
+
+### Licensing
+
+Unchanged from 0.1.0 and 0.2.0 — read the *Licensing* section of
+[the 0.1.0 notes](https://github.com/stevenpickles/straticate/blob/v0.1.0/CHANGELOG.md)
+if you have not. Nothing about the model catalog, its licences or its
+weights changed in this release.
+
+The reopen criterion for a fast `vocals` tier (feature 027 — a weights
+licence stated by a party with standing to grant it) was re-checked on
+2026-08-30 and still does not hold: the upstream licensing question
+(`Anjok07/ultimatevocalremovergui` issue #2341) remains open and
+unanswered by a maintainer, and that repository's `LICENSE` file still
+404s on its default branch (issue #1798, also still open). No new
+information since 027's 2026-08-25 investigation.
+
 ## [0.2.0] — 2026-08-29
 
 The Inspect step becomes an editor's timeline. Everything from
@@ -358,3 +475,4 @@ models so.
 
 [0.1.0]: https://github.com/stevenpickles/straticate/releases/tag/v0.1.0
 [0.2.0]: https://github.com/stevenpickles/straticate/releases/tag/v0.2.0
+[0.3.0]: https://github.com/stevenpickles/straticate/releases/tag/v0.3.0
