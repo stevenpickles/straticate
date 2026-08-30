@@ -16,6 +16,9 @@ Public surface (consumed by features 013/014/015):
 - :func:`resolve_audio` / :func:`resolve_model` / :func:`resolve_device` — the
   pure resolvers that turn a create-job request's IDs into the audio file,
   catalog model and compute device the job runs with (feature 015).
+- :func:`detach_job` / :func:`remove_job` / :func:`remove_job_directory` —
+  the one implementation of "delete a job" (record first, then the tree),
+  shared by ``DELETE /jobs/{job_id}`` (058) and ``POST /system/prune`` (060).
 - :class:`JobStore` — the durable ``job.json`` records that make a completed
   job (and its stems) reachable after a restart, plus
   :data:`JOB_INTERRUPTED_CODE`, the error a job queued or running at shutdown
@@ -40,6 +43,7 @@ from straticate.jobs.manager import (
     JobManager,
     get_job_manager,
 )
+from straticate.jobs.removal import detach_job, remove_job, remove_job_directory
 from straticate.jobs.resolution import resolve_audio, resolve_device, resolve_model
 from straticate.jobs.state import InvalidJobTransition, assert_transition
 from straticate.jobs.store import (
@@ -67,9 +71,12 @@ __all__ = [
     "JobManager",
     "JobStore",
     "assert_transition",
+    "detach_job",
     "get_event_hub",
     "get_job_manager",
     "interrupted_record",
+    "remove_job",
+    "remove_job_directory",
     "resolve_audio",
     "resolve_device",
     "resolve_model",
