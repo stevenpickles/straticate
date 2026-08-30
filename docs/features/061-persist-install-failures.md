@@ -179,6 +179,18 @@ then passed, including all five new tests.
 
 ## Known limitations
 
-- None. This feature's sidecar is the only thing it writes under
-  `models_dir`; resumable downloads, re-verification, and update-in-place
-  remain deliberately out of scope for v0.4.0, as before.
+- **An install *interrupted* by a restart still reports `available`.** A
+  process killed mid-download writes no failure sidecar (nothing failed — it
+  was interrupted), leaves its `.part` behind, and the model is offered again
+  on the next boot. Same symptom as the bug this feature fixes, different
+  cause, pre-existing, and untouched here: interrupted-download recovery
+  belongs to the resumable-downloads lifecycle deferred to v0.4.0.
+- **`test_a_new_attempt_clears_the_sidecar_before_downloading` has a narrow
+  theoretical flake** (review finding): the cleared-before-download assertion
+  holds because the retry's loopback download takes more loop turns than the
+  ASGI round-trip. It cannot false-pass, only rarely false-fail; pinning the
+  retry open with a blocked artifact would make it unconditional if it ever
+  flakes in CI.
+- The sidecar is the only thing this feature writes under `models_dir`;
+  resumable downloads, re-verification, and update-in-place remain
+  deliberately out of scope for v0.4.0, as before.

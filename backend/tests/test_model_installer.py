@@ -993,6 +993,31 @@ async def test_a_corrupt_sidecar_boots_clean_with_a_warning(
     assert any("corrupt" in record.message for record in caplog.records)
 
 
+async def test_a_non_utf8_sidecar_boots_clean_with_a_warning(
+    build: Builder, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sidecar with a non-UTF-8 garbage tail must not crash startup.
+
+    This is the crash window the no-``fsync`` trade explicitly accepts: a
+    delayed-allocation filesystem can replay the rename without the data and
+    leave arbitrary bytes. ``UnicodeDecodeError`` is a ``ValueError``, not an
+    ``OSError`` — read as text, it would escape the sweep and take the whole
+    backend down at boot, for every model at once (review finding).
+    """
+    harness = await build.start([build.downloadable(blob(512))])
+    sidecar = install_failure_path(harness.models_dir, MODEL_ID)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_bytes(b'{"code": "download_failed", "message": "\xff\xfe\x80"}')
+
+    caplog.set_level(logging.WARNING, logger="straticate.models.installer")
+    restarted = await build.restart(harness)
+    after = await restarted.installation()
+
+    assert after["state"] == "available"
+    assert after["error"] is None
+    assert any("corrupt" in record.message for record in caplog.records)
+
+
 # -- cancellation ------------------------------------------------------------
 
 

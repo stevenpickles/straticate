@@ -83,17 +83,21 @@ being offered again. Every write to ``self._failures`` is now mirrored to a
 sidecar, :func:`~straticate.models.layout.install_failure_path`, right beside
 ``weights.bin``:
 
-- **Recorded** (:meth:`ModelInstaller._run`) → the sidecar is written,
-  atomically, in the same ``.part``-then-:func:`os.replace` shape the weights
-  themselves use, minus the ``fsync``. That omission is deliberate: unlike
+- **Recorded** (:meth:`ModelInstaller._run`) → the sidecar is written
+  atomically — a ``.tmp`` sibling then :func:`os.replace`, the same
+  publish-by-rename shape the weights use (their temporary is the ``.part``;
+  this one is deliberately not, so nothing ever mistakes it for a partial
+  download) — minus the ``fsync``. That omission is deliberate: unlike
   weights, a lost sidecar write to a very recent power cut is not silently
   wrong forever, it is merely *forgotten* — the next boot reports ``available``
   instead of ``failed``, which is the pre-061 behaviour, not data corruption.
   Paying a synchronous ``fsync`` on the event loop for every failed install to
   protect against that narrow a window was judged not worth it.
-- **Cleared** (:meth:`ModelInstaller.start_install`, on success, and
-  :meth:`ModelInstaller.remove`) → the sidecar is unlinked, same as
-  ``self._failures.pop(...)``.
+- **Cleared** → two unlink paths: :meth:`ModelInstaller.start_install`
+  removes it before a new attempt, and :meth:`ModelInstaller.remove` takes it
+  with the model directory's ``rmtree``. Success needs no clear of its own —
+  ``start_install`` already ran first, so the sidecar is gone before a
+  download that could succeed ever begins.
 - **Loaded** (:meth:`ModelInstaller.__init__`) → for every catalogued model,
   the sidecar is read once at construction. Weights already installed beats a
   stale sidecar (a later attempt must have succeeded after a crash lost the
@@ -767,7 +771,12 @@ def _write_failure_sidecar(models_dir: Path, model_id: str, failure: ErrorInfo) 
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp.write_text(failure.model_dump_json(), encoding="utf-8")
         os.replace(tmp, path)
-    except OSError:
+    except Exception:
+        # Broader than OSError on purpose: this runs inside ``_run``'s own
+        # except blocks, where an escaping serialization error would kill the
+        # install task with an unretrieved exception — the one thing ``_run``
+        # promises never happens. The in-memory failure is already recorded,
+        # so ``describe`` still reports ``failed`` either way.
         logger.warning(
             "Could not persist the install failure for model %r", model_id, exc_info=True
         )
@@ -782,18 +791,24 @@ def _read_failure_sidecar(models_dir: Path, model_id: str) -> ErrorInfo | None:
     """Read ``model_id``'s persisted failure, or ``None`` if absent or unusable.
 
     A missing file is the ordinary case (most models never failed) and is not
-    logged. A file that exists but will not parse — truncated by the same
-    crash window :func:`_write_failure_sidecar` accepts, or hand-edited — is
-    logged as a warning and treated exactly like a missing one; it is **not**
-    deleted here (:class:`ModelInstaller._restore_failures` runs before
-    anything else touches ``models_dir``, and deleting during startup reads
-    would make a read-only inspection of the directory mutate it). The next
-    install attempt or success for the model clears it, the same path every
-    other sidecar clear already goes through.
+    logged. A file that exists but will not parse — truncated or left with a
+    garbage tail by the same crash window :func:`_write_failure_sidecar`
+    accepts, or hand-edited — is logged as a warning and treated exactly like
+    a missing one; it is **not** deleted here. Startup does perform one
+    mutation elsewhere (``_restore_failures`` removes a sidecar the weights'
+    presence proves stale), but a *corrupt* file is left for the next install
+    attempt to clear through the ordinary path: an unparseable record is the
+    one artifact worth leaving on disk for a human to inspect.
     """
     path = install_failure_path(models_dir, model_id)
     try:
-        raw = path.read_text(encoding="utf-8")
+        # Bytes, not text: the crash window this reader accepts can leave a
+        # non-UTF-8 garbage tail, and ``read_text`` would raise
+        # ``UnicodeDecodeError`` (a ``ValueError``, not an ``OSError``) out of
+        # startup for every model at once. ``model_validate_json`` accepts
+        # bytes and reports invalid UTF-8 as the same ``ValidationError`` the
+        # corrupt branch below already absorbs.
+        raw = path.read_bytes()
     except FileNotFoundError:
         return None
     except OSError:
