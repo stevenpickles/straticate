@@ -4,6 +4,7 @@ import { DiskSpaceProvider } from './state/diskSpace'
 import { JobStateProvider } from './state/jobState'
 import { ModelRevisionProvider } from './state/modelRevision'
 import { SessionGate } from './state/SessionGate'
+import { StemSessionProvider } from './state/stemSession'
 import { Header } from './components/Header'
 import { ModelLibrary } from './components/ModelLibrary'
 import { Workspace } from './components/Workspace'
@@ -17,6 +18,13 @@ import { JobEventBridge } from './ws/JobEventBridge'
  * opens the job event socket once for the whole session (rather than only
  * while the `separate` phase is on screen) and resyncs the tracked job over
  * REST on every (re)connect.
+ *
+ * {@link StemSessionProvider} (feature 065) is the same shape of decision one
+ * concern over: the tracked job's separation result, its audio engine and its
+ * timeline window live here, above every phase, so leaving the Inspect step
+ * does not dispose the Web Audio graph or re-download the stems. It is mounted
+ * beside the bridge because both are session-level rather than phase-level;
+ * only the tracked job changing tears the playback session down.
  *
  * {@link SessionGate} rehydrates the workflow from the identifiers the last
  * page kept in `sessionStorage` (feature 033) and holds the workspace back
@@ -62,42 +70,44 @@ export default function App() {
   return (
     <AppStateProvider>
       <JobStateProvider>
-        <DiskSpaceProvider>
-          <ModelRevisionProvider revision={modelRevision}>
-            <JobEventBridge />
-            <div className="app">
-              <Header
-                ref={libraryToggleRef}
-                libraryOpen={libraryOpen}
-                onToggleLibrary={() => {
-                  if (libraryOpen) {
-                    closeLibrary()
-                  } else {
-                    setLibraryOpen(true)
-                  }
-                }}
-              />
-              <div className="app-workflow" hidden={libraryOpen}>
-                <SessionGate>
-                  <Workspace />
-                </SessionGate>
-              </div>
-              {libraryOpen && (
-                <ModelLibrary
-                  onClose={() => {
-                    // Focus first, while the button that asked to close is still
-                    // mounted: a keyboard user who pressed "Back to workflow"
-                    // has conceptually returned to the control they came in
-                    // through, and dropping focus on `<body>` would restart
-                    // their next Tab at the top of the document.
-                    libraryToggleRef.current?.focus()
-                    closeLibrary()
+        <StemSessionProvider>
+          <DiskSpaceProvider>
+            <ModelRevisionProvider revision={modelRevision}>
+              <JobEventBridge />
+              <div className="app">
+                <Header
+                  ref={libraryToggleRef}
+                  libraryOpen={libraryOpen}
+                  onToggleLibrary={() => {
+                    if (libraryOpen) {
+                      closeLibrary()
+                    } else {
+                      setLibraryOpen(true)
+                    }
                   }}
                 />
-              )}
-            </div>
-          </ModelRevisionProvider>
-        </DiskSpaceProvider>
+                <div className="app-workflow" hidden={libraryOpen}>
+                  <SessionGate>
+                    <Workspace />
+                  </SessionGate>
+                </div>
+                {libraryOpen && (
+                  <ModelLibrary
+                    onClose={() => {
+                      // Focus first, while the button that asked to close is still
+                      // mounted: a keyboard user who pressed "Back to workflow"
+                      // has conceptually returned to the control they came in
+                      // through, and dropping focus on `<body>` would restart
+                      // their next Tab at the top of the document.
+                      libraryToggleRef.current?.focus()
+                      closeLibrary()
+                    }}
+                  />
+                )}
+              </div>
+            </ModelRevisionProvider>
+          </DiskSpaceProvider>
+        </StemSessionProvider>
       </JobStateProvider>
     </AppStateProvider>
   )

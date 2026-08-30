@@ -19,6 +19,7 @@ import {
   sampleRuntimeMetrics,
   sampleSeparationModes,
 } from '../test/fixtures'
+import { StemSessionProvider } from '../state/stemSession'
 import { FakeAudioContext } from '../test/fakeAudioContext'
 
 function stubModesFetch() {
@@ -46,7 +47,14 @@ function renderWorkspace(
   return render(
     <AppStateProvider initialState={initialState}>
       <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
-        <Workspace />
+        {/*
+          The stem player is a *view* of the tracked job's session (feature
+          065); App.tsx mounts the provider beside the job event bridge, so a
+          test that renders the workspace mounts it too.
+        */}
+        <StemSessionProvider>
+          <Workspace />
+        </StemSessionProvider>
       </JobStateProvider>
     </AppStateProvider>,
   )

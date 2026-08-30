@@ -6,40 +6,13 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from 'react'
-import { ApiError } from '../api/client'
-import { getSeparationResult, stemUrl } from '../api/stems'
-import type { SeparationResult } from '../api/types'
-import {
-  createStemAudioEngine,
-  type StemEngineSnapshot,
-  type StemPlayerEngine,
-} from '../audio/engine'
+import type { StemEngineSnapshot } from '../audio/engine'
 import { formatDuration } from '../format'
 import { useAppDispatch } from '../state/appState'
 import { useJobDispatch, useJobState } from '../state/jobState'
+import { errorInfo, useStemSession, type ErrorInfo } from '../state/stemSession'
 import { StemTimeline, type StemTimelineStem } from './StemTimeline'
 import './StemPlayer.css'
-
-/** Envelope-shaped view of any rejection. */
-interface ErrorInfo {
-  readonly code: string
-  readonly message: string
-  readonly detail: unknown
-}
-
-/** Fallback for a rejection that is not an {@link ApiError}. */
-const UNKNOWN_ERROR: ErrorInfo = {
-  code: 'unknown_error',
-  message: 'Something went wrong. Please try again.',
-  detail: undefined,
-}
-
-/** State of the `GET /jobs/{id}/result` fetch. */
-type ResultState =
-  | { readonly status: 'idle' }
-  | { readonly status: 'loading' }
-  | { readonly status: 'loaded'; readonly result: SeparationResult }
-  | { readonly status: 'error'; readonly error: ErrorInfo }
 
 /** Snapshot of an engine that does not exist yet. */
 const EMPTY_SNAPSHOT: StemEngineSnapshot = {
@@ -57,13 +30,6 @@ const subscribeToNothing = () => () => {
 }
 
 const emptySnapshot = () => EMPTY_SNAPSHOT
-
-/** Envelope-shaped `{code, message, detail}` for any rejection reason. */
-function errorInfo(reason: unknown): ErrorInfo {
-  return reason instanceof ApiError
-    ? { code: reason.code, message: reason.message, detail: reason.detail }
-    : UNKNOWN_ERROR
-}
 
 /**
  * The job state a `result_not_available` envelope carries in its `detail`,
@@ -112,19 +78,17 @@ function explainError(error: ErrorInfo): string {
   }
 }
 
-/** Props for {@link StemPlayer}. */
-export interface StemPlayerProps {
-  /**
-   * Builds the playback engine. Defaults to the real Web Audio engine;
-   * tests inject a fake. Must be stable across renders — a new function
-   * identity tears the engine down and rebuilds it.
-   */
-  createEngine?: () => StemPlayerEngine
-}
-
 /**
  * The `inspect` step of the workflow: listen to a completed job's separated
  * stems.
+ *
+ * **It is a view of a session, not the owner of one** (feature 065). The
+ * result fetch, the engine and the timeline window belong to
+ * `StemSessionProvider`, whose lifetime is the tracked job's; this component
+ * opens that session on mount and reads it. Unmounting the player therefore
+ * costs nothing — no disposal, no re-download, no lost playhead — and audio
+ * that is playing carries on, exactly as it already did behind the model
+ * library. Only the job changing takes the session down.
  *
  * Every stem lane comes from `SeparationResult.stems` — a two-stem and a
  * four-stem job render through the same code, and no stem name or count
@@ -159,24 +123,38 @@ export interface StemPlayerProps {
  * separation"), because the progress panel that offers the same control is
  * mounted only for `separate` — see the handler for why that matters.
  *
- * Must be rendered under an `AppStateProvider` and a `JobStateProvider`.
+ * Must be rendered under an `AppStateProvider`, a `JobStateProvider` and a
+ * `StemSessionProvider`.
  */
-export function StemPlayer({
-  createEngine = createStemAudioEngine,
-}: StemPlayerProps = {}) {
+export function StemPlayer() {
   const { job } = useJobState()
   const jobDispatch = useJobDispatch()
   const appDispatch = useAppDispatch()
   const jobId = job?.id ?? null
 
-  const [result, setResult] = useState<ResultState>({ status: 'idle' })
-  const [engine, setEngine] = useState<StemPlayerEngine | null>(null)
-  const [currentTime, setCurrentTime] = useState(0)
+  const {
+    result,
+    engine,
+    windowStore,
+    openSession,
+    retryResult: refetchResult,
+  } = useStemSession()
 
-  // Bumped by the "Try again" control in the error state, which is the only
-  // thing that ever changes it. Widening the effect's dependencies on it is
-  // what turns that click into a genuine refetch of the same job.
-  const [attempt, setAttempt] = useState(0)
+  // Opening the session is what starts the result fetch and, in time, the
+  // stem downloads — so a job the user never opens costs nothing. `openSession`
+  // changes identity with the tracked job, which is what re-opens the session
+  // when the job changes while this view stays mounted.
+  useEffect(() => {
+    openSession()
+  }, [openSession])
+
+  // Seeded from the engine, not from zero: re-entering the player lands on the
+  // playhead the session was left at rather than snapping to the start for a
+  // frame. On a first mount there is no engine yet and the effect below fills
+  // it in as soon as there is one.
+  const [currentTime, setCurrentTime] = useState(
+    () => engine?.currentTime() ?? 0,
+  )
 
   /**
    * The player region itself, so a retry can put focus somewhere meaningful
@@ -184,54 +162,6 @@ export function StemPlayer({
    * drop to `<body>` as an accepted trade-off; this is that handoff).
    */
   const playerRef = useRef<HTMLElement>(null)
-
-  // The result is fetched rather than read off `job.result`: the REST route
-  // is the contract's source of truth, and it is the only thing that can
-  // tell us *why* there is nothing to play (021's 409 `detail.state`).
-  useEffect(() => {
-    if (jobId === null) {
-      setResult({ status: 'idle' })
-      return
-    }
-    let current = true
-    setResult({ status: 'loading' })
-    getSeparationResult(jobId)
-      .then((fetched) => {
-        if (current) {
-          setResult({ status: 'loaded', result: fetched })
-        }
-      })
-      .catch((reason: unknown) => {
-        if (current) {
-          setResult({ status: 'error', error: errorInfo(reason) })
-        }
-      })
-    return () => {
-      current = false
-    }
-  }, [jobId, attempt])
-
-  // One engine per loaded result, disposed when the result or the job
-  // changes and on unmount: sources stopped, nodes disconnected, context
-  // closed.
-  useEffect(() => {
-    if (jobId === null || result.status !== 'loaded') {
-      return
-    }
-    const instance = createEngine()
-    setEngine(instance)
-    setCurrentTime(0)
-    void instance.load(
-      result.result.stems.map((stem) => ({
-        name: stem.name,
-        url: stemUrl(jobId, stem.name),
-      })),
-    )
-    return () => {
-      setEngine(null)
-      instance.dispose()
-    }
-  }, [jobId, result, createEngine])
 
   const snapshot = useSyncExternalStore(
     engine?.subscribe ?? subscribeToNothing,
@@ -421,10 +351,11 @@ export function StemPlayer({
   // The remedy for every shape of result-fetch failure: a 409
   // `result_not_available` while the job is still separating resolves once
   // it finishes, and a dropped request is, definitionally, worth retrying.
+  // The refetch itself is the session's, because the result is.
   const retryResult = useCallback(() => {
     keepFocusInPlayer()
-    setAttempt((current) => current + 1)
-  }, [keepFocusInPlayer])
+    refetchResult()
+  }, [keepFocusInPlayer, refetchResult])
 
   /**
    * The remedy for a failed **stem-audio** download, which is a different
@@ -567,6 +498,7 @@ export function StemPlayer({
           positionSeconds={position}
           ready={ready}
           engine={engine}
+          windowStore={windowStore}
           onScrubStart={handleScrubStart}
           onScrub={handleScrub}
           onScrubCancel={cancelScrub}

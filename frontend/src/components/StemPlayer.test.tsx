@@ -16,6 +16,7 @@ import {
   useJobState,
   type JobStateValue,
 } from '../state/jobState'
+import { StemSessionProvider } from '../state/stemSession'
 import type { Job, SeparationResult, Stem } from '../api/types'
 import {
   createStemAudioEngine,
@@ -525,6 +526,11 @@ function inspectingState(overrides: Partial<AppState> = {}): AppState {
   }
 }
 
+/**
+ * The player under the session that owns its engine and its result (feature
+ * 065). The engine injection moved up with them: the player takes no factory
+ * any more, so a test hands its `FakeEngine` to the provider instead.
+ */
 function renderPlayer(
   engine: StemPlayerEngine,
   jobState: Partial<JobStateValue> = { job: completedJob },
@@ -534,8 +540,10 @@ function renderPlayer(
   return render(
     <AppStateProvider initialState={appState}>
       <JobStateProvider initialState={{ ...initialJobState, ...jobState }}>
-        <StemPlayer createEngine={createEngine} />
-        <WorkflowState />
+        <StemSessionProvider createEngine={createEngine}>
+          <StemPlayer />
+          <WorkflowState />
+        </StemSessionProvider>
       </JobStateProvider>
     </AppStateProvider>,
   )
@@ -961,13 +969,16 @@ describe('StemPlayer result-fetch retry (feature 048)', () => {
       )
     }
 
+    const engine = new FakeEngine()
     render(
       <AppStateProvider initialState={inspectingState()}>
         <JobStateProvider
           initialState={{ ...initialJobState, job: completedJob }}
         >
-          <StemPlayer createEngine={() => new FakeEngine()} />
-          <Retracker job={completedJob} />
+          <StemSessionProvider createEngine={() => engine}>
+            <StemPlayer />
+            <Retracker job={completedJob} />
+          </StemSessionProvider>
         </JobStateProvider>
       </AppStateProvider>,
     )
@@ -2065,7 +2076,36 @@ describe('StemPlayer with a single mono stem', () => {
 })
 
 describe('StemPlayer cleanup', () => {
-  it('disposes the engine on unmount', async () => {
+  it('keeps the session alive when only the player unmounts', async () => {
+    // The feature-065 inversion, pinned where the old dispose-on-unmount
+    // test used to sit (review finding: the carried-over tests silently
+    // became provider-unmount tests). Removing just <StemPlayer /> while
+    // the provider stays mounted must dispose nothing.
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    const engine = new FakeEngine()
+    const createEngine = () => engine
+    const tree = (withPlayer: boolean) => (
+      <AppStateProvider initialState={inspectingState()}>
+        <JobStateProvider
+          initialState={{ ...initialJobState, job: completedJob }}
+        >
+          <StemSessionProvider createEngine={createEngine}>
+            {withPlayer ? <StemPlayer /> : null}
+          </StemSessionProvider>
+        </JobStateProvider>
+      </AppStateProvider>
+    )
+    const view = render(tree(true))
+    await screen.findByRole('button', { name: 'Mute vocals' })
+
+    view.rerender(tree(false))
+
+    expect(engine.disposeCount).toBe(0)
+  })
+
+  it('disposes the engine when the whole tree goes away', async () => {
+    // Provider unmount IS a dispose trigger (the session's own table); the
+    // deeper matrix lives in stemSession.test.tsx.
     stubResultFetch(jsonResponse(resultOver(twoStemNames)))
     const engine = new FakeEngine()
     const view = renderPlayer(engine)
@@ -2076,7 +2116,7 @@ describe('StemPlayer cleanup', () => {
     expect(engine.disposeCount).toBe(1)
   })
 
-  it('stops the sources and closes the context on unmount', async () => {
+  it('stops the sources and closes the context when the session ends', async () => {
     const context = new FakeAudioContext()
     const engine = createStemAudioEngine({
       createContext: () => context,
