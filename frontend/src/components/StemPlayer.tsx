@@ -178,7 +178,7 @@ export function StemPlayer() {
   // engine reaches `ready`, with no gesture on this component to have called
   // `setCurrentTime` on the way. That restore lands before this effect's next
   // run — `engine.seek()` is called synchronously from the same snapshot
-  // notification that flips `status`, and this effect only runs after —  so
+  // notification that flips `status`, and this effect only runs after — so
   // re-reading the clock on that transition is what picks it up. Reading it
   // on every other `status` change is free: `engine.currentTime()` has not
   // moved since the last read, `setCurrentTime` bails out on the same value,

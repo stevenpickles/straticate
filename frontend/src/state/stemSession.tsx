@@ -79,10 +79,29 @@
  * and re-decoded regardless, which is C12/v0.4.0's problem, not this one's —
  * but the *view* of it can: the playhead, the loop region and the timeline's
  * zoom/scroll window are written to `sessionStorage` (`persistence.ts`'s
- * `ViewSnapshot`, keyed by `jobId`) at every discrete commit — a seek, a loop
- * set or clear, a named viewport movement, a pause — plus one `pagehide`
- * flush for "reload while playing", where the last commit is stale by
- * however long the mix has been running since.
+ * `ViewSnapshot`, keyed by `jobId`).
+ *
+ * **Write path.** Two kinds of writer touch it, deliberately unequal in
+ * frequency:
+ *
+ * | Trigger | Writes |
+ * | --- | --- |
+ * | A discrete commit — `StemPlayer`'s seek, loop set/clear, a pause | The whole view: position, loop region and whatever window is current |
+ * | `pagehide` | The same whole view, read fresh right before the page goes away |
+ * | `windowStore.set` (every zoom/pan/wheel tick, thumb-drag, auto-follow) | Nothing — see below |
+ *
+ * A named viewport movement is **not** its own commit: `windowStore.set`
+ * only updates {@link timelineWindowRef} and does not call `persistView`
+ * (review finding, "should-fix"). Zoom, pan and auto-follow reach `set` on
+ * every wheel tick — tens of times a second on a trackpad — and persisting
+ * each one meant a synchronous read-parse-validate-stringify-write of the
+ * whole record from inside a state updater (render-phase I/O, doubled by
+ * StrictMode), for no benefit: a real reload always fires `pagehide`, and
+ * that flush already re-reads {@link timelineWindowRef} — whatever the last
+ * `set` left there — and writes it as part of the full view. A window move
+ * therefore still survives a reload; it is only ever persisted as a
+ * side-effect of the next discrete commit or the `pagehide` flush, not on
+ * its own tick.
  *
  * The view for the job `sessionStorage` names when this provider first
  * mounts is read exactly **once**, into `initialView` — a fresh read per
@@ -90,12 +109,14 @@
  * live subscription. Two consequences:
  *
  * - **The window is seeded before the first `StemTimeline` mount.**
- *   `windowStore` is rebuilt by a `useMemo` keyed on `jobId`, and the local
- *   its closure starts from — never a ref, so nothing here writes one during
- *   render — already holds the restored `{ zoom, scrollSeconds }` (or {@link
- *   WHOLE_FILE}) by the time anything downstream can call `get()`.
- *   `useTimelineGeometry` reads it exactly once, on its own mount (065's
- *   handoff note), so seeding it any later would lose the race.
+ *   `windowStore` wraps {@link timelineWindowRef} and is built by a
+ *   `useMemo` keyed on `[]` — its identity never changes, and it never holds
+ *   the window itself. What actually seeds the ref is a separate effect,
+ *   keyed on `[jobId, initialView]`, that writes the restored
+ *   `{ zoom, scrollSeconds }` (or {@link WHOLE_FILE}) into it before render
+ *   ever produces a `StemTimeline` for this job. `useTimelineGeometry` reads
+ *   the ref exactly once, on its own mount (065's handoff note), so seeding
+ *   it any later would lose the race.
  * - **The playhead and loop region wait for the engine.** `engine.seek()` on
  *   a paused engine just sets a position — there is nothing to schedule until
  *   `play()` — but `setLoopRegion` reads and clamps against the engine's
@@ -107,6 +128,16 @@
  * A view for a job that is not the one being restored is exactly as stale as
  * an unknown job id and is dropped the same way: `initialView.jobId` simply
  * never matches, so nothing about it is ever applied.
+ *
+ * **Known limitation.** A viewport moved before the engine reaches `ready`,
+ * immediately followed by a *second* reload before any discrete commit or
+ * `pagehide` flush has run for the first one, can come back at `{ zoom: 1,
+ * scrollSeconds: 0 }` rather than where it was left — there was never a
+ * write to lose, because nothing yet had a reason to write one. Narrow
+ * (it needs two reloads in a row with no intervening seek, loop edit, pause
+ * or even a `pagehide`-worthy tab close) and not worth chasing: the fix would
+ * mean persisting on every viewport move again, which is exactly the cost
+ * this section exists to avoid.
  */
 
 import {
@@ -221,10 +252,15 @@ export interface StemSessionValue {
   /**
    * Persist the current view — playhead, loop region, zoom/scroll — for the
    * tracked job (feature 066). A no-op with no open session. Every discrete
-   * commit calls this once: `StemPlayer`'s seek, loop set/clear and pause, and
-   * the `windowStore`'s own `set`. Reads the engine and the window store
-   * fresh each time rather than taking a snapshot as an argument, so callers
-   * never have to assemble a {@link ViewSnapshot} themselves.
+   * commit calls this once: `StemPlayer`'s seek, loop set/clear and pause,
+   * plus the one `pagehide` flush registered while a session is open. The
+   * `windowStore`'s own `set` deliberately does **not** call this — a wheel
+   * tick must not do synchronous storage I/O — so a viewport move is only
+   * ever persisted as part of one of those other writes, which read the
+   * window fresh rather than take a snapshot. Reads the engine and the
+   * window store fresh each time rather than taking a snapshot as an
+   * argument, so callers never have to assemble a {@link ViewSnapshot}
+   * themselves.
    */
   readonly persistView: () => void
 }
@@ -323,21 +359,24 @@ export function StemSessionProvider({
   }, [jobId, initialView])
 
   /**
-   * The freshest {@link persistView} (declared below), reachable from
-   * {@link windowStore}'s `set` without making `set`'s own identity depend
-   * on it — `set` has to stay stable across renders (065: "written back
-   * through it," read by `useTimelineGeometry` as a stable callback), and
-   * `persistView` changes identity with `jobId`. Updated after every render,
-   * the same as `StemTimeline`'s own `wheelHandler` ref.
+   * `windowStore.set` writes only the ref — no persist call (feature 066
+   * review, "should-fix"). Zoom/pan/thumb-drag/auto-follow reach this on
+   * every wheel tick, tens of times a second; persisting each one meant a
+   * synchronous read-parse-validate-stringify-write of the whole record from
+   * inside a state updater on every tick, doubled by StrictMode. It bought
+   * nothing: a real reload always fires `pagehide`, and the `pagehide` flush
+   * below re-reads {@link timelineWindowRef} fresh and writes the *whole*
+   * view — position, loop and window — regardless of whether the window's
+   * own move was ever separately persisted. The window's durable persistence
+   * points are therefore `pagehide` plus the existing discrete commits
+   * (seek, loop set/clear, pause), which snapshot whatever window is current
+   * as part of their own full-view write.
    */
-  const persistViewRef = useRef<() => void>(() => undefined)
-
   const windowStore = useMemo<TimelineWindowStore>(
     () => ({
       get: () => timelineWindowRef.current,
       set: (next) => {
         timelineWindowRef.current = next
-        persistViewRef.current()
       },
     }),
     [],
@@ -366,10 +405,6 @@ export function StemSessionProvider({
     }
     writeViewSnapshot(view)
   }, [jobId])
-
-  useEffect(() => {
-    persistViewRef.current = persistView
-  }, [persistView])
 
   // Identity changes with the tracked job, deliberately: a view that calls
   // this from a mount effect re-opens the session when the job changes

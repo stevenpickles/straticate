@@ -923,16 +923,51 @@ describe('StemSessionProvider view commits (feature 066)', () => {
     })
   })
 
-  it('persists a named viewport movement through the window store', async () => {
+  it('writes nothing to sessionStorage on a viewport move alone (post-review should-fix)', async () => {
+    // `windowStore.set` used to call `persistView()` unconditionally, and it
+    // is reached by every pan/zoom/thumb-drag/auto-follow event — on the
+    // order of 100/s on a trackpad wheel. "Zoom in" is this suite's
+    // stand-in for one of those events; a click is one call into the same
+    // `set`, so it pins the fix regardless of how many times a real gesture
+    // would call it.
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    const setItemSpy = vi.spyOn(window.sessionStorage, 'setItem')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    expect(Number(shownWindow().zoom)).toBeGreaterThan(1)
+
+    // Fail-first: restore the write-through in `windowStore.set` and this is
+    // what fails — `setItemSpy` gets called and `view` stops being `null`.
+    expect(setItemSpy).not.toHaveBeenCalled()
+    expect(readSessionSnapshot().view).toBeNull()
+
+    setItemSpy.mockRestore()
+  })
+
+  it('captures the current window on the pagehide flush, with no viewport commit of its own', async () => {
+    // The window moves without ever persisting on its own (previous test);
+    // this is the write path that catches it up before a reload — the same
+    // `pagehide` flush that already covers "reload while playing" also
+    // covers "reload right after zooming/panning".
     const { create, engines } = engineFactory()
     await renderSession(create)
     await becomeReady(engines[0]!)
 
     await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    const zoomed = shownWindow()
+    expect(readSessionSnapshot().view).toBeNull()
+
+    window.dispatchEvent(new Event('pagehide'))
 
     const persisted = readSessionSnapshot().view
     expect(persisted?.jobId).toBe(sampleJobId)
-    expect(persisted?.zoom).toBeGreaterThan(1)
+    expect(String(persisted?.zoom)).toBe(zoomed.zoom)
+    expect(String(persisted?.scrollSeconds)).toBe(zoomed.scroll)
   })
 
   it('persists a pause', async () => {

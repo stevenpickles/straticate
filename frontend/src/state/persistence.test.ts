@@ -188,7 +188,13 @@ describe('view snapshot (feature 066)', () => {
     expect(readSessionSnapshot()).toEqual(snapshot)
   })
 
-  it('restores a v1-shaped record — jobId/audioId/phase, no `view` key at all', () => {
+  it('restores a record without a view field — jobId/audioId/phase, no `view` key at all', () => {
+    // Not a *real* v1 record: an actual pre-066 payload lives under the
+    // superseded `straticate.session.v1` key and is never read under this
+    // one (silently ignored, per the module docstring). This is a v2-shaped
+    // payload that simply omits the optional `view` field, which is the
+    // shape `readSessionSnapshot` has to tolerate the same way it tolerates
+    // a malformed one.
     sessionStorage.setItem(
       SESSION_STORAGE_KEY,
       JSON.stringify({
@@ -221,6 +227,23 @@ describe('view snapshot (feature 066)', () => {
       SESSION_STORAGE_KEY,
       JSON.stringify({ ...snapshot, view: { ...view, loopEnd: null } }),
     )
+    expect(readSessionSnapshot()).toEqual(snapshot)
+  })
+
+  it('tolerates a numeric field that parsed to Infinity', () => {
+    // `JSON.parse` accepts a raw `1e999` in the source text and turns it into
+    // `Infinity` — there is no way to *write* such a value through this
+    // module's own `JSON.stringify` (`Infinity` serializes to `null`), but a
+    // hand-edited or otherwise foreign payload can still contain the literal.
+    // This is `optionalFiniteNumber`'s one reachable case:
+    // `typeof value === 'number'` is already true for it, so only the
+    // `Number.isFinite` half of the guard is what saves it.
+    const raw = JSON.stringify({
+      ...snapshot,
+      view: { ...view, positionSeconds: '__PROBE__' },
+    }).replace('"__PROBE__"', '1e999')
+    sessionStorage.setItem(SESSION_STORAGE_KEY, raw)
+
     expect(readSessionSnapshot()).toEqual(snapshot)
   })
 

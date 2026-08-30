@@ -18,25 +18,36 @@ once the engine for the tracked job reaches `ready`.
 - `frontend/src/state/persistence.ts`: the storage key bumps to
   `straticate.session.v2`. A new optional `view` field, keyed by `jobId`
   (`ViewSnapshot`: `positionSeconds`, `loopStart`/`loopEnd`, `zoom`,
-  `scrollSeconds` — numbers only, no records). A v1 record (no `view` key)
-  still restores its identifiers; a malformed or wrongly-shaped `view` is
-  tolerated the same way. `isEmptySessionSnapshot` now also considers `view`,
-  so `writeViewSnapshot` — a new read-modify-write helper that updates just
-  the view, leaving the identifiers alone — is never silently dropped by the
-  "empty snapshot" check.
+  `scrollSeconds` — numbers only, no records). A record under this key with
+  no `view` field still restores its identifiers; a malformed or
+  wrongly-shaped `view` is tolerated the same way. A *real* v1 record — one
+  actually written under the superseded `straticate.session.v1` key — is
+  simply not found under this key, so it is silently ignored exactly like
+  any other unparsable payload; it is never read, let alone upgraded.
+  `isEmptySessionSnapshot` now also considers `view`, so `writeViewSnapshot`
+  — a new read-modify-write helper that updates just the view, leaving the
+  identifiers alone — is never silently dropped by the "empty snapshot"
+  check.
 - `frontend/src/state/SessionGate.tsx`: its identifier write now reads the
   on-disk `view` forward rather than overwriting it with nothing, since the
   two writers (this one and `stemSession.tsx`) touch the same key at very
-  different frequencies.
+  different frequencies — but drops that view when its `jobId` does not
+  match the job actually being tracked (post-review nit fix), so a restore
+  that finds the job gone does not pin a dead job's view in storage forever.
 - `frontend/src/state/stemSession.tsx`: reads the persisted view once at
   provider mount (`initialView`); seeds the timeline window for whichever job
   is tracked (restored, or `WHOLE_FILE`) from an effect keyed on
   `[jobId, initialView]`; restores the playhead and loop region exactly once
   per page load, when the engine reaches `ready` for the **matching**
-  `jobId`; exposes `persistView()`, the single write path every commit site
+  `jobId`; exposes `persistView()`, the write path every discrete commit site
   calls; registers one `pagehide` flush while a session is open; and clears
   the persisted view when the tracked job goes away (`job/clear` or a
-  different job).
+  different job). `windowStore.set` — reached by every zoom/pan/wheel tick,
+  thumb-drag and auto-follow — writes only the in-memory window, never
+  storage (post-review should-fix): the `pagehide` flush and the other
+  discrete commits already write the current window as part of their own
+  full-view write, so nothing is lost, and per-tick storage I/O from inside
+  a state updater is gone.
 - `frontend/src/components/StemPlayer.tsx`: calls `persistView()` after the
   seek commit, the loop set/clear commits, and a pause. Its readout effect
   also gains `snapshot.status` as a dependency — the session can move the
@@ -68,11 +79,15 @@ once the engine for the tracked job reaches `ready`.
 
 - [x] `persistence.ts` stores an optional `view`, keyed by `jobId`, under a
       bumped `straticate.session.v2` key.
-- [x] A v1-shaped record (no `view`) still restores its identifiers.
+- [x] A record with no `view` field still restores its identifiers.
 - [x] A malformed or mismatched-shape `view` is tolerated, not thrown on.
-- [x] Writes happen at every discrete commit: seek, loop set/clear, a named
-      viewport movement, pause — plus one `pagehide` flush for the
-      reload-while-playing case.
+- [x] Writes happen at every discrete commit — seek, loop set/clear, pause —
+      plus one `pagehide` flush for the reload-while-playing case. A named
+      viewport movement (zoom, pan, wheel, thumb-drag, auto-follow) is
+      **not** its own write: `windowStore.set` only updates the in-memory
+      window, and the current window rides along on the next discrete commit
+      or the `pagehide` flush, whichever comes first (post-review
+      should-fix — see the module docstring).
 - [x] Restore is exactly one `seek` and (when the view carried one) exactly
       one `setLoopRegion`, once the engine reaches `ready` for the matching
       `jobId`, never repeated for the same page load.
@@ -86,20 +101,26 @@ once the engine for the tracked job reaches `ready`.
 
 ## Required tests
 
-- `persistence.test.ts`: v2 round-trip with and without a view; a v1-shaped
-  record restores; a malformed view is tolerated; a view for a different job
-  round-trips intact (matching is the caller's job, not this module's);
-  `writeViewSnapshot` updates the view without touching the identifiers and
-  vice versa; a view-only snapshot is not "empty".
+- `persistence.test.ts`: v2 round-trip with and without a view; a record
+  under the v2 key with no `view` field restores; a malformed view is
+  tolerated; a view for a different job round-trips intact (matching is the
+  caller's job, not this module's); `writeViewSnapshot` updates the view
+  without touching the identifiers and vice versa; a view-only snapshot is
+  not "empty"; a raw `1e999` in the stored `view` (parses to `Infinity`) is
+  rejected by `optionalFiniteNumber`.
 - `stemSession.test.tsx`: restore fires exactly one `seek` (+ `setLoopRegion`
   when the view carried a region) after `ready`, and not again on a later
   snapshot notification; no restore with no persisted view; a mismatched
   `jobId` is dropped; the window store is seeded before the first
-  `StemTimeline` mount; each commit site (seek, loop set, loop clear, a named
-  viewport movement, pause) persists; the `pagehide` flush writes the live
-  `currentTime`, ahead of the last discrete commit; `job/clear` wipes the
-  view.
-- `separation.spec.ts`: the feature's own stage, described above.
+  `StemTimeline` mount; each discrete commit site (seek, loop set, loop
+  clear, pause) persists; a viewport move alone (`windowStore.set`) writes
+  nothing (the regression pin for the should-fix above); the `pagehide`
+  flush writes the live `currentTime` and the current window — ahead of the
+  last discrete commit, and regardless of whether any viewport move since
+  that commit was separately persisted; `job/clear` wipes the view.
+- `separation.spec.ts`: the feature's own stage, described above — unchanged
+  by the should-fix, since `page.reload()` fires `pagehide`, which is still
+  a full-view write.
 
 ### Fail-first
 
@@ -145,3 +166,49 @@ The same probe passes once the implementation is restored.
   documents the pairing with 065 in prose (row "Playhead, loop, zoom and
   decoded stems survive…") — left as is; only this feature's own row moved to
   `PR OPEN`.
+- **Post-review: `windowStore.set` no longer persists (should-fix).** The
+  first version called `persistView()` from inside `set` itself, so a
+  session's `initialView`/`persistView` closure could stay current for the
+  window store without a second seam. That made every wheel tick — pan,
+  zoom, thumb-drag, auto-follow, on the order of 100/s on a trackpad —
+  a synchronous read-parse-validate-stringify-write of the whole
+  `sessionStorage` record, from inside a React state updater (render-phase
+  I/O), doubled by StrictMode. It was also unnecessary: `pagehide` already
+  writes the whole view fresh, including whatever window `set` last left in
+  the ref, so no window move was ever actually lost by removing the
+  write-through. `set` now only writes {@link timelineWindowRef}; the
+  window's durable persistence points are `pagehide` plus the existing
+  discrete commits (seek, loop set/clear, pause). See `stemSession.tsx`'s
+  module docstring for the full write-path table.
+- **Post-review: the module docstring's window-seeding paragraph was
+  describing an earlier design (should-fix).** It said `windowStore` was "a
+  `useMemo` keyed on `jobId`" holding the restored window in a closure —
+  true of a version before the one that shipped, per the Notes bullet above
+  about the seed living in an effect. The code has always been a ref
+  (`timelineWindowRef`), a `windowStore` memoized once on `[]`, and a
+  separate seed effect keyed on `[jobId, initialView]`; the docstring now
+  says that.
+- **Post-review: a stale `view` used to pin the session key alive (nit).**
+  When restore found the tracked job gone (a backend restart), `SessionGate`
+  wrote `{ jobId: null, …, view: <the dead job's stale view> }` — and because
+  `isEmptySessionSnapshot` counts `view`, that record was never "empty," so
+  the key was never removed. Every later reload restored nothing (the job
+  was still gone) but still showed "Restoring your session…" while the
+  no-op restore ran. `SessionGate`'s identifier-write effect now drops
+  `view` when its `jobId` does not match the job actually being tracked,
+  the same rule `stemSession.tsx` already applies when *reading* a view
+  back.
+
+### Known limitations
+
+- **A viewport move made before the engine reaches `ready`, followed by a
+  second reload before anything else commits, can come back at the whole
+  file rather than where it was left.** Moving the window no longer writes
+  storage on its own (see the should-fix above); it rides along on the next
+  seek, loop edit, pause or `pagehide`. If a second reload happens first —
+  with no discrete commit and no `pagehide`-worthy tab close in between —
+  there was never a write to have captured the move, so restore falls back
+  to `WHOLE_FILE`. Narrow (it needs two reloads back to back with literally
+  nothing else happening between them) and deliberately not engineered
+  around: the only fix would be persisting on every viewport move again,
+  which is the exact cost this feature's should-fix removed.

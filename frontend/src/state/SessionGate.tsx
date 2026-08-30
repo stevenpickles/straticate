@@ -204,15 +204,33 @@ export function useSessionRestore(): RestoreStatus {
     if (status !== 'settled') {
       return
     }
+    const trackedJobId = job?.id ?? null
     // `view` is read fresh rather than carried in state: it is written far
     // more often than this effect re-runs (feature 066's `stemSession.tsx`
-    // writes it on every seek, loop edit and viewport move), and this write
-    // must not clobber whatever the most recent one left on disk.
+    // writes it on every seek, loop edit and pause), and this write must not
+    // clobber whatever the most recent one left on disk.
+    //
+    // It is dropped, rather than carried forward, when its `jobId` does not
+    // match the job actually being tracked (review finding, "nit"): a
+    // restore that finds the job gone (a backend restart) tracks nothing, so
+    // `trackedJobId` is `null` while the on-disk view still names the dead
+    // job. Keeping it would give this write a non-null `view` field forever
+    // — `isEmptySessionSnapshot` counts `view`, so the key would never be
+    // removed, and every future reload would show "Restoring your session…"
+    // for a job that no longer exists and nothing to actually restore. A
+    // view is only ever valid for the job it was recorded against
+    // (`stemSession.tsx`'s module docstring), so this is the same rule
+    // applied at the one write site that does not already enforce it.
+    const onDiskView = readSessionSnapshot().view
+    const view =
+      onDiskView !== null && onDiskView.jobId === trackedJobId
+        ? onDiskView
+        : null
     writeSessionSnapshot({
-      jobId: job?.id ?? null,
+      jobId: trackedJobId,
       audioId: upload.status === 'uploaded' ? upload.file.id : null,
       phase,
-      view: readSessionSnapshot().view,
+      view,
     })
     // Only the tracked job's *id* is persisted; depending on the whole `job`
     // would rewrite the snapshot on every progress event for no gain.
