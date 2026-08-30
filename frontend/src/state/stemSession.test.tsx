@@ -644,6 +644,37 @@ describe('StemSessionProvider disposal', () => {
 
     expect(engines[0]?.disposeCount).toBe(1)
   })
+
+  it('defers a job change that happens while the player is unmounted', async () => {
+    // The exact scenario the `openedFor: string | null` keying exists for
+    // (review finding): with a boolean, a job change while the Inspect UI is
+    // away would fetch and build eagerly for a job nobody is looking at.
+    const { create, engines } = engineFactory()
+    await renderSession(
+      create,
+      <Retracker job={otherJob} label="Track other job" />,
+    )
+    await becomeReady(engines[0]!)
+    await userEvent.click(screen.getByRole('button', { name: 'Leave inspect' }))
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Track other job' }),
+    )
+    await act(async () => {})
+
+    // Nothing happens while unmounted: the old engine is disposed with its
+    // job, and the new one costs no network and no decode until re-entry.
+    expect(engines[0]?.disposeCount).toBe(1)
+    expect(engines).toHaveLength(1)
+    expect(resultFetches).toEqual([sampleJobId])
+
+    await userEvent.click(screen.getByRole('button', { name: 'Enter inspect' }))
+    await screen.findByRole('button', { name: 'Mute vocals' }, SETTLE)
+    await act(async () => {})
+
+    expect(resultFetches).toEqual([sampleJobId, otherJobId])
+    expect(engines).toHaveLength(2)
+  })
 })
 
 describe('StemSessionProvider result retry (feature 048) on one engine', () => {

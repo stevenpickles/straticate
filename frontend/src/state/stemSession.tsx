@@ -258,6 +258,14 @@ export function StemSessionProvider({
   // Identity changes with the tracked job, deliberately: a view that calls
   // this from a mount effect re-opens the session when the job changes
   // underneath it, and does nothing at all otherwise.
+  //
+  // StrictMode note (review): the dev-mode double-invoke costs no second
+  // fetch and no second engine, but not primarily because of the engine's
+  // load-generation guard — it falls out of React batching every cleanup/
+  // re-run pair before applying the setState calls they queue, so both
+  // passes read the same pre-invoke `openedFor`. That ordering is an
+  // emergent property: re-verify it (stemSession.test.tsx pins it) before
+  // reordering these effects.
   const openSession = useCallback(() => {
     setOpenedFor(jobId)
   }, [jobId])

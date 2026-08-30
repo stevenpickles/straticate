@@ -2076,7 +2076,36 @@ describe('StemPlayer with a single mono stem', () => {
 })
 
 describe('StemPlayer cleanup', () => {
-  it('disposes the engine on unmount', async () => {
+  it('keeps the session alive when only the player unmounts', async () => {
+    // The feature-065 inversion, pinned where the old dispose-on-unmount
+    // test used to sit (review finding: the carried-over tests silently
+    // became provider-unmount tests). Removing just <StemPlayer /> while
+    // the provider stays mounted must dispose nothing.
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    const engine = new FakeEngine()
+    const createEngine = () => engine
+    const tree = (withPlayer: boolean) => (
+      <AppStateProvider initialState={inspectingState()}>
+        <JobStateProvider
+          initialState={{ ...initialJobState, job: completedJob }}
+        >
+          <StemSessionProvider createEngine={createEngine}>
+            {withPlayer ? <StemPlayer /> : null}
+          </StemSessionProvider>
+        </JobStateProvider>
+      </AppStateProvider>
+    )
+    const view = render(tree(true))
+    await screen.findByRole('button', { name: 'Mute vocals' })
+
+    view.rerender(tree(false))
+
+    expect(engine.disposeCount).toBe(0)
+  })
+
+  it('disposes the engine when the whole tree goes away', async () => {
+    // Provider unmount IS a dispose trigger (the session's own table); the
+    // deeper matrix lives in stemSession.test.tsx.
     stubResultFetch(jsonResponse(resultOver(twoStemNames)))
     const engine = new FakeEngine()
     const view = renderPlayer(engine)
@@ -2087,7 +2116,7 @@ describe('StemPlayer cleanup', () => {
     expect(engine.disposeCount).toBe(1)
   })
 
-  it('stops the sources and closes the context on unmount', async () => {
+  it('stops the sources and closes the context when the session ends', async () => {
     const context = new FakeAudioContext()
     const engine = createStemAudioEngine({
       createContext: () => context,
