@@ -125,6 +125,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/disk-usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read Disk Usage
+         * @description Report what Straticate holds under the data directory, and where.
+         *
+         *     Four buckets partition every file under ``{data_dir}/audio`` and
+         *     ``{data_dir}/jobs``: ``uploads`` (registered audio, feature 056),
+         *     ``job_stems`` (a known job's own record and stems), ``job_exports`` (its
+         *     built export artifacts, feature 022), and ``orphans`` (everything with
+         *     no live record, plus stray build debris an interrupted write or export
+         *     build left behind — see :mod:`straticate.system.disk_usage`). This is
+         *     the visibility that makes manual-only retention livable before a prune
+         *     endpoint (060) exists to act on it: nothing here deletes anything.
+         *
+         *     "Live" is read from the running application at request time — the audio
+         *     store's registry and the job manager's list, in whatever state each job
+         *     is currently in — so a job still queued or running is classified exactly
+         *     like a completed one's, never as an orphan.
+         *
+         *     ``free_bytes``/``total_bytes`` describe the filesystem holding
+         *     ``data_dir`` and follow the same null-means-unknown doctrine as
+         *     ``GET /system/storage`` (feature 040): both fields are ``null`` together
+         *     when the host cannot answer, and a missing ``data_dir`` (nothing has ever
+         *     been uploaded or separated) reports on its nearest existing ancestor
+         *     rather than as unknown — see :mod:`straticate.system.storage`.
+         *
+         *     **It runs in a worker thread.** ``os.walk`` and ``os.stat`` over
+         *     ``data_dir`` are filesystem calls with the same blocking-on-a-network-
+         *     mount shape ``GET /system/storage`` already offloads (see its
+         *     docstring), on the very directory every upload and every job also writes
+         *     through — so this endpoint follows the same discipline.
+         *
+         *     **Degrades rather than errors.** A ``data_dir`` that does not exist yet
+         *     reports all-zero buckets (nothing has ever written under it) alongside
+         *     the real free/total figures for its nearest existing ancestor; a subtree
+         *     this process cannot read is logged and simply undercounted rather than
+         *     failing the request — every bucket count is a plain, non-nullable
+         *     integer, so there is no "unknown" to express there the way there is for
+         *     the free/total figures. The response is always ``200``.
+         */
+        get: operations["read_disk_usage_api_v1_system_disk_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audio": {
         parameters: {
             query?: never;
@@ -639,6 +694,66 @@ export interface components {
              * @description Total device memory in bytes.
              */
             memory_total_bytes: number;
+        };
+        /**
+         * DiskUsageReport
+         * @description What ``GET /system/disk-usage`` answers: where `data_dir`'s bytes went.
+         *
+         *     Four buckets partition every file under ``{data_dir}/audio`` and
+         *     ``{data_dir}/jobs`` — nothing is counted twice and nothing is left out:
+         *
+         *     - ``uploads``: files inside an audio directory the upload registry still
+         *       recognises (feature 056).
+         *     - ``job_stems``: a known job's own files (its ``job.json`` record and its
+         *       separated stems) — everything in the job's directory *except* its
+         *       ``exports/`` subtree, which is split out below.
+         *     - ``job_exports``: built export artifacts under a known job's
+         *       ``exports/`` subtree (feature 022).
+         *     - ``orphans``: everything else — a directory whose ``audio_id`` or
+         *       ``job_id`` no longer has a live record (an interrupted upload, output
+         *       from a run older than the durable registries, or a deleted job's
+         *       leftovers), *and* stray build debris found anywhere in the swept
+         *       trees: a ``*.tmp`` sidecar an interrupted write never renamed into
+         *       place, a ``*.part`` export an interrupted build never published, or a
+         *       ``.build-*`` staging directory a crashed archive build left behind.
+         *       Debris counts as orphaned even inside an otherwise-live upload or job
+         *       directory — it is never the record or the output, only a leftover
+         *       nothing has claimed.
+         *
+         *     A job that is still queued or running is not an orphan: its directory is
+         *     known to the job manager the moment it is submitted (feature 057), so it
+         *     is classified exactly like a completed job's, just with less (or
+         *     nothing) written under ``stems/`` yet.
+         *
+         *     ``free_bytes`` / ``total_bytes`` describe the filesystem holding
+         *     ``data_dir`` — the same **null-means-unknown** doctrine as
+         *     :class:`~straticate.schemas.storage.StorageReport` (feature 040):
+         *     ``null`` is a documented "the host could not answer", never conflated
+         *     with a real ``0``. Reused rather than duplicated because the underlying
+         *     read (:func:`straticate.system.storage.storage_report`) already handles
+         *     exactly this — a ``data_dir`` that does not exist yet reports on its
+         *     nearest existing ancestor, and a permissions failure degrades to
+         *     ``null`` instead of a ``500``.
+         */
+        DiskUsageReport: {
+            /** @description Registered uploads under `{data_dir}/audio`. */
+            uploads: components["schemas"]["UsageBucket"];
+            /** @description Known jobs' own files (records and stems) under `{data_dir}/jobs`. */
+            job_stems: components["schemas"]["UsageBucket"];
+            /** @description Known jobs' built export artifacts under `{data_dir}/jobs/{job_id}/exports`. */
+            job_exports: components["schemas"]["UsageBucket"];
+            /** @description Files with no live record, plus stray build debris found while sweeping. */
+            orphans: components["schemas"]["UsageBucket"];
+            /**
+             * Free Bytes
+             * @description Bytes available to the server on the filesystem holding `data_dir`, or null when the host cannot report it.
+             */
+            free_bytes?: number | null;
+            /**
+             * Total Bytes
+             * @description Total size in bytes of that filesystem, or null when the host cannot report it.
+             */
+            total_bytes?: number | null;
         };
         /**
          * ErrorInfo
@@ -1198,6 +1313,29 @@ export interface components {
              */
             total_bytes?: number | null;
         };
+        /**
+         * UsageBucket
+         * @description How many files, and how many bytes, one classification accounts for.
+         *
+         *     ``count`` is a **file** count, not a directory or upload count: an
+         *     upload contributes its original media plus its ``audio.json`` sidecar as
+         *     two files, a job with three stems and a record contributes four. That
+         *     definition is what lets a test recompute the same numbers with a plain
+         *     ``os.walk`` and compare them directly against this bucket, file for file
+         *     and byte for byte, rather than reverse-engineering some other unit.
+         */
+        UsageBucket: {
+            /**
+             * Count
+             * @description Number of files counted toward this bucket.
+             */
+            count: number;
+            /**
+             * Bytes
+             * @description Total size in bytes of the files counted.
+             */
+            bytes: number;
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -1618,6 +1756,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageReport"];
+                };
+            };
+        };
+    };
+    read_disk_usage_api_v1_system_disk_usage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DiskUsageReport"];
                 };
             };
         };

@@ -15,6 +15,10 @@ Public surface (consumed by features 015/019/026):
   models directory (feature 040), degrading to a documented "unknown" the same
   way the device probes degrade to "no devices". See
   :mod:`straticate.system.storage`.
+- :func:`disk_usage_report` — classifies everything under the data directory
+  into uploads/job stems/job exports/orphans and reports the holding
+  filesystem's free/total bytes (feature 059). See
+  :mod:`straticate.system.disk_usage`.
 
 PyTorch is **not** a dependency of this package; see
 :mod:`straticate.system.devices` for the rationale.
@@ -38,6 +42,11 @@ from straticate.system.devices import (
     load_torch,
     total_system_memory_bytes,
 )
+from straticate.system.disk_usage import (
+    AUDIO_DIRECTORY,
+    EXPORTS_DIRECTORY,
+    disk_usage_report,
+)
 from straticate.system.storage import (
     UNKNOWN_STORAGE,
     DiskUsageLike,
@@ -48,9 +57,11 @@ from straticate.system.storage import (
 )
 
 __all__ = [
+    "AUDIO_DIRECTORY",
     "CPU_BACKEND",
     "CPU_DEVICE_ID",
     "CUDA_BACKEND",
+    "EXPORTS_DIRECTORY",
     "UNKNOWN_STORAGE",
     "ComputeDeviceProbe",
     "CudaDevicePropertiesLike",
@@ -64,6 +75,7 @@ __all__ = [
     "TorchModuleLike",
     "cpu_device",
     "cpu_name",
+    "disk_usage_report",
     "get_device_detector",
     "load_torch",
     "nearest_existing_dir",
