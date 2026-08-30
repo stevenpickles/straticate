@@ -32,7 +32,6 @@ from fastapi import FastAPI
 
 from straticate.api import export as export_module
 from straticate.api.export import (
-    EXPORTS_DIRECTORY,
     MANIFEST_NAME,
     ZIP_MEDIA_TYPE,
     ExportFormat,
@@ -54,6 +53,7 @@ from straticate.inference import (
     stem_path,
 )
 from straticate.jobs import CancellationToken, JobEvent, JobManager
+from straticate.jobs.layout import EXPORTS_DIRECTORY
 from straticate.main import create_app
 from straticate.schemas import AudioFile, AudioMetadata, ComputeDevice, Model
 from straticate.schemas.events import JobCancelledEvent, JobCompletedEvent, JobFailedEvent

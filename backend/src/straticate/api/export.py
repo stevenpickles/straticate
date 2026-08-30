@@ -22,9 +22,11 @@ Four things this module is careful about:
   channel count are deliberately left untouched.
 - **Artifacts are built once and reused.** A completed job's stems are
   immutable, so the built file is cached under
-  ``{data_dir}/jobs/{job_id}/exports/`` under a name derived from the format
-  and the sorted stem list, and a repeated identical download is served
-  straight from disk. Concurrent identical requests share **one** build: the
+  ``{data_dir}/jobs/{job_id}/exports/`` (:func:`~straticate.jobs.layout.job_exports_dir`
+  is the sole authority on that path since feature 058, so this module never
+  builds it by hand) under a name derived from the format and the sorted stem
+  list, and a repeated identical download is served straight from disk.
+  Concurrent identical requests share **one** build: the
   cache check is a fast path, and the real guard is a per-artifact
   :class:`BuildLocks` entry that the second request waits on before
   re-checking. Without it, N simultaneous downloads would each transcode every
@@ -86,15 +88,12 @@ from straticate.api.job_outputs import completed_job, stem_not_found, stem_sourc
 from straticate.api.results import ManagerDep, stem_media_type
 from straticate.audio.ffmpeg import FFmpegTimeout, run_ffmpeg
 from straticate.errors import ApplicationError
-from straticate.inference import job_output_dir
+from straticate.jobs.layout import job_exports_dir
 from straticate.schemas import SeparationResult
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["export"])
-
-EXPORTS_DIRECTORY = "exports"
-"""Name of the export-artifact directory under a job's output directory."""
 
 TRANSCODE_FAILED = "transcode_failed"
 """``detail.reason``: FFmpeg exited non-zero encoding one stem."""
@@ -665,7 +664,7 @@ async def export_job_stems(
     ]
     archive = len(sources) != 1
 
-    exports_dir = job_output_dir(settings.data_dir, job.id) / EXPORTS_DIRECTORY
+    exports_dir = job_exports_dir(settings.data_dir, job.id)
     artifact = exports_dir / artifact_name(export_format, selected, archive=archive)
     if not artifact.is_file():
         try:

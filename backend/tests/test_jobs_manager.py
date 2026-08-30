@@ -362,6 +362,113 @@ async def test_cancel_of_terminal_job_is_a_no_op(
     assert not any(isinstance(e, JobCancelledEvent) for e in recorder.for_job(job.id))
 
 
+# -- removal (feature 058) ---------------------------------------------------
+
+
+async def test_remove_of_a_completed_job_pops_the_entry(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    job = manager.submit(make_configuration(), instant_executor)
+    await recorder.wait_for_terminal(job.id)
+
+    removed = manager.remove(job.id)
+    assert removed.id == job.id
+    assert removed.state is JobState.COMPLETED
+
+    with pytest.raises(ApplicationError) as excinfo:
+        manager.get(job.id)
+    assert excinfo.value.code == "job_not_found"
+    assert job.id not in [j.id for j in manager.list_jobs()]
+
+
+async def test_remove_emits_no_event(manager: JobManager, recorder: EventRecorder) -> None:
+    """Symmetric with :meth:`JobManager.restore`: a deletion is not a lifecycle event."""
+    job = manager.submit(make_configuration(), instant_executor)
+    await recorder.wait_for_terminal(job.id)
+    before = len(recorder.events)
+
+    manager.remove(job.id)
+
+    # Emit one event of our own and wait for it: the dispatcher is strictly
+    # ordered, so anything `remove` had emitted would already be delivered.
+    follow_up = manager.submit(make_configuration(), instant_executor)
+    await recorder.wait_for_terminal(follow_up.id)
+    assert recorder.events[before:] == [
+        event for event in recorder.events[before:] if event.job_id == follow_up.id
+    ]
+
+
+async def test_remove_of_a_queued_job_is_refused(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    async def blocking_executor(job: Job, context: JobContext) -> SeparationResult:
+        started.set()
+        await gate.wait()
+        return make_result(job.id)
+
+    running = manager.submit(make_configuration(), blocking_executor)
+    queued = manager.submit(make_configuration(), instant_executor)
+    await asyncio.wait_for(started.wait(), timeout=WAIT_TIMEOUT)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        manager.remove(queued.id)
+    assert excinfo.value.code == "job_active"
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail == {"job_id": queued.id, "state": "queued"}
+    # Refused, not removed: the entry is still there.
+    assert manager.get(queued.id).state is JobState.QUEUED
+
+    gate.set()
+    await recorder.wait_for_terminal(running.id)
+    await recorder.wait_for_terminal(queued.id)
+
+
+async def test_remove_of_a_running_job_is_refused(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    started, gate = asyncio.Event(), asyncio.Event()
+
+    async def executor(job: Job, context: JobContext) -> SeparationResult:
+        context.set_stage(JobState.SEPARATING)
+        started.set()
+        await gate.wait()
+        return make_result(job.id)
+
+    job = manager.submit(make_configuration(), executor)
+    await asyncio.wait_for(started.wait(), timeout=WAIT_TIMEOUT)
+
+    with pytest.raises(ApplicationError) as excinfo:
+        manager.remove(job.id)
+    assert excinfo.value.code == "job_active"
+    assert excinfo.value.detail == {"job_id": job.id, "state": "separating"}
+
+    gate.set()
+    await recorder.wait_for_terminal(job.id)
+
+
+async def test_remove_of_an_unknown_job_is_job_not_found(manager: JobManager) -> None:
+    with pytest.raises(ApplicationError) as excinfo:
+        manager.remove("01NOTAJOB")
+    assert excinfo.value.code == "job_not_found"
+    assert excinfo.value.status_code == 404
+
+
+async def test_remove_is_available_after_aclose() -> None:
+    """Unlike ``submit``/``cancel``, removal touches no queue or worker."""
+    m = JobManager()
+    recorder = EventRecorder()
+    m.add_listener(recorder)
+    m.start()
+    job = m.submit(make_configuration(), instant_executor)
+    await recorder.wait_for_terminal(job.id)
+    await m.aclose()
+
+    removed = m.remove(job.id)
+    assert removed.id == job.id
+
+
 # -- failure ----------------------------------------------------------------
 
 
