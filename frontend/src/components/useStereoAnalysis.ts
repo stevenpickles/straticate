@@ -55,12 +55,20 @@ export function useStereoAnalysis(): void {
     dispatch({ type: 'analysis/requested' })
     getAudioAnalysis(audioId)
       .then((analysis) => {
-        dispatch({ type: 'analysis/loaded', analysis })
+        // Staleness guard (review): unreachable today — SeparationOptions
+        // unmounts before a different upload can become current — but one
+        // line of insurance against a future in-place replace-audio
+        // affordance clobbering a newer upload's state with an older answer.
+        if (requestedFor.current === audioId) {
+          dispatch({ type: 'analysis/loaded', analysis })
+        }
       })
       .catch(() => {
         // Deliberately swallowed. Nothing on screen depends on this, so there
         // is nothing to report and nothing to retry.
-        dispatch({ type: 'analysis/failed' })
+        if (requestedFor.current === audioId) {
+          dispatch({ type: 'analysis/failed' })
+        }
       })
   }, [audioId, isStereo, dispatch])
 }

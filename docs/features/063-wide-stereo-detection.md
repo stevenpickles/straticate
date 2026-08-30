@@ -422,3 +422,18 @@ the constant is the application's.
   only this feature's own hunks, so the "second of 062/063 regenerates" rule
   cost nothing this time. Recorded because the rule exists precisely because it
   has not always been so.
+
+### Windows delete/analysis race (review finding, documented)
+
+On Windows, `DELETE /audio/{id}` racing an in-flight analysis leaves the
+original file and its directory behind: ffmpeg holds the file open for the
+decode's duration (the first place a plain request handler holds a file open
+for seconds), Windows denies delete-sharing, and `remove_files`'s
+`ignore_errors` rmtree moves on. The DELETE still answers 204 and the record
+is gone; the survivor is a classic orphan that `POST /system/prune` (060)
+classifies and reclaims — reproduced and verified by the review. Self-healing
+and requiring two specific requests to race, it is recorded here rather than
+engineered around; a retry-after-in-flight-settles hook on the analysis
+cache is the shape of a fix if it ever matters in practice. Also noted: the
+timeout path's decoder close racing the background read thread was
+stress-tested by the review (20 trials) with no hangs, zombies, or leaks.
