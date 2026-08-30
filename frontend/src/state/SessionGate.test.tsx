@@ -3,7 +3,11 @@ import { act, render, screen, waitFor } from '@testing-library/react'
 import { SessionGate, restoredPhase } from './SessionGate'
 import { AppStateProvider, useAppState } from './appState'
 import { JobStateProvider, useJobState } from './jobState'
-import { SESSION_STORAGE_KEY, readSessionSnapshot } from './persistence'
+import {
+  SESSION_STORAGE_KEY,
+  emptySessionSnapshot,
+  readSessionSnapshot,
+} from './persistence'
 import { sampleAudioFile, sampleJob, sampleJobId } from '../test/fixtures'
 import type { Job, JobState } from '../api/types'
 
@@ -229,6 +233,41 @@ describe('SessionGate when the stored ids are stale', () => {
     })
   })
 
+  it('drops a stale view for a dead job instead of pinning the key alive (post-review nit)', async () => {
+    // A view left over from before the reload, for the job that turned out
+    // to be gone. Before the fix, the write below would have kept it — the
+    // `view` field is what `isEmptySessionSnapshot` looks at, so the key
+    // would never be removed and every later reload would show "Restoring
+    // your session…" while restoring nothing.
+    storeSnapshot({
+      jobId: sampleJobId,
+      audioId: null,
+      phase: 'inspect',
+      view: {
+        jobId: sampleJobId,
+        positionSeconds: 24,
+        loopStart: null,
+        loopEnd: null,
+        zoom: 1,
+        scrollSeconds: 0,
+      },
+    })
+    stubFetch({ job: null })
+
+    await renderRestored()
+
+    expect(screen.getByTestId('phase')).toHaveTextContent('select')
+    expect(screen.getByTestId('job')).toHaveTextContent('none')
+    await waitFor(() => {
+      // Nothing left to restore, and nothing left stored either — the key
+      // itself is gone, so the next mount skips the restoring gate rather
+      // than running a no-op restore against a view for a job that no
+      // longer exists.
+      expect(readSessionSnapshot()).toEqual(emptySessionSnapshot)
+      expect(sessionStorage.getItem(SESSION_STORAGE_KEY)).toBeNull()
+    })
+  })
+
   it('falls back to file selection when the upload is gone too', async () => {
     storeSnapshot({
       jobId: sampleJobId,
@@ -310,6 +349,7 @@ describe('SessionGate persistence', () => {
         jobId: sampleJobId,
         audioId: sampleAudioFile.id,
         phase: 'inspect',
+        view: null,
       })
     })
   })

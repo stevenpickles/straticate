@@ -363,7 +363,7 @@ verbatim as the planning record they were.
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
 | 064 | Stem-audio retry + player hygiene            | MERGED  | 048, 052   | `064-stem-retry-hygiene` | #91 |
 | 065 | Job-scoped stem session (engine hoist)       | MERGED  | 064        | `065-stem-session` | #96 |
-| 066 | View state survives a reload                 | PLANNED | 033, 065   | `066-view-state-reload` | |
+| 066 | View state survives a reload                 | PR OPEN | 033, 065   | `066-view-state-reload` | #102 |
 | 067 | Lane height + fader accessibility            | MERGED  | 050, 054   | `067-lane-height-a11y` | #94 |
 | 068 | Auto-follow suppressed inside a loop region  | MERGED  | 051, 053, 067 | `068-auto-follow-loop` | #97 |
 | 069 | Release preparation for v0.3.0               | PLANNED | 056–068    | `069-release-preparation-v0.3.0` | |
