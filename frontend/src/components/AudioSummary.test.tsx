@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { Workspace } from './Workspace'
 import {
   AppStateProvider,
+  initialAnalysisState,
   initialConfigureState,
   type AppState,
 } from '../state/appState'
@@ -19,6 +20,12 @@ import { deleteAudio } from '../api/audio'
 vi.mock('../api/audio', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/audio')>()),
   deleteAudio: vi.fn(() => Promise.resolve()),
+  // Feature 063's enrichment, mounted with the configure phase's separation
+  // options; this suite is about the metadata summary, so it is answered and
+  // ignored rather than left to reach a `fetch` nobody stubbed.
+  getAudioAnalysis: vi.fn(() =>
+    Promise.resolve({ l_r_correlation: 0.86, wide_stereo: false }),
+  ),
 }))
 
 // The configure phase also mounts SeparationOptions (feature 011), which
@@ -54,6 +61,7 @@ async function renderConfigured(file: AudioFile = sampleAudioFile) {
   const initialState: AppState = {
     phase: 'configure',
     upload: { status: 'uploaded', file },
+    analysis: initialAnalysisState,
     configure: initialConfigureState,
   }
   const view = render(

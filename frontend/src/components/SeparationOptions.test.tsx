@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { SeparationOptions } from './SeparationOptions'
 import {
   AppStateProvider,
+  initialAnalysisState,
   initialConfigureState,
   useAppState,
   type AppState,
@@ -23,10 +24,19 @@ import {
   sampleSeparationModes,
   sampleWeightsBytes,
 } from '../test/fixtures'
-import type { Model, SeparationMode } from '../api/types'
+import type { Model, SeparationMode, StereoAnalysis } from '../api/types'
 import { formatFileSize } from '../format'
 
 const [twoStemMode, fourStemMode] = sampleSeparationModes
+
+/** A `StereoAnalysis` for a mix well inside the ordinary band (feature 063). */
+const ordinaryStereo: StereoAnalysis = {
+  l_r_correlation: 0.86,
+  wide_stereo: false,
+}
+
+/** A `StereoAnalysis` for a mix as wide as feature 041's track. */
+const wideStereo: StereoAnalysis = { l_r_correlation: 0.229, wide_stereo: true }
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -79,6 +89,8 @@ function stubFetch(options: {
    * every test that is *not* about pricing reading as it did before.
    */
   catalog?: Model[] | Response | Promise<Response>
+  /** `GET /audio/{id}/analysis` (feature 063); defaults to ordinary stereo. */
+  analysis?: Response | Promise<Response>
 }): FetchMock {
   const modes = options.modes ?? sampleSeparationModes
   const catalog = options.catalog ?? []
@@ -103,6 +115,12 @@ function stubFetch(options: {
       )
     })
   const fetchMock = vi.fn((url: string) => {
+    // Feature 063's fire-and-forget enrichment. Every render of this component
+    // makes it, and it answers "ordinary stereo" unless a test says otherwise —
+    // so nothing here changes for the tests that are not about it.
+    if (url.endsWith('/analysis')) {
+      return Promise.resolve(options.analysis ?? jsonResponse(ordinaryStereo))
+    }
     if (url.endsWith('/separation-modes')) {
       return Promise.resolve(Array.isArray(modes) ? jsonResponse(modes) : modes)
     }
@@ -143,6 +161,7 @@ function renderOptions(file = sampleAudioFile) {
   const initialState: AppState = {
     phase: 'configure',
     upload: { status: 'uploaded', file },
+    analysis: initialAnalysisState,
     configure: initialConfigureState,
   }
   return render(
@@ -407,6 +426,9 @@ describe('SeparationOptions starting a separation', () => {
   it('lets the user retry after a failed create', async () => {
     let jobAttempts = 0
     const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith('/analysis')) {
+        return Promise.resolve(jsonResponse(ordinaryStereo))
+      }
       if (url.endsWith('/separation-modes')) {
         return Promise.resolve(jsonResponse(sampleSeparationModes))
       }
@@ -1127,6 +1149,7 @@ describe('SeparationOptions keeping a tier’s price honest', () => {
     const initialState: AppState = {
       phase: 'configure',
       upload: { status: 'uploaded', file: sampleAudioFile },
+      analysis: initialAnalysisState,
       configure: initialConfigureState,
     }
     const view = (revision: number) => (
@@ -1314,6 +1337,111 @@ describe('SeparationOptions stereo handling (feature 041)', () => {
     // feature's brief rules out, and this is where that would show up first.
     await userEvent.click(
       await screen.findByRole('button', { name: 'Start separation' }),
+    )
+    await waitFor(() => {
+      expect(postedJobBodies(fetchMock)).toHaveLength(1)
+    })
+    expect(postedJobBodies(fetchMock)[0]).toMatchObject({
+      stereo_handling: 'as_is',
+    })
+  })
+})
+
+/**
+ * Feature 063: the configure step measures the upload's stereo image in the
+ * background, and does nothing with the answer.
+ *
+ * The last of these is the important one. The measurement exists so that a
+ * *suggestion* can be built on it, and the suggestion is currently held off
+ * (see `WideStereoNote.tsx`); what must be true either way — and what these
+ * assert — is that nothing about the user's selection moves because the backend
+ * measured something.
+ */
+describe('SeparationOptions stereo measurement', () => {
+  /** How many times `GET /audio/{id}/analysis` has been requested. */
+  function analysisReads(fetchMock: FetchMock): number {
+    return fetchMock.mock.calls.filter(([url]) =>
+      (url as string).endsWith('/analysis'),
+    ).length
+  }
+
+  function monoUpload() {
+    return {
+      ...sampleAudioFile,
+      metadata: { ...sampleAudioFile.metadata, channels: 1 },
+    }
+  }
+
+  it('measures a stereo upload exactly once', async () => {
+    const fetchMock = stubFetch({ analysis: jsonResponse(wideStereo) })
+    renderOptions()
+
+    await screen.findByRole('radio', { name: 'Keep stereo' })
+    await waitFor(() => {
+      expect(analysisReads(fetchMock)).toBe(1)
+    })
+    expect(fetchMock.mock.calls.map(([url]) => url as string)).toContain(
+      `/api/v1/audio/${sampleAudioFile.id}/analysis`,
+    )
+  })
+
+  it('never measures a mono upload', async () => {
+    const fetchMock = stubFetch({})
+    renderOptions(monoUpload())
+
+    await screen.findByText(/already mono, so there is nothing to fold/i)
+    expect(analysisReads(fetchMock)).toBe(0)
+  })
+
+  it('says nothing when the measurement fails', async () => {
+    const fetchMock = stubFetch({
+      analysis: errorResponse('audio_not_found', 'No such audio.', 404),
+    })
+    renderOptions()
+
+    // The enrichment failed; the step is untouched. No alert, every control
+    // there, exactly as `useModelCatalog` behaves for a failed catalog read.
+    await waitFor(() => {
+      expect(analysisReads(fetchMock)).toBe(1)
+    })
+    expect(
+      await screen.findByRole('radio', { name: 'Keep stereo' }),
+    ).toBeChecked()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('note')).not.toBeInTheDocument()
+  })
+
+  it('shows no suggestion for a wide mix while the hold stands', async () => {
+    stubFetch({ analysis: jsonResponse(wideStereo) })
+    renderOptions()
+
+    await screen.findByRole('radio', { name: 'Keep stereo' })
+    // WIDE_STEREO_SUGGESTION_ENABLED is false pending the false-positive
+    // measurement; the note is implemented and covered in its own suite.
+    await waitFor(() => {
+      expect(screen.queryByRole('note')).not.toBeInTheDocument()
+    })
+  })
+
+  it('changes no selection when a wide measurement arrives', async () => {
+    const fetchMock = stubFetch({ analysis: jsonResponse(wideStereo) })
+    renderOptions()
+
+    await waitFor(() => {
+      expect(analysisReads(fetchMock)).toBe(1)
+    })
+    // Nothing moved: the app does not alter someone's audio because it noticed
+    // something about it (feature 041). The other two choices stay unselected.
+    expect(screen.getByRole('radio', { name: 'Keep stereo' })).toBeChecked()
+    expect(
+      screen.getByRole('radio', { name: 'Centre the low end' }),
+    ).not.toBeChecked()
+    expect(
+      screen.getByRole('radio', { name: 'Fold to mono' }),
+    ).not.toBeChecked()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start separation' }),
     )
     await waitFor(() => {
       expect(postedJobBodies(fetchMock)).toHaveLength(1)

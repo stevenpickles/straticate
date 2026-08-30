@@ -162,3 +162,15 @@
 .separation-option-note-only {
   grid-column: 1 / -1;
 }
+
+/*
+ * The wide-stereo note (feature 063): something measured about the recording,
+ * above the choices it is relevant to. Full width for the same reason as the
+ * note above — it belongs to no single option — and set apart with a rule
+ * rather than a colour, because it is information and not a warning.
+ */
+.wide-stereo-note {
+  grid-column: 1 / -1;
+  padding-bottom: 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+}

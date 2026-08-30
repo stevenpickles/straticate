@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event'
 import { Workspace } from './Workspace'
 import {
   AppStateProvider,
+  initialAnalysisState,
   initialConfigureState,
   type AppState,
 } from '../state/appState'
@@ -22,14 +23,30 @@ import {
 import { StemSessionProvider } from '../state/stemSession'
 import { FakeAudioContext } from '../test/fakeAudioContext'
 
+function jsonResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  })
+}
+
+/**
+ * Answer the two reads the configure phase makes on mount.
+ *
+ * Routed by URL rather than answered with one shared `Response`, because a
+ * `Response` body can only be read once: feature 063 added a second request
+ * (the fire-and-forget stereo measurement), and a single mock value would have
+ * one of the two fail on whichever arrived second.
+ */
 function stubModesFetch() {
   vi.stubGlobal(
     'fetch',
-    vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(sampleSeparationModes), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      }),
+    vi.fn((url: string) =>
+      Promise.resolve(
+        url.endsWith('/analysis')
+          ? jsonResponse({ l_r_correlation: 0.86, wide_stereo: false })
+          : jsonResponse(sampleSeparationModes),
+      ),
     ),
   )
 }
@@ -41,6 +58,7 @@ function renderWorkspace(
   const initialState: AppState = {
     phase: 'select',
     upload: { status: 'idle' },
+    analysis: initialAnalysisState,
     configure: initialConfigureState,
     ...appState,
   }
