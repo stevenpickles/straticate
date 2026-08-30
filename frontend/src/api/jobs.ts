@@ -39,11 +39,18 @@ export interface StereoHandlingOption {
  * what it costs — never "improves separation", which would be a promise the
  * app cannot keep for an arbitrary mix.
  *
- * The fold is specifically a control that **recovers a stem you would otherwise
- * lose**, not one that separates better. Feature 041 measured it: the four
- * stems reconstruct the mixture at +0.999 either way, so nothing is gained or
- * lost overall — a stem that was near-silent becomes usable because the low end
- * is *reassigned*. The note says that, and no more.
+ * Both folds are specifically controls that **recover a stem you would otherwise
+ * lose**, not ones that separate better. Features 041 and 062 measured them: the
+ * four stems reconstruct the mixture at +0.999 in every case, so nothing is
+ * gained or lost overall — a stem that was near-silent becomes usable because
+ * the low end is *reassigned*. The notes say that, and no more.
+ *
+ * Declaration order is picker order, and it runs from least to most done to the
+ * recording. `mono_bass` sits in the middle because that is exactly what it is:
+ * feature 062 measured it recovering the stem at least as well as the full fold
+ * while keeping the stereo image above its crossover. Neither note quantifies
+ * that — one track is not a population, which is the same reason 041's note
+ * makes no quality claim.
  */
 const STEREO_HANDLING_TABLE: Record<
   StereoHandling,
@@ -52,6 +59,10 @@ const STEREO_HANDLING_TABLE: Record<
   as_is: {
     label: 'Keep stereo',
     note: 'Separate the recording exactly as it is.',
+  },
+  mono_bass: {
+    label: 'Centre the low end',
+    note: 'Mixes only the low frequencies to the middle and leaves the rest of the stereo image alone, so the stems still come back in stereo. On a very wide older stereo mix this recovers a stem that would otherwise come out near-silent. It does not otherwise change how well the parts are told apart.',
   },
   mono: {
     label: 'Fold to mono',

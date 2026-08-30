@@ -325,16 +325,22 @@ async def test_create_returns_201_queued_with_the_resolved_model_and_device(
     }
 
 
+@pytest.mark.parametrize("handling", ["mono", "mono_bass"])
 async def test_create_echoes_a_requested_stereo_handling(
-    jobs_client: httpx2.AsyncClient, audio_id: str
+    jobs_client: httpx2.AsyncClient, audio_id: str, handling: str
 ) -> None:
-    """Feature 041's field survives the create round trip onto the job record."""
-    job = await create_job(jobs_client, **configuration(audio_id, stereo_handling="mono"))
-    assert job["configuration"]["stereo_handling"] == "mono"
+    """Feature 041's field survives the create round trip onto the job record.
+
+    Parametrised over both non-default values since feature 062: the enum is on
+    the wire, so a value the schema forgot would be a 422 here rather than a
+    quiet fallback to ``as_is``.
+    """
+    job = await create_job(jobs_client, **configuration(audio_id, stereo_handling=handling))
+    assert job["configuration"]["stereo_handling"] == handling
 
     fetched = await jobs_client.get(f"{JOBS_URL}/{job['id']}")
     assert fetched.status_code == 200, fetched.text
-    assert fetched.json()["configuration"]["stereo_handling"] == "mono"
+    assert fetched.json()["configuration"]["stereo_handling"] == handling
 
 
 async def test_create_rejects_an_unknown_stereo_handling(
