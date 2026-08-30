@@ -356,7 +356,7 @@ verbatim as the planning record they were.
 | 056 | Durable upload registry                      | MERGED  | —          | `056-durable-upload-registry` | #90 |
 | 057 | Durable job records + interrupted recovery   | MERGED  | —          | `057-durable-job-records` | #92 |
 | 058 | Job deletion + exports authority in layout   | PLANNED | 057        | `058-job-deletion` | |
-| 059 | Disk-usage endpoint                          | PR OPEN | 056, 057   | `059-disk-usage-endpoint` | |
+| 059 | Disk-usage endpoint                          | PR OPEN | 056, 057   | `059-disk-usage-endpoint` | #95 |
 | 060 | Prune endpoint                               | PLANNED | 058, 059   | `060-prune-endpoint` | |
 | 061 | Persist model install failures               | MERGED  | —          | `061-persist-install-failures` | #89 |
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | READY | 041 | `062-band-limited-fold` | |
