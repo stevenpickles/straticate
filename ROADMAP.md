@@ -354,7 +354,7 @@ verbatim as the planning record they were.
 | 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |
 | 055 | Release preparation for v0.2.0               | MERGED  | 048–054    | `055-release-preparation-v0.2.0` | #84 |
 | 056 | Durable upload registry                      | PR OPEN | —          | `056-durable-upload-registry` | #90 |
-| 057 | Durable job records + interrupted recovery   | READY   | —          | `057-durable-job-records` | |
+| 057 | Durable job records + interrupted recovery   | PR OPEN | —          | `057-durable-job-records` | #92 |
 | 058 | Job deletion + exports authority in layout   | PLANNED | 057        | `058-job-deletion` | |
 | 059 | Disk-usage endpoint                          | PLANNED | 056, 057   | `059-disk-usage-endpoint` | |
 | 060 | Prune endpoint                               | PLANNED | 058, 059   | `060-prune-endpoint` | |

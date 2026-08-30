@@ -134,8 +134,11 @@ The four you are most likely to meet:
   the fold costs `drums` and `other` about 3 dB each while `vocals` gains about
   2 dB. Every stem then comes back mono, and nothing detects the condition for
   you.
-- **Job records are in memory.** Restart the backend and every job record is
-  gone, while its stems and exports stay on disk.
+- **A job the server stopped under does not resume.** Job records survive a
+  restart, so a finished separation and its stems are still there afterwards —
+  but a job that was queued or running when the backend stopped comes back
+  `failed` ("the server stopped while this job was queued or running") rather
+  than being re-run for you. Start it again when you want it.
 - **Nothing prunes.** Uploads, stems and export artifacts accumulate under the
   data directory forever; there is no retention policy.
 

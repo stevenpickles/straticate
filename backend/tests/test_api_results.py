@@ -38,6 +38,7 @@ from straticate.inference import (
     stem_path,
 )
 from straticate.jobs import CancellationToken, JobEvent, JobManager
+from straticate.jobs.layout import job_record_path
 from straticate.main import create_app
 from straticate.schemas import AudioFile, AudioMetadata, ComputeDevice, Model
 from straticate.schemas.events import JobCancelledEvent, JobCompletedEvent, JobFailedEvent
@@ -887,6 +888,10 @@ async def test_a_removed_job_directory_returns_stem_file_missing(
     for stem in VOCALS_STEMS:
         stem_path(tmp_path, job_id, stem).unlink()
     stem_path(tmp_path, job_id, "vocals").parent.rmdir()
+    # The job's durable record (feature 057) lives in that directory too, and
+    # the job manager still holds this job in memory — so removing it here is
+    # about the *files*, and the 404 below is still about the missing stem.
+    job_record_path(tmp_path, job_id).unlink()
     job_output_dir(tmp_path, job_id).rmdir()
 
     assert_envelope(await results_client.get(stem_url(job_id, "vocals")), "stem_file_missing", 404)

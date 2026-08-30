@@ -60,9 +60,11 @@ def stem_not_found(job_id: str, stem_name: str, available: list[str]) -> Applica
 def stem_file_missing(job_id: str, stem_name: str) -> ApplicationError:
     """Build the 404 for a stem the result claims but whose file is gone.
 
-    Job records are in-memory while stems are on disk, so the two can drift:
-    the directory can be removed underneath a live job. That is a missing
-    resource, not a server fault — a 404 with its own code, never a 500.
+    A record and the stems it names are separate things on disk, so the two can
+    drift: the stems directory can be removed underneath a live job, or emptied
+    between the runs that a durable record spans (feature 057). That is a
+    missing resource, not a server fault — a 404 with its own code, never a
+    500.
     """
     return ApplicationError(
         "stem_file_missing",
