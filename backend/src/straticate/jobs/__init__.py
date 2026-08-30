@@ -16,6 +16,10 @@ Public surface (consumed by features 013/014/015):
 - :func:`resolve_audio` / :func:`resolve_model` / :func:`resolve_device` — the
   pure resolvers that turn a create-job request's IDs into the audio file,
   catalog model and compute device the job runs with (feature 015).
+- :class:`JobStore` — the durable ``job.json`` records that make a completed
+  job (and its stems) reachable after a restart, plus
+  :data:`JOB_INTERRUPTED_CODE`, the error a job queued or running at shutdown
+  comes back with (feature 057).
 - :func:`get_job_manager` — FastAPI dependency accessor.
 """
 
@@ -38,11 +42,19 @@ from straticate.jobs.manager import (
 )
 from straticate.jobs.resolution import resolve_audio, resolve_device, resolve_model
 from straticate.jobs.state import InvalidJobTransition, assert_transition
+from straticate.jobs.store import (
+    JOB_INTERRUPTED_CODE,
+    JOB_INTERRUPTED_MESSAGE,
+    JobStore,
+    interrupted_record,
+)
 
 __all__ = [
     "DEFAULT_CLIENT_QUEUE_SIZE",
     "DEFAULT_PROGRESS_MIN_INTERVAL_SECONDS",
     "EVICTABLE_EVENT_TYPES",
+    "JOB_INTERRUPTED_CODE",
+    "JOB_INTERRUPTED_MESSAGE",
     "CancellationToken",
     "EventHub",
     "EventSocket",
@@ -53,9 +65,11 @@ __all__ = [
     "JobEventListener",
     "JobExecutor",
     "JobManager",
+    "JobStore",
     "assert_transition",
     "get_event_hub",
     "get_job_manager",
+    "interrupted_record",
     "resolve_audio",
     "resolve_device",
     "resolve_model",

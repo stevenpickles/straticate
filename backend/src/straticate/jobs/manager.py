@@ -12,6 +12,11 @@ The :class:`JobManager` is the job engine described in ARCHITECTURE.md §6:
   single source of truth for "is this job running".
 - State transitions are validated by :func:`straticate.jobs.state.assert_transition`.
 - Cancellation is cooperative via :class:`straticate.jobs.cancellation.CancellationToken`.
+- Job records survive the process (feature 057). Given a
+  :class:`~straticate.jobs.store.JobStore`, ``submit()`` and every terminal
+  transition write ``{data_dir}/jobs/{job_id}/job.json``, and ``restore()``
+  seeds the records a previous run left behind — without queueing them and
+  without emitting a single event.
 - Every lifecycle change is published to registered listeners as the typed
   event models from :mod:`straticate.schemas.events` (the WebSocket hub of
   feature 013 subscribes here; REST endpoints of feature 015 call the manager
@@ -37,7 +42,7 @@ import inspect
 import logging
 import math
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -49,6 +54,7 @@ from ulid import ULID
 from straticate.errors import ApplicationError
 from straticate.jobs.cancellation import CancellationToken, JobCancelled
 from straticate.jobs.state import InvalidJobTransition, assert_transition
+from straticate.jobs.store import JobStore
 from straticate.schemas.common import ErrorInfo
 from straticate.schemas.events import (
     JobCancelledEvent,
@@ -124,10 +130,18 @@ class JobExecutor(Protocol):
 
 @dataclass
 class _JobEntry:
-    """Internal bookkeeping for one submitted job (the live record lives here)."""
+    """Internal bookkeeping for one submitted job (the live record lives here).
+
+    ``executor`` is ``None`` for an entry seeded by :meth:`JobManager.restore`
+    — a job from a previous process, whose executor closure (a built separator,
+    a decoded input path, a resolved device) cannot be reconstructed from a
+    record. That is safe because a restored entry is always **terminal**: it is
+    never put on the queue, so the worker never reaches for its executor, and
+    :meth:`JobManager.cancel` is already a no-op on a terminal job.
+    """
 
     job: Job
-    executor: JobExecutor
+    executor: JobExecutor | None
     token: CancellationToken = field(default_factory=CancellationToken)
     started_monotonic: float | None = None
     last_progress_emit: float | None = None
@@ -246,17 +260,30 @@ class JobManager:
     deep-copy **snapshots**; use :meth:`get` to re-read current state or
     :meth:`add_listener` for pushes.
 
+    **Job records outlive the process** when a store is supplied (feature 057).
+    The manager writes a record at exactly two points — when a job is submitted
+    and when it reaches a terminal state — and reads none: loading is the
+    application lifespan's job, which hands the results to :meth:`restore`.
+    Everything in between (stage changes, four-per-second progress) stays in
+    memory, because a job interrupted mid-run comes back ``failed`` whatever
+    stage it had reached. Without a store the manager behaves exactly as it did
+    before that feature, which is what the unit tests here rely on.
+
     Args:
         progress_min_interval: Minimum seconds between ``job_progress`` events
             per job (throttling; final ``progress >= 1.0`` always emits).
+        store: Where durable job records are written, or ``None`` to keep the
+            manager purely in memory.
     """
 
     def __init__(
         self,
         *,
         progress_min_interval: float = DEFAULT_PROGRESS_MIN_INTERVAL_SECONDS,
+        store: JobStore | None = None,
     ) -> None:
         self._progress_min_interval = progress_min_interval
+        self._store = store
         self._entries: dict[str, _JobEntry] = {}
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._events: asyncio.Queue[JobEvent | None] = asyncio.Queue()
@@ -289,11 +316,13 @@ class JobManager:
         """Stop the worker and release resources. Idempotent.
 
         A job running at shutdown receives ``asyncio.CancelledError`` and is
-        marked ``cancelled``; jobs still queued remain ``queued`` (this is an
-        in-memory engine — nothing survives the process anyway). The internal
-        event queue is drained: every already-emitted event (including the
-        shutdown cancellation) is delivered to listeners before ``aclose()``
-        returns.
+        marked ``cancelled`` (and, with a store, persisted as such — an orderly
+        shutdown really did cancel it). Jobs still queued remain ``queued``,
+        which is what makes them ``job_interrupted`` on the next boot rather
+        than a cancellation nobody requested: see
+        :mod:`straticate.jobs.store`. The internal event queue is drained:
+        every already-emitted event (including the shutdown cancellation) is
+        delivered to listeners before ``aclose()`` returns.
         """
         self._closed = True
         worker = self._worker_task
@@ -322,6 +351,16 @@ class JobManager:
 
         Emits ``job_created``. The returned ``Job`` is a snapshot.
 
+        **The record is written before the job is enqueued or announced**, so a
+        job the API answered ``201`` for cannot be one the next process has
+        never heard of — and, unlike the terminal transitions, a store that
+        cannot write here **fails the submission**: nothing has run yet, the
+        entry is removed, and the caller's error path answers the client
+        honestly. Swallowing at submit would quietly re-open the exact "201
+        then gone" window this feature closes (review finding); swallowing at
+        the terminal transitions stays right, because a full disk must never
+        turn work that really completed into a failure (see :meth:`_persist`).
+
         Args:
             configuration: The requested separation configuration.
             executor: The executor that will process the job when its turn
@@ -348,12 +387,53 @@ class JobManager:
             error=None,
             result=None,
         )
+        store = self._store
+        if store is not None:
+            # Deliberately not _persist(): submit is the one transition where
+            # a write failure is recoverable by refusing, so it propagates.
+            store.save(job)
         self._entries[job.id] = _JobEntry(job=job, executor=executor)
         self._queue.put_nowait(job.id)
         self._dispatch(
             JobCreatedEvent(type="job_created", job_id=job.id, job=job.model_copy(deep=True))
         )
         return job.model_copy(deep=True)
+
+    def restore(self, jobs: Iterable[Job]) -> None:
+        """Seed records from a previous process, without queueing or announcing them.
+
+        Called once, by the application lifespan, with the records
+        :meth:`straticate.jobs.store.JobStore.recover` loaded — before any job
+        of this run is submitted, so ``GET /jobs`` still lists everything in
+        ULID order.
+
+        Two properties are the whole point:
+
+        - **Nothing is enqueued.** A restored job is finished; there is nothing
+          left to run, and re-running one would be the application repeating
+          heavy work nobody asked for.
+        - **No event is emitted.** The event stream is a *live* channel: a
+          ``job_completed`` frame means "this job just completed", and there is
+          no client connected at startup to receive one anyway. Replaying
+          history through it would tell the first browser to connect that a job
+          from last week had just finished, and would restart the telemetry
+          sampler for it. REST reads are how a client learns about the past.
+
+        Raises:
+            RuntimeError: If the manager was already closed.
+            ValueError: If any record is not in a terminal state. Only
+                terminal records can be restored — a non-terminal one would sit
+                in the manager forever, never queued and never finishing. The
+                store normalizes those to ``failed`` before they get here.
+        """
+        if self._closed:
+            raise RuntimeError("JobManager is closed")
+        for job in jobs:
+            if not job.state.is_terminal:
+                raise ValueError(
+                    f"cannot restore job {job.id!r} in non-terminal state {job.state.value!r}"
+                )
+            self._entries[job.id] = _JobEntry(job=job.model_copy(deep=True), executor=None)
 
     def get(self, job_id: str) -> Job:
         """Return a snapshot of the job, or raise ``job_not_found`` (404).
@@ -455,6 +535,14 @@ class JobManager:
     async def _run_job(self, entry: _JobEntry) -> None:
         """Run one job's executor and drive it to a terminal state."""
         job = entry.job
+        executor = entry.executor
+        if executor is None:
+            # Unreachable by construction: only :meth:`submit` enqueues, and it
+            # always supplies an executor; a restored entry (the only other
+            # kind) is terminal and never queued. Raising rather than assuming
+            # keeps that invariant checkable — the worker turns it into a
+            # logged, failed job instead of a stalled queue.
+            raise RuntimeError(f"job {job.id!r} was queued without an executor")
         job.started_at = datetime.now(UTC)
         entry.started_monotonic = time.monotonic()
         self._dispatch(
@@ -469,7 +557,7 @@ class JobManager:
             report_progress=partial(self._report_progress, entry),
         )
         try:
-            result = await entry.executor(job.model_copy(deep=True), context)
+            result = await executor(job.model_copy(deep=True), context)
         except JobCancelled:
             if not job.state.is_terminal:
                 self._mark_cancelled(entry)
@@ -584,6 +672,11 @@ class JobManager:
         self._dispatch(event)
 
     # -- internal: terminal transitions ------------------------------------
+    #
+    # Each of the three persists the finished record *before* it dispatches, so
+    # a client that receives a terminal event can trust that the record behind
+    # it is already on disk. Nothing in between is persisted: see
+    # :mod:`straticate.jobs.store`.
 
     def _mark_completed(self, entry: _JobEntry, result: SeparationResult) -> None:
         job = entry.job
@@ -592,6 +685,7 @@ class JobManager:
         job.progress = 1.0
         job.result = result
         job.finished_at = datetime.now(UTC)
+        self._persist(job)
         self._dispatch(JobCompletedEvent(type="job_completed", job_id=job.id, result=result))
 
     def _mark_cancelled(self, entry: _JobEntry) -> None:
@@ -600,6 +694,7 @@ class JobManager:
         assert_transition(stage, JobState.CANCELLED)
         job.state = JobState.CANCELLED
         job.finished_at = datetime.now(UTC)
+        self._persist(job)
         self._dispatch(
             JobCancelledEvent(type="job_cancelled", job_id=job.id, stage_at_cancellation=stage)
         )
@@ -610,7 +705,31 @@ class JobManager:
         job.state = JobState.FAILED
         job.error = error
         job.finished_at = datetime.now(UTC)
+        self._persist(job)
         self._dispatch(JobFailedEvent(type="job_failed", job_id=job.id, error=error))
+
+    def _persist(self, job: Job) -> None:
+        """Write ``job``'s durable record, if this manager has a store.
+
+        **A failing store never fails a *running or finished* job.** The
+        manager's whole defensive posture is that no single job can stall the
+        queue or die half-way through a terminal transition, and a full disk
+        is exactly the moment that matters: raising here would turn a
+        separation that really did complete into ``separation_failed`` (the
+        worker's own catch-all). The failure is logged with its traceback and
+        the job carries on in memory. ``submit`` is deliberately different —
+        it calls the store directly and lets a write failure refuse the
+        submission, because at that point nothing has run and a refused POST
+        is honest where an unpersisted 201 is the defect this feature exists
+        to close.
+        """
+        store = self._store
+        if store is None:
+            return
+        try:
+            store.save(job)
+        except Exception:
+            logger.exception("Could not persist the record of job %s", job.id)
 
     # -- internal: plumbing -------------------------------------------------
 

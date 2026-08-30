@@ -473,7 +473,35 @@ is not.
 **`GET /jobs` returns jobs in submission order (oldest first)** — the order the
 backend accepted them, which is also the order they run in (the queue is FIFO
 with one active job, ARCHITECTURE.md §6). Clients that want newest-first sort
-client-side. Job records are in-memory only: the list is empty after a restart.
+client-side.
+
+**Jobs survive a restart** (feature 057). Every job is written to
+`{data_dir}/jobs/{job_id}/job.json` when it is created and again when it
+finishes, so a restarted server lists the jobs of previous runs too, in the
+same order — and a completed job's `result`, stems and exports stay reachable
+rather than becoming an unreadable directory. Two consequences are worth
+knowing:
+
+| the job was… | after a restart it is… |
+| --- | --- |
+| `completed`, `cancelled` or `failed` | **identical**, byte for byte, including `result` and `error` |
+| `queued`, or in any processing state | `failed`, with `error.code` = `job_interrupted` |
+
+`job_interrupted` says the server stopped while the job was queued or running.
+It is **never re-queued**: nothing re-runs heavy inference at startup for a
+request nobody repeated, and the resolved separator and decoded input a job
+needs cannot be rebuilt from a record. It is not reported as `cancelled`
+either — nobody cancelled it — which is how a client can tell "the server went
+away" from "I pressed cancel". Resubmitting is one `POST /jobs` with the same
+configuration, which the record still carries.
+
+A shutdown that the server *completes* is different: a job running when the
+process is asked to stop is cancelled properly on the way down, and comes back
+`cancelled`. `job_interrupted` is what a crash, a kill or a power loss leaves.
+
+Job artifacts whose record was lost (a directory with no `job.json`, including
+everything produced before feature 057) are simply not listed. Nothing deletes
+them; a later feature surfaces them.
 
 **Cancellation is a request, not a stop.** `POST /jobs/{job_id}/cancel` takes no
 body. A `queued` job is cancelled immediately; a running one is asked to stop at
@@ -498,6 +526,7 @@ Job error codes:
 | `model_parameters_invalid` | 500 | the resolved model's catalog entry carries inference parameters this build cannot use |
 | `job_not_found` | 404 | unknown `job_id` (get/cancel) |
 | `service_unavailable` | 503 | the job manager is shutting down (create/cancel) |
+| `job_interrupted` | — | **not a response status.** The `error.code` on a `failed` job whose server stopped while it was queued or running (feature 057); it is read from the job record, never returned as an HTTP error |
 
 A malformed create body is the standard `validation_error` (422). References are
 resolved in the order audio → mode → quality → device → separator, so the first
@@ -687,7 +716,7 @@ finishes and publishes its artifact, so the next request for it is a cache hit.
 | `job_not_found` | 404 | unknown `job_id` |
 | `result_not_available` | 409 | the job exists but is not `completed`; `detail` carries `job_id` and the current `state` |
 | `stem_not_found` | 404 | the job's result lists no stem with that name; `detail` carries `available_stems` |
-| `stem_file_missing` | 404 | the result lists the stem but its file is gone from disk (an orphaned job directory from a previous process — job records are in-memory only) |
+| `stem_file_missing` | 404 | the result lists the stem but its file is gone from disk — the record and the audio it names are separate things, so a stems directory removed by hand (or by a future cleanup) leaves a restored job whose result resolves and whose bytes do not |
 | `export_failed` | 500 | *(export only)* a transcode or archive step failed; `detail` carries `job_id`, `format` and a short `reason` classification |
 | `export_timed_out` | 504 | *(export only)* FFmpeg exceeded its bounded run time; `detail` carries `job_id` and `format` |
 | `validation_error` | 422 | *(export only)* an unknown `format`, or a present-but-empty `stems` |
