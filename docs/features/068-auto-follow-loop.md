@@ -3,7 +3,7 @@
 Branch: `068-auto-follow-loop`
 Status: PR OPEN
 Dependencies: 051, 053, 067
-PR: —
+PR: #97
 
 ## Objective
 
