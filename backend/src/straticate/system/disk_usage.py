@@ -56,8 +56,8 @@ lower in the dependency order than :mod:`straticate.api` — depend on a
 router module, inverting the direction every other import in this package
 already runs. Feature 058 is moving exports-directory authority into
 :mod:`straticate.jobs.layout`, which is where this constant belongs once
-that lands; until then it is one string, defined twice, that both places
-document as intentionally so.
+that lands; until then it is one string, deliberately defined twice — this
+side documents why (``api/export.py``'s copy predates the question).
 """
 
 _DEBRIS_SUFFIXES = (".tmp", ".part")
@@ -89,6 +89,11 @@ def _is_debris(relative_parts: tuple[str, ...]) -> bool:
     or job directory, since it is never the record or the output there
     either, only a write or build that never finished.
     """
+    if not relative_parts:
+        # A plain file sitting directly at the swept root whose name matches
+        # a live id reaches here with an empty tuple (review finding) — it is
+        # not debris, and indexing [-1] would break the never-raises contract.
+        return False
     name = relative_parts[-1]
     if name.endswith(_DEBRIS_SUFFIXES):
         return True
@@ -115,7 +120,11 @@ def _walk_root(root: Path) -> list[tuple[tuple[str, ...], int]]:
     entries: list[tuple[tuple[str, ...], int]] = []
 
     def _on_error(exc: OSError) -> None:
-        logger.warning("Could not list %s while measuring disk usage: %s", root, exc)
+        # exc.filename names the directory that actually failed, which may be
+        # a subdirectory rather than the swept root (review finding).
+        logger.warning(
+            "Could not list %s while measuring disk usage: %s", exc.filename or root, exc
+        )
 
     for dirpath, _dirnames, filenames in os.walk(root, onerror=_on_error):
         directory = Path(dirpath)

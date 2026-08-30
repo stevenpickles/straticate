@@ -586,3 +586,107 @@ async def test_a_running_jobs_directory_counts_under_jobs_never_orphans(
     finally:
         gate.set()
         await recorder.wait_for_terminal(job_id)
+
+
+def test_a_live_id_named_plain_file_at_a_root_never_raises(tmp_path: Path) -> None:
+    """The one input that broke the never-raises contract (review finding).
+
+    A plain file directly under ``audio/`` or ``jobs/`` whose name matches a
+    live id reached ``_is_debris`` with an empty relative-parts tuple and
+    raised ``IndexError`` — turning the degrade-not-error endpoint into a
+    500. It is a pathological layout (nothing in the app produces it), so it
+    is classified rather than crashed on: not debris, counted with its root.
+    """
+    (tmp_path / "audio").mkdir()
+    (tmp_path / "audio" / "aud1").write_bytes(b"x" * 7)
+    (tmp_path / "jobs").mkdir()
+    (tmp_path / "jobs" / "job1").write_bytes(b"y" * 9)
+
+    report = disk_usage_report(
+        tmp_path,
+        audio_ids=["aud1"],
+        job_ids=["job1"],
+        read_usage=_reader(total=1000, free=400),
+    )
+
+    assert report.uploads.count == 1
+    assert report.uploads.bytes == 7
+    assert report.job_stems.count == 1
+    assert report.job_stems.bytes == 9
+    assert report.orphans.count == 0
+
+
+def test_a_file_vanishing_mid_walk_is_skipped_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The per-file ``stat`` tolerance is the whole TOCTOU story — pin it."""
+    audio_dir = tmp_path / "audio" / "aud1"
+    audio_dir.mkdir(parents=True)
+    survivor = audio_dir / "original.wav"
+    survivor.write_bytes(b"x" * 11)
+    vanishing = audio_dir / "audio.json"
+    vanishing.write_bytes(b"y" * 5)
+
+    real_stat = Path.stat
+
+    def stat_with_a_vanish(self: Path, **kwargs: Any) -> os.stat_result:
+        if self.name == "audio.json":
+            raise FileNotFoundError(2, "vanished mid-walk", str(self))
+        return real_stat(self, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_a_vanish)
+    with caplog.at_level(logging.WARNING, logger="straticate.system.disk_usage"):
+        report = disk_usage_report(
+            tmp_path,
+            audio_ids=["aud1"],
+            job_ids=[],
+            read_usage=_reader(total=1000, free=400),
+        )
+
+    assert report.uploads.count == 1
+    assert report.uploads.bytes == 11
+    assert any("Could not stat" in record.getMessage() for record in caplog.records)
+
+
+async def test_other_requests_are_served_while_the_walk_blocks(
+    usage_client: httpx2.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blocking walk really runs in a worker thread (review finding).
+
+    Mirrors feature 040's proof for `/system/storage`: park the walk on a
+    threading.Event and show the health endpoint still answers. If the walk
+    ran on the loop, nothing below could complete; the wait is bounded so a
+    regression fails in seconds rather than hanging the suite.
+    """
+    import threading
+
+    from straticate.api import system as system_api
+    from straticate.schemas import DiskUsageReport, UsageBucket
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def parked_walk(*args: Any, **kwargs: Any) -> DiskUsageReport:
+        entered.set()
+        release.wait(5.0)
+        zero = UsageBucket(count=0, bytes=0)
+        return DiskUsageReport(
+            uploads=zero,
+            job_stems=zero,
+            job_exports=zero,
+            orphans=zero,
+            free_bytes=None,
+            total_bytes=None,
+        )
+
+    monkeypatch.setattr(system_api, "disk_usage_report", parked_walk)
+    task = asyncio.create_task(usage_client.get(DISK_USAGE_URL))
+    try:
+        await asyncio.wait_for(asyncio.to_thread(entered.wait, 5.0), timeout=5.0)
+        assert entered.is_set(), "the walk never started"
+        health = await asyncio.wait_for(usage_client.get("/api/v1/health"), timeout=2.0)
+        assert health.status_code == 200
+    finally:
+        release.set()
+        response = await asyncio.wait_for(task, timeout=5.0)
+    assert response.status_code == 200
