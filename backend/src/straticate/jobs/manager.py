@@ -454,6 +454,25 @@ class JobManager:
         """
         return [entry.job.model_copy(deep=True) for entry in self._entries.values()]
 
+    def ids(self) -> list[str]:
+        """Return every known job's ID, in submission order, in any state.
+
+        The cheap read for callers that only need to know **which** jobs
+        exist — feature 059's disk-usage walker asks nothing else of the
+        manager, and used ``[job.id for job in list_jobs()]``, which
+        deep-copies every ``Job`` (configuration, result, stems and all) to
+        read one string off each. This is the manager-side twin of
+        :meth:`straticate.audio.AudioStore.ids`, which exists for exactly the
+        same reason.
+
+        Returning IDs also keeps the copy-on-read contract intact for free:
+        there is nothing mutable to hand out, so unlike :meth:`list_jobs`
+        this needs no snapshot to stay safe.
+
+        Remains available after :meth:`aclose` (read-only).
+        """
+        return list(self._entries)
+
     def remove(self, job_id: str) -> Job:
         """Forget a terminal job's entry; returns a snapshot of it as it was.
 
