@@ -360,7 +360,7 @@ verbatim as the planning record they were.
 | 060 | Prune endpoint                               | MERGED  | 058, 059   | `060-prune-endpoint` | #101 |
 | 061 | Persist model install failures               | MERGED  | —          | `061-persist-install-failures` | #89 |
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | MERGED | 041 | `062-band-limited-fold` | #100 |
-| 063 | Wide-stereo detection + suggestion           | PR OPEN | 041        | `063-wide-stereo-detection` | |
+| 063 | Wide-stereo detection + suggestion           | PR OPEN | 041        | `063-wide-stereo-detection` | #104 |
 | 064 | Stem-audio retry + player hygiene            | MERGED  | 048, 052   | `064-stem-retry-hygiene` | #91 |
 | 065 | Job-scoped stem session (engine hoist)       | MERGED  | 064        | `065-stem-session` | #96 |
 | 066 | View state survives a reload                 | MERGED  | 033, 065   | `066-view-state-reload` | #102 |
