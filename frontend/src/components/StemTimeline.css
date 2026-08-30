@@ -5,7 +5,12 @@
  * track strip, whose measured width *is* the timeline viewport. Heights that
  * the canvas arithmetic also needs — the lane height and the ruler height —
  * are set inline from the constants in TimelineLane.tsx / StemTimeline.tsx, so
- * there is exactly one source of truth for each of them.
+ * there is exactly one source of truth for each of them. Since feature 067
+ * the lane height is `rem` (`LANE_HEIGHT_REM`), so the header and lane boxes
+ * grow with the browser's root font size instead of clipping at a fixed pixel
+ * height; only the canvas backing store needs the pixel equivalent, which it
+ * gets by measuring a lane's own rendered box with `ResizeObserver`
+ * (`useMeasuredHeight`) rather than deriving it from CSS.
  */
 
 .stem-timeline {
@@ -36,20 +41,24 @@
 
 /*
  * Three compact rows — a label line, the toggles, and (054) the level
- * fader — inside a box whose height is fixed to the lane's, so the header
- * column and the lane column stay in step. Compact is load-bearing rather
- * than cosmetic: content that overflowed this box would be laid over the
- * *next* header and would swallow its clicks (see 050's notes). The padding
- * and gap here are slightly tighter than 050 shipped with, which is what
- * bought the third row the room it needed without touching `LANE_HEIGHT_PX`.
+ * fader — inside a box whose height is fixed to the lane's ({@link
+ * LANE_HEIGHT_REM} in TimelineLane.tsx), so the header column and the lane
+ * column stay in step. Compact is load-bearing rather than cosmetic: content
+ * that overflowed this box would be laid over the *next* header and would
+ * swallow its clicks (see 050's notes). The padding and gap here have been
+ * tightened twice now, each time to buy a new row (or a taller one) room
+ * without raising `LANE_HEIGHT_REM` any further than it has to be:
+ * `0.25rem`/`0.3rem` (050) → `0.2rem`/`0.2rem` (054, for the fader's first,
+ * thin cut) → `0.15rem`/`0.15rem` (067, measured in a real Chromium as what
+ * the enlarged, WCAG-sized fader needed on top of that).
  */
 .stem-timeline-lane-header {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 0.2rem;
+  gap: 0.15rem;
   min-width: 0;
-  padding: 0.2rem 0.4rem;
+  padding: 0.15rem 0.4rem;
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 0.5rem;
@@ -233,18 +242,57 @@
 /* 054: level faders */
 
 /*
- * A native range input, deliberately thin: the 64 px lane header (050's
- * `LANE_HEIGHT_PX`, not this feature's to change) leaves only a sliver below
- * the label and the toggle rows once both keep the dimensions 050 already
- * tuned. `height` on a range input scales its thumb down with it in every
- * engine tested, so a short box reads as a slim fader rather than a clipped
- * full-size one. See docs/features/054-stem-level-faders.md for the pixel
- * accounting.
+ * A native range input with a deliberately slim *drawn* track — `height`
+ * scales the thumb down with it in every engine tested, so a short box reads
+ * as a slim fader rather than a clipped full-size one — and a taller *hit
+ * box* than what is drawn (feature 067).
+ *
+ * 054 shipped this at `height: 0.7rem` and nothing else, which measured
+ * ~11 px tall: well under WCAG 2.2 SC 2.5.8's 24 px pointer-target minimum,
+ * and the reason 050's `LANE_HEIGHT_PX` had no room to spare (see 054's known
+ * limitations). `padding-block` grows the input's *layout box* — what
+ * `getBoundingClientRect` and `elementFromPoint` see — without growing the
+ * track a browser actually paints inside it, which is exactly "keep the
+ * drawn track slim, grow the hit box": the visual stays a thin fader and the
+ * clickable/tappable area around it is the WCAG-sized one. `box-sizing:
+ * content-box` makes that arithmetic explicit: `height` is the track, the
+ * padding is pure hit-box, and the two simply add.
+ *
+ * **No `min-height`, deliberately, measured rather than assumed.** A
+ * `min-height` alongside `box-sizing: content-box` applies to the *content*
+ * box, i.e. the track — and since `0.7rem` (the track) is below `24px` at
+ * every root font this feature targets, `min-height: 24px` would not act as
+ * a quiet floor at all: it would win outright, forcing the *drawn* track
+ * itself to 24 px and pushing the total layout box (with the padding still
+ * added on top) to 38–42 px across 16–20 px roots — measured in a real
+ * Chromium, not a full-size thumb "reading as slim" the way 054's own
+ * `height` alone does, and far more than `LANE_HEIGHT_REM` budgets for.
+ * `padding-block` alone already clears the 24 px minimum at every tested
+ * root (`0.7rem + 2 × 0.45rem` = `25.6px` at 16 px, growing to `32px` at
+ * 20 px), so nothing else is needed. See
+ * docs/features/067-lane-height-a11y.md for the measured before/after at
+ * 16/17/18/20 px roots, including this specific measurement.
+ *
+ * **`max()` floors the padding at a 24 px box for roots below the range
+ * above, where `0.45rem` alone stops being enough.** At a 14 px root,
+ * `0.7rem` (the track) is `9.8px` and `2 × 0.45rem` is `12.6px`, for a
+ * measured `22.39px` total (sub-pixel rounding over the `22.4px` the
+ * arithmetic alone gives) — under WCAG's 24 px. `calc((24px - 0.7rem) / 2)`
+ * is exactly the per-side padding that makes the *total* content-box height
+ * (`0.7rem` track plus padding on both sides) land on 24 px, so
+ * `max(0.45rem, that)` keeps whichever is
+ * larger: the flat `0.45rem` this feature already measured sufficient at
+ * 16–20 px roots (where the `calc()` branch evaluates smaller and loses),
+ * and the 24 px floor below that range (where the `calc()` branch overtakes
+ * it). The content-box arithmetic in the paragraph above is unchanged either
+ * way — `max()` only changes which padding value feeds it.
  */
 .stem-timeline-lane-fader {
   width: 100%;
   height: 0.7rem;
+  padding-block: max(0.45rem, calc((24px - 0.7rem) / 2));
   margin: 0;
+  box-sizing: content-box;
   accent-color: var(--color-accent);
   cursor: pointer;
 }
@@ -305,6 +353,10 @@
   top: 2px;
   bottom: 2px;
   min-width: 8px;
+  /* C10 (067): above `.stem-timeline-playhead`, which sits later in the DOM
+     and would otherwise paint over the thumb's track on every frame the
+     playhead crosses it. */
+  z-index: 1;
   background-color: var(--color-text-muted);
   border-radius: 999px;
   opacity: 0.4;
