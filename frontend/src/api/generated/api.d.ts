@@ -180,6 +180,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/system/prune": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Prune Data Dir
+         * @description Reclaim disk space in the classes the request names — and only those.
+         *
+         *     This is the write half of ``GET /system/disk-usage`` and the bulk form of
+         *     ``DELETE /jobs/{job_id}``: everything that endpoint made visible, and that
+         *     one made deletable, removable in one call. Three classes, each opt-in and
+         *     each safe by construction (see
+         *     :class:`~straticate.schemas.ReclaimClass` and
+         *     :mod:`straticate.system.prune`):
+         *
+         *     - ``export_caches`` — every terminal job's ``exports/`` directory. Export
+         *       artifacts are pure caches: ``GET /jobs/{job_id}/export`` rebuilds any of
+         *       them from stems that are still there, and feature 022's build locks,
+         *       unique ``.part`` names and skip-the-rename-if-already-published rule
+         *       make a rebuild racing another rebuild safe already. Removing them costs
+         *       a transcode.
+         *     - ``orphans`` — directories under ``audio/`` and ``jobs/`` with no live
+         *       record, plus ``*.tmp`` / ``*.part`` / ``.build-*`` build debris. This is
+         *       exactly the ``orphans`` bucket of the disk-usage report, and it is what
+         *       finally sweeps the debris features 022 and 058 documented as
+         *       permanently un-collectable.
+         *     - ``terminal_jobs`` — finished jobs wholesale, through
+         *       :func:`straticate.jobs.removal.detach_job`, which is
+         *       ``DELETE /jobs/{job_id}``'s own implementation rather than a second copy
+         *       of its ordering. ``older_than_seconds`` keeps recent ones.
+         *
+         *     **Nothing is removed unless it is asked for.** Every flag defaults to
+         *     ``False``, so ``{}`` is a valid request that frees nothing and reports
+         *     zeroes. And a second identical request frees nothing either, which is the
+         *     honest form of idempotence for a bulk delete: the resource-level statement
+         *     ``DELETE`` makes with a ``404``, made with numbers instead.
+         *
+         *     **A queued or running job is excluded from all three classes**, always.
+         *     Its directory holds ``*.part`` files that are live output rather than
+         *     debris — the separator writes each stem to one and renames it into place —
+         *     so sweeping it would corrupt the work in progress. The same reasoning
+         *     covers an upload still streaming: it has a directory and no record yet,
+         *     which is indistinguishable from an orphan on disk, so the audio store
+         *     reserves those IDs (``AudioStore.pending_ids``) and they are passed in
+         *     here as live.
+         *
+         *     **The work is offloaded, but the manager is not.** Planning (an
+         *     ``os.walk`` of the whole data directory) and removal (``rmtree`` over job
+         *     directories) both run in worker threads, the same discipline
+         *     ``GET /system/disk-usage`` follows for the read. Between them, on the
+         *     event loop and with no ``await`` in between, this handler drops the
+         *     manager entry and unlinks the record for **every** selected job — feature
+         *     058's ordering, applied to a batch: by the time the removal thread starts,
+         *     no concurrent request can submit, cancel or delete any job in it, and no
+         *     client can observe the batch half-detached.
+         *
+         *     **It degrades rather than errors.** One unreadable directory, one locked
+         *     file or one job a concurrent ``DELETE`` reached first is reported in
+         *     ``failures`` and costs the caller nothing else; the response is always
+         *     ``200``. In particular, a target that could not be *measured* is never
+         *     removed: prune refuses to delete on the strength of an incomplete picture
+         *     (see :attr:`~straticate.schemas.DiskUsageReport.complete`).
+         *
+         *     Errors: an unknown field or a negative ``older_than_seconds`` is the
+         *     standard ``validation_error`` (422), as is ``older_than_seconds`` without
+         *     ``terminal_jobs`` — a retention window that would silently apply to
+         *     nothing.
+         */
+        post: operations["prune_data_dir_api_v1_system_prune_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/audio": {
         parameters: {
             query?: never;
@@ -460,30 +540,78 @@ export interface paths {
          *     before this endpoint existed, nothing could remove the stems and exports a
          *     completed job produced — only the audio *upload* it was separated from
          *     could be deleted, leaving derived output as orphaned disk usage forever.
+         *     The ordering lives in :func:`straticate.jobs.removal.remove_job`, which is
+         *     this handler's whole body and is shared verbatim with ``POST
+         *     /system/prune``'s ``terminal_jobs`` class (feature 060) — one
+         *     implementation of "delete a job", for the same reason feature 058 gave
+         *     exports one path-builder. What follows is why that ordering is what it is.
+         *
          *     ``manager.remove()`` drops the in-memory (and, since it is terminal, only)
          *     entry first — refusing a non-terminal job before anything on disk is
-         *     touched — and then this handler removes the whole
-         *     ``{data_dir}/jobs/{job_id}`` directory in one ``shutil.rmtree``. Because
-         *     :func:`straticate.jobs.layout.job_output_dir` is the one place that
-         *     directory is built, and :func:`~straticate.jobs.layout.job_exports_dir`
-         *     (feature 058) is the one place exports live inside it, this single removal
-         *     reaches the record, every stem and every built export — there is no
-         *     surviving path an export could have been written to instead.
+         *     touched. Because :func:`straticate.jobs.layout.job_output_dir` is the one
+         *     place a job's directory is built, and
+         *     :func:`~straticate.jobs.layout.job_exports_dir` (feature 058) is the one
+         *     place exports live inside it, removing that whole directory reaches the
+         *     record, every stem and every built export — there is no second
+         *     path-building function anywhere that could still be pointing at a
+         *     survivor (barring the export race described below).
          *
-         *     A restarted server never resurrects a deleted job: the record died with
-         *     the directory, and startup only lists what :mod:`straticate.jobs.store`
+         *     **The record is unlinked first, synchronously, and its failure aborts the
+         *     delete.** :mod:`straticate.jobs.store`'s module docstring invariant is
+         *     that a job directory is self-describing: it must never hold a record that
+         *     names stems which are gone, nor stems that no record mentions. A bare
+         *     ``shutil.rmtree(..., ignore_errors=True)`` over the whole directory can
+         *     violate the second half of that: it may remove every stem while failing
+         *     silently on a locked ``job.json``, leaving a ``completed`` record on disk
+         *     whose stems a restart would then serve as 404s. Unlinking
+         *     :func:`~straticate.jobs.layout.job_record_path` *before* the ``rmtree``
+         *     makes the record the thing whose removal is unconditional: if it cannot be
+         *     removed, ``manager.remove()``'s entry is re-seeded via
+         *     ``manager.restore()`` (safe — the popped job is terminal, which is the one
+         *     state ``restore()`` accepts) and the ``OSError`` is re-raised, so the
+         *     client gets an honest 500 and the job is left exactly as it was — served,
+         *     listed, and untouched on disk — rather than half-deleted. This all happens
+         *     before the first ``await`` below, so no concurrent request can ever
+         *     observe the job as briefly gone.
+         *
+         *     Once the record is gone, ``shutil.rmtree(..., ignore_errors=True)`` best-
+         *     effort removes whatever is left (stems, exports, the now-empty directory)
+         *     in a worker thread — a 1.17 GB job directory measured a 175 ms event-loop
+         *     stall run inline, which every other connected client would feel. Offloading
+         *     it to :func:`asyncio.to_thread` is safe *because* ``manager.remove()``
+         *     already popped the entry synchronously, before this or any other await: no
+         *     other request can submit, cancel or re-delete this job id while the thread
+         *     runs, so nothing races the removal except, as ever, a download already
+         *     holding a file open.
+         *
+         *     A restarted server never resurrects a deleted job: the record died first,
+         *     synchronously, and startup only lists what :mod:`straticate.jobs.store`
          *     finds on disk.
          *
-         *     **Best-effort on Windows.** A file this job's own ``export`` route just
-         *     streamed out via :class:`~fastapi.responses.FileResponse` can still be
-         *     open when this handler runs, and Windows refuses to unlink an open file.
-         *     ``shutil.rmtree(..., ignore_errors=True)`` tolerates that (and any other
-         *     per-file removal failure) rather than turning a real deletion into a
-         *     500: the job is gone from the API — ``GET`` on it is ``job_not_found`` from
-         *     this instant on — and whatever a locked handle left behind is debris a
-         *     later pruning feature (060) is responsible for sweeping, not a defect of
-         *     this endpoint. Every other supported platform removes the directory in
-         *     full.
+         *     **Best-effort on Windows** for everything past the record. A stem or
+         *     export file this job's own ``export`` route just streamed out via
+         *     :class:`~fastapi.responses.FileResponse` can still be open when this
+         *     handler runs, and Windows refuses to unlink an open file (POSIX does not:
+         *     an unlink there detaches the directory entry regardless of open handles).
+         *     ``ignore_errors=True`` tolerates that rather than turning a real deletion
+         *     into a 500: the job is gone from the API — ``GET`` on it is
+         *     ``job_not_found`` from the record's removal on — and whatever a locked
+         *     handle left behind is debris a later pruning feature (060) is responsible
+         *     for sweeping, not a defect of this endpoint. Every other supported
+         *     platform removes the directory in full.
+         *
+         *     **Known limitation: an export build racing this delete can leave an empty
+         *     orphan directory.** ``build_artifact`` (feature 022) calls
+         *     ``artifact.parent.mkdir(parents=True, exist_ok=True)`` before it writes; if
+         *     that runs after this handler's ``rmtree`` has already removed the job
+         *     directory, it recreates an empty ``exports/`` (and job) directory that
+         *     nothing then populates, because the stems it needs to transcode are gone.
+         *     This is not a resurrection — the record is already gone by the time the
+         *     ``rmtree`` even starts, so the job stays deleted from every endpoint's
+         *     point of view — it is the same debris category as a locked file, left for
+         *     060 to prune, and the racing export answers its own request with
+         *     ``export_failed`` rather than serving something stale. Since feature 060
+         *     that sweeper exists: ``POST /system/prune`` with ``orphans: true``.
          *
          *     Errors: ``job_not_found`` (404) for an unknown job, ``job_active`` (409,
          *     with the job's current ``state`` in ``detail``) for a job that has not
@@ -764,6 +892,17 @@ export interface components {
          *     is classified exactly like a completed job's, just with less (or
          *     nothing) written under ``stems/`` yet.
          *
+         *     ``complete`` is the fifth thing the four buckets cannot say. Every bucket
+         *     count is a plain, non-nullable ``int``, so a subtree this process could
+         *     not read is *undercounted* — and ``{count: 0, bytes: 0}`` for an
+         *     unreadable directory is indistinguishable from the same figures for an
+         *     empty one. That ambiguity was harmless while this report only had to be
+         *     rendered (feature 059), and stops being harmless the moment something
+         *     **deletes** on the strength of it (feature 060): "there is nothing here"
+         *     and "I could not look" must not be the same answer to a prune. So the
+         *     walk reports whether it saw everything, and ``POST /system/prune``
+         *     refuses to remove anything it could not first measure in full.
+         *
          *     ``free_bytes`` / ``total_bytes`` describe the filesystem holding
          *     ``data_dir`` — the same **null-means-unknown** doctrine as
          *     :class:`~straticate.schemas.storage.StorageReport` (feature 040):
@@ -783,6 +922,12 @@ export interface components {
             job_exports: components["schemas"]["UsageBucket"];
             /** @description Files with no live record, plus stray build debris found while sweeping. */
             orphans: components["schemas"]["UsageBucket"];
+            /**
+             * Complete
+             * @description Whether the walk could read everything under `data_dir`. False when a subtree could not be listed or a file could not be stat-ed, which means the buckets are an undercount of unknown size, not a measurement of an empty directory.
+             * @default true
+             */
+            complete: boolean;
             /**
              * Free Bytes
              * @description Bytes available to the server on the filesystem holding `data_dir`, or null when the host cannot report it.
@@ -1137,6 +1282,157 @@ export interface components {
             minimum_ram_mb?: number | null;
         };
         /**
+         * PruneClassReport
+         * @description What one :class:`ReclaimClass` actually reclaimed.
+         *
+         *     ``items_removed`` is a **file** count, the same unit as
+         *     :attr:`UsageBucket.count`: removing a job directory holding a record and
+         *     three stems reports four items, not one. That is what makes a disk-usage
+         *     report taken before the prune and this report comparable — the numbers
+         *     are in the same currency, so a test (and a client) can subtract them.
+         *
+         *     A class the request did not name always reports zeroes. So does a class
+         *     that was named and found nothing, and so does a class whose targets were
+         *     all refused — the difference between the last two is in
+         *     :attr:`PruneReport.failures`, never in these two integers.
+         */
+        PruneClassReport: {
+            /**
+             * Items Removed
+             * @description Number of files removed for this class.
+             */
+            items_removed: number;
+            /**
+             * Bytes Freed
+             * @description Total size in bytes of the files removed.
+             */
+            bytes_freed: number;
+        };
+        /**
+         * PruneFailure
+         * @description One thing the prune did not remove, and why. Never fails the request.
+         *
+         *     A prune is a bulk operation over independent targets: one unreadable
+         *     directory, one locked file or one job a concurrent ``DELETE`` got to
+         *     first must not cost the caller every other reclaimed byte. Each is
+         *     recorded here instead, and the response is still ``200`` — the same
+         *     "degrade, do not error" posture ``GET /system/disk-usage`` takes for the
+         *     read.
+         *
+         *     ``target`` is a path **relative to** ``data_dir`` (``jobs/{job_id}``,
+         *     ``audio/{audio_id}``, ``jobs/{job_id}/exports/x.wav.ab12.part``), never
+         *     an absolute one: absolute server paths carry the operator's directory
+         *     layout and home directory, which no other error in this application puts
+         *     on the wire (see :mod:`straticate.api.export`).
+         *
+         *     ``reason`` is a short, stable classification, never an OS error string:
+         *
+         *     - ``unreadable`` — the target could not be measured in full, so it was
+         *       not removed. Deleting what it could not first see is the one thing a
+         *       prune must never do (see :attr:`DiskUsageReport.complete`).
+         *     - ``partially_removed`` — removal left something behind: typically a file
+         *       held open by an in-flight download, which Windows refuses to unlink.
+         *       What did go is counted; what stayed is not.
+         *     - ``filesystem_error`` — the removal itself failed outright.
+         *     - ``job_not_found`` / ``job_active`` — the job manager refused the job
+         *       between planning and removal (a concurrent ``DELETE``, or a job that
+         *       somehow left its terminal state). Reported, never forced.
+         */
+        PruneFailure: {
+            /** @description Which class this target belonged to. */
+            reclaim_class: components["schemas"]["ReclaimClass"];
+            /**
+             * Target
+             * @description Path relative to `data_dir`. Never an absolute path.
+             */
+            target: string;
+            /**
+             * Reason
+             * @description Short classification: why this target was not removed.
+             */
+            reason: string;
+        };
+        /**
+         * PruneReport
+         * @description What ``POST /system/prune`` reclaimed, per class and in total.
+         *
+         *     The three class reports **partition** what was removed: nothing is
+         *     counted twice, so ``items_removed`` and ``bytes_freed`` are the plain
+         *     sums of their three counterparts. That is not a coincidence maintained by
+         *     hand — the plan resolves the overlaps before anything is removed. A job
+         *     selected by ``terminal_jobs`` has its whole directory counted there and
+         *     is skipped by ``export_caches`` and ``orphans``, which would otherwise
+         *     count its exports and its debris a second time.
+         *
+         *     The report is **honest about what did not happen**: see
+         *     :class:`PruneFailure`. A second, identical request is the strongest
+         *     statement of the same idea — it reports zeroes, because the first one
+         *     really did remove what it said it removed.
+         */
+        PruneReport: {
+            /** @description Terminal jobs' export caches. */
+            export_caches: components["schemas"]["PruneClassReport"];
+            /** @description Record-less directories and build debris. */
+            orphans: components["schemas"]["PruneClassReport"];
+            /** @description Finished jobs removed wholesale. */
+            terminal_jobs: components["schemas"]["PruneClassReport"];
+            /**
+             * Items Removed
+             * @description Total files removed across every class (the sum of the three).
+             */
+            items_removed: number;
+            /**
+             * Bytes Freed
+             * @description Total bytes freed across every class (the sum of the three).
+             */
+            bytes_freed: number;
+            /**
+             * Failures
+             * @description Targets that were not removed, with a short reason each. Empty on a clean run.
+             */
+            failures?: components["schemas"]["PruneFailure"][];
+        };
+        /**
+         * PruneRequest
+         * @description Which classes of disk space to reclaim. Nothing is removed unless asked.
+         *
+         *     Every flag defaults to ``False``, so an empty body (``{}``) is a valid
+         *     request that deletes nothing and reports zeroes. That is deliberate: the
+         *     dangerous default for a bulk delete is the one that does something, and a
+         *     client that forgets a field must under-delete rather than over-delete.
+         *
+         *     **Unknown fields are rejected** (``extra="forbid"``, a ``422``
+         *     ``validation_error``). A misspelled class name — ``exports`` for
+         *     ``export_caches`` — would otherwise be a silent no-op reported as a
+         *     successful prune that freed nothing, which reads exactly like "there was
+         *     nothing to reclaim". Refusing it says which of the two actually happened.
+         */
+        PruneRequest: {
+            /**
+             * Export Caches
+             * @description Remove every terminal job's `exports/` directory. Export artifacts are caches rebuilt on demand by `GET /jobs/{job_id}/export`.
+             * @default false
+             */
+            export_caches: boolean;
+            /**
+             * Orphans
+             * @description Remove `audio/` and `jobs/` directories with no live record, plus stray `*.tmp` / `*.part` / `.build-*` build debris — the `orphans` bucket of `GET /system/disk-usage`.
+             * @default false
+             */
+            orphans: boolean;
+            /**
+             * Terminal Jobs
+             * @description Remove finished jobs wholesale — record, stems and exports — through the same path as `DELETE /jobs/{job_id}`. Never touches a queued or running job.
+             * @default false
+             */
+            terminal_jobs: boolean;
+            /**
+             * Older Than Seconds
+             * @description Retention window for `terminal_jobs` only: keep jobs that finished within this many seconds. Null removes every terminal job. A terminal job with no `finished_at` is kept whenever this is set, because its age is unknown.
+             */
+            older_than_seconds?: number | null;
+        };
+        /**
          * QualityOption
          * @description A user-facing quality tier mapping to a concrete model.
          *
@@ -1171,6 +1467,32 @@ export interface components {
          * @enum {string}
          */
         QualityTier: "fast" | "balanced" | "high_quality";
+        /**
+         * ReclaimClass
+         * @description A class of disk space ``POST /system/prune`` can reclaim.
+         *
+         *     Three classes, each **safe by construction** rather than by the caller
+         *     being careful — that is the whole design of the endpoint. Nothing is ever
+         *     removed unless the request names its class, and the job the server is
+         *     running (or has queued) is excluded from all three:
+         *
+         *     - :attr:`EXPORT_CACHES` — a terminal job's ``exports/`` directory. Export
+         *       artifacts are pure caches: ``GET /jobs/{job_id}/export`` rebuilds any of
+         *       them on demand from stems that are still there, so removing them costs a
+         *       transcode and loses nothing.
+         *     - :attr:`ORPHANS` — directories under ``audio/`` and ``jobs/`` with no
+         *       live record, plus the ``*.tmp`` / ``*.part`` / ``.build-*`` debris an
+         *       interrupted write or build left behind. Nothing in the API can reach any
+         *       of it: it is exactly the ``orphans`` bucket of
+         *       :class:`DiskUsageReport`.
+         *     - :attr:`TERMINAL_JOBS` — a finished job in full (record, stems and
+         *       exports), through the same path ``DELETE /jobs/{job_id}`` uses. This is
+         *       the one class that removes something a client can still see, which is
+         *       why it is also the one class with a retention window
+         *       (``PruneRequest.older_than_seconds``).
+         * @enum {string}
+         */
+        ReclaimClass: "export_caches" | "orphans" | "terminal_jobs";
         /**
          * SeparationConfiguration
          * @description User-facing configuration of a separation job (the create-job request).
@@ -1823,6 +2145,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DiskUsageReport"];
+                };
+            };
+        };
+    };
+    prune_data_dir_api_v1_system_prune_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PruneRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PruneReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

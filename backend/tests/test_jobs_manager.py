@@ -156,6 +156,20 @@ async def test_list_jobs_preserves_submission_order(
     assert [j.id for j in manager.list_jobs()] == ids
 
 
+async def test_ids_matches_list_jobs_without_copying_every_record(
+    manager: JobManager, recorder: EventRecorder
+) -> None:
+    """The cheap read (feature 060) for callers that only need to know *which* jobs exist."""
+    ids = [manager.submit(make_configuration(), instant_executor).id for _ in range(3)]
+    assert manager.ids() == ids
+    for job_id in ids:
+        await recorder.wait_for_terminal(job_id)
+    assert manager.ids() == [job.id for job in manager.list_jobs()]
+
+    manager.remove(ids[1])
+    assert manager.ids() == [ids[0], ids[2]]
+
+
 # -- FIFO scheduling --------------------------------------------------------
 
 

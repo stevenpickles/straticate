@@ -20,8 +20,6 @@ Two rules the handlers here obey:
   (AGENTS.md principles 1 and 6).
 """
 
-import asyncio
-import shutil
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, Request
@@ -31,7 +29,7 @@ from straticate.api.models import CatalogDep
 from straticate.errors import ApplicationError
 from straticate.inference import SeparatorJobExecutor, SeparatorRegistry
 from straticate.jobs import JobManager, get_job_manager
-from straticate.jobs.layout import job_output_dir, job_record_path
+from straticate.jobs.removal import remove_job
 from straticate.jobs.resolution import resolve_audio, resolve_device, resolve_model
 from straticate.schemas import Job, SeparationConfiguration
 from straticate.system import DeviceDetectorDep
@@ -188,6 +186,12 @@ async def delete_job(job_id: str, manager: ManagerDep, settings: SettingsDep) ->
     before this endpoint existed, nothing could remove the stems and exports a
     completed job produced — only the audio *upload* it was separated from
     could be deleted, leaving derived output as orphaned disk usage forever.
+    The ordering lives in :func:`straticate.jobs.removal.remove_job`, which is
+    this handler's whole body and is shared verbatim with ``POST
+    /system/prune``'s ``terminal_jobs`` class (feature 060) — one
+    implementation of "delete a job", for the same reason feature 058 gave
+    exports one path-builder. What follows is why that ordering is what it is.
+
     ``manager.remove()`` drops the in-memory (and, since it is terminal, only)
     entry first — refusing a non-terminal job before anything on disk is
     touched. Because :func:`straticate.jobs.layout.job_output_dir` is the one
@@ -252,7 +256,8 @@ async def delete_job(job_id: str, manager: ManagerDep, settings: SettingsDep) ->
     ``rmtree`` even starts, so the job stays deleted from every endpoint's
     point of view — it is the same debris category as a locked file, left for
     060 to prune, and the racing export answers its own request with
-    ``export_failed`` rather than serving something stale.
+    ``export_failed`` rather than serving something stale. Since feature 060
+    that sweeper exists: ``POST /system/prune`` with ``orphans: true``.
 
     Errors: ``job_not_found`` (404) for an unknown job, ``job_active`` (409,
     with the job's current ``state`` in ``detail``) for a job that has not
@@ -260,20 +265,4 @@ async def delete_job(job_id: str, manager: ManagerDep, settings: SettingsDep) ->
     before deleting; deleting underneath a running executor is exactly the
     corruption this endpoint exists to prevent, not a case it introduces.
     """
-    job = manager.remove(job_id)
-    try:
-        job_record_path(settings.data_dir, job.id).unlink(missing_ok=True)
-    except OSError:
-        # The entry is already popped, and it is terminal (remove() only ever
-        # succeeds for a terminal job), so restore() re-seeds it cleanly. The
-        # client sees the honest failure instead of a job whose record is gone
-        # but whose entry, stems and exports are not.
-        manager.restore([job])
-        raise
-    # manager.remove() popped the entry synchronously above, before this first
-    # await, so no concurrent request can submit, cancel or re-delete this job
-    # id while the thread below runs — offloading the (possibly large) tree
-    # removal is safe.
-    await asyncio.to_thread(
-        shutil.rmtree, job_output_dir(settings.data_dir, job.id), ignore_errors=True
-    )
+    await remove_job(manager, settings.data_dir, job_id)

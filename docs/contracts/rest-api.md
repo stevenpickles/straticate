@@ -37,6 +37,7 @@ and stem streaming (audio bytes). IDs are ULIDs.
 | GET | `/system/devices` | `ComputeDevice[]` |
 | GET | `/system/storage` | `StorageReport` |
 | GET | `/system/disk-usage` | `DiskUsageReport` |
+| POST | `/system/prune` | `PruneRequest` → `PruneReport` |
 
 `ComputeDevice`:
 
@@ -117,6 +118,7 @@ exports (feature 022) — and the free/total bytes of the filesystem holding
   "job_stems": { "count": 5, "bytes": 52428800 },
   "job_exports": { "count": 1, "bytes": 3145728 },
   "orphans": { "count": 0, "bytes": 0 },
+  "complete": true,
   "free_bytes": 2147483648,
   "total_bytes": 512110190592
 }
@@ -154,9 +156,100 @@ four), not a directory or "item" count.
   undercounted rather than failing the request; unlike the free/total
   figures, a bucket count has no "unknown" state to express — it degrades
   toward zero, never toward an error.
+- `complete` (feature 060) is how you tell that undercount from an empty
+  directory: `false` means a subtree could not be listed or a file could not
+  be `stat`-ed, so the buckets are short by an unknown amount. On a report
+  this is informational; `POST /system/prune` treats it as binding and will
+  not remove anything it could not first measure in full.
 - The read is a *blocking* filesystem walk (`os.walk`/`os.stat`), so the route
   runs it in a worker thread, the same discipline `GET /system/storage`
   documents for `shutil.disk_usage`.
+
+### Prune (feature 060)
+
+`POST /system/prune` is the write half of the report above and the bulk form
+of `DELETE /jobs/{job_id}`: everything 059 made visible and 058 made
+deletable, reclaimable in one call. It is **manual and opt-in** — no policy,
+no schedule, nothing automatic (auto-prune is a later feature).
+
+`PruneRequest`:
+
+```json
+{
+  "export_caches": true,
+  "orphans": true,
+  "terminal_jobs": true,
+  "older_than_seconds": 604800
+}
+```
+
+`PruneReport`:
+
+```json
+{
+  "export_caches": { "items_removed": 3, "bytes_freed": 9437184 },
+  "orphans": { "items_removed": 4, "bytes_freed": 1048576 },
+  "terminal_jobs": { "items_removed": 12, "bytes_freed": 62914560 },
+  "items_removed": 19,
+  "bytes_freed": 73400320,
+  "failures": []
+}
+```
+
+Three reclaim classes, each opt-in and each safe by construction:
+
+- `export_caches` — every terminal job's `exports/` directory. Export
+  artifacts are pure caches: `GET /jobs/{job_id}/export` rebuilds any of them
+  from stems that are still there, and feature 022's per-artifact build locks,
+  uniquely named `.part` files and skip-the-rename-if-already-published rule
+  already make concurrent rebuilds safe. Removing them costs a transcode and
+  loses nothing.
+- `orphans` — directories under `audio/` and `jobs/` with no live record, plus
+  `*.tmp` / `*.part` / `.build-*` build debris found anywhere in the swept
+  trees. This is exactly the `orphans` bucket of the disk-usage report (the
+  same classifier decides both), and it is what finally sweeps the debris
+  features 022 and 058 documented as otherwise permanent.
+- `terminal_jobs` — finished jobs wholesale (record, stems and exports)
+  through `DELETE /jobs/{job_id}`'s own implementation, not a second copy of
+  its ordering. `older_than_seconds` keeps jobs that finished more recently
+  than that; `null` removes every terminal job.
+
+Rules that hold whatever the request says:
+
+- **Nothing is removed unless it is named.** Every flag defaults to `false`,
+  so `{}` is a valid request that frees nothing. A second identical request
+  frees nothing either — the numbers are how a bulk delete states the
+  idempotence `DELETE` states with a `404`.
+- **A queued or running job is excluded from all three classes.** Its
+  directory holds `{stem}.wav.part` files that are live output, not debris.
+  The same reasoning covers an upload still streaming: it has a directory and
+  no record yet, so the audio store reserves the ID until the upload
+  registers or is cleaned up.
+- **Never delete what could not be seen.** A target whose measurement was
+  incomplete (an unreadable subtree — the `complete: false` case above) is
+  reported in `failures` with reason `unreadable` and left exactly as it was.
+- **The classes partition what was removed**, so `items_removed` /
+  `bytes_freed` are the plain sums of the three. A job selected by
+  `terminal_jobs` is counted there and skipped by the other two, which would
+  otherwise count its exports and its debris again.
+- `items_removed` is a **file** count — the same unit as `UsageBucket.count`,
+  so a disk-usage reading taken before the prune and this report are directly
+  comparable.
+- **It degrades rather than errors.** One unreadable directory, one locked
+  file or one job a concurrent `DELETE` reached first is recorded in
+  `failures` and costs the caller nothing else; the response is always `200`.
+  Each failure carries a `reclaim_class`, a `target` path **relative to**
+  `data_dir` (never an absolute server path), and a short `reason`:
+  `unreadable`, `partially_removed` (a file held open — the Windows case),
+  `filesystem_error`, `job_not_found` or `job_active`.
+- Planning and removal both run in worker threads; between them, the manager
+  entry and durable record of every selected job are dropped synchronously,
+  so no client can observe the batch half-deleted (feature 058's ordering,
+  applied to a batch).
+
+Errors: `validation_error` (422) for an unknown field, a negative
+`older_than_seconds`, or `older_than_seconds` without `terminal_jobs` — a
+retention window that would otherwise silently apply to nothing.
 
 ## Audio
 
@@ -598,8 +691,8 @@ can be open elsewhere (most notably a stem or export mid-download through
 unlinked, so whatever it is holding onto is left behind as debris rather than
 failing the request. The job is gone from every other endpoint immediately
 (`GET` on it is `job_not_found` from that instant on) and still answers `204`;
-any surviving file is exactly the kind of debris a later pruning feature (060)
-is responsible for sweeping, not a defect of this endpoint.
+any surviving file is exactly the kind of debris `POST /system/prune`
+(feature 060) sweeps with `orphans: true`, not a defect of this endpoint.
 
 Job error codes:
 

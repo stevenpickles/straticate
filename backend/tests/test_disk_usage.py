@@ -242,6 +242,9 @@ def test_an_unlistable_subtree_degrades_to_zero_rather_than_raising(
     assert report.orphans.count == 0
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert len(warnings) == 1
+    # Feature 060: the zeroes above are an undercount, not an empty directory,
+    # and prune must be able to tell the two apart before it deletes anything.
+    assert report.complete is False
 
 
 # ============================================================================
@@ -461,11 +464,15 @@ async def test_disk_usage_endpoint_is_present_and_reports_zero_for_an_empty_app(
         "job_stems",
         "job_exports",
         "orphans",
+        "complete",
         "free_bytes",
         "total_bytes",
     }
     for bucket_name in ("uploads", "job_stems", "job_exports", "orphans"):
         assert payload[bucket_name] == {"count": 0, "bytes": 0}
+    # An empty data directory is read in full — "nothing here" is a
+    # measurement, not a failure to look (feature 060 added the distinction).
+    assert payload["complete"] is True
     assert isinstance(payload["free_bytes"], int)
     assert isinstance(payload["total_bytes"], int)
     assert payload["total_bytes"] > 0
@@ -646,6 +653,10 @@ def test_a_file_vanishing_mid_walk_is_skipped_with_a_warning(
     assert report.uploads.count == 1
     assert report.uploads.bytes == 11
     assert any("Could not stat" in record.getMessage() for record in caplog.records)
+    # A vanished file hides nothing, but telling that apart from an unreadable
+    # one means trusting an errno; the flag errs toward "I did not see it all"
+    # because an over-cautious prune defers and an over-confident one deletes.
+    assert report.complete is False
 
 
 async def test_other_requests_are_served_while_the_walk_blocks(
