@@ -90,6 +90,30 @@ published **Straticate v0.2.0** on 2026-08-29. Feature 055 prepared `dev`
 and stopped there, mirroring 043; the release steps were the owner's,
 executed with the owner's explicit authorization.
 
+### M5 — v0.3.0: durable, measured, polished
+
+**Defined 2026-08-30** from a full backlog inventory (every unnumbered
+ROADMAP item, every Known Limitations section in features 006–055, every
+CHANGELOG caveat). Three themes, features 056–069; designs and stop
+conditions in the feature docs.
+
+| Requirement | Feature(s) |
+| --- | --- |
+| Job records, the upload registry and model-install failures survive a restart (JSON sidecars + read-only startup sweep; interrupted jobs become `failed`/`job_interrupted`, never re-queued) | 056, 057, 061 |
+| Everything is deletable and disk use is visible: `DELETE /jobs/{id}` (stems + exports, one tree), disk-usage report, typed manual prune — never deleting unasked | 058, 059, 060 |
+| Band-limited fold measured against 041's baselines — shipped as `mono_bass` only if it beats them, else a documented rejection | 062 |
+| Wide-stereo detection per 041's handoff: suggest, never apply; false-positive rate measured on user-supplied ordinary tracks before the UI ships | 063 |
+| A failed stem download is recoverable in place (engine reload path) | 064 |
+| Playhead, loop, zoom and decoded stems survive leaving the Inspect step (engine lifetime = tracked job) and a page reload (persisted view state) | 065, 066 |
+| Lane headers stop clipping at large browser fonts; fader target ≥ 24 px (WCAG 2.2), verified by a multi-root-font layout harness | 067 |
+| Auto-follow no longer page-flips while looping inside a region | 068 |
+| CHANGELOG, version `0.3.0`, clean-clone verification incl. restart survival | 069 |
+
+Deferred to v0.4.0, deliberately: job history/multi-job UI, opt-in
+auto-prune policies, resumable model downloads / update path /
+re-verification, export transport (progress/cancel), streaming stem decode
+(C12) and the zipper-noise level ramp (C9).
+
 ## Current state (2026-08-29)
 
 **Every milestone is met and v0.2.0 is released** (tag `v0.2.0`, release PR
@@ -208,9 +232,14 @@ stem playback with solo/mute/seek → export. See the git history of this sectio
 
 ### After v0.1.0
 
-The first item below became feature **048** (M4); the rest remain unnumbered.
-The first three are things the release ships *with*, recorded in
-`CHANGELOG.md` where a user will meet them; the rest are open questions.
+**Status as of M5 planning (2026-08-30):** the retry defect became **048**
+(fixed, #72); retention/pruning and job-record persistence became **056–060**;
+wide-stereo detection became **063** and the band-limited fold **062**; the
+fast-vocals question stays licence-blocked (027's reopen criterion stands,
+re-checked at each release prep). Still unnumbered: the `scripts/`/`testdata/`
+doc drift. The final two bullets below are resolution records (037's
+quality-tier decision; 032's history), not open items. The bullets are kept
+verbatim as the planning record they were.
 
 - **`StemPlayer` cannot recover from a failed result fetch.** One `useEffect`,
   one `getSeparationResult`, no retry — a single dropped request leaves the
@@ -324,6 +353,20 @@ The first three are things the release ships *with*, recorded in
 | 053 | Loop / A-B region playback                   | MERGED  | 050, 051   | `053-loop-region` | #80 |
 | 054 | Per-stem level faders                        | MERGED  | 050        | `054-stem-level-faders` | #76 |
 | 055 | Release preparation for v0.2.0               | MERGED  | 048–054    | `055-release-preparation-v0.2.0` | #84 |
+| 056 | Durable upload registry                      | READY   | —          | `056-durable-upload-registry` | |
+| 057 | Durable job records + interrupted recovery   | READY   | —          | `057-durable-job-records` | |
+| 058 | Job deletion + exports authority in layout   | PLANNED | 057        | `058-job-deletion` | |
+| 059 | Disk-usage endpoint                          | PLANNED | 056, 057   | `059-disk-usage-endpoint` | |
+| 060 | Prune endpoint                               | PLANNED | 058, 059   | `060-prune-endpoint` | |
+| 061 | Persist model install failures               | READY   | —          | `061-persist-install-failures` | |
+| 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | READY | 041 | `062-band-limited-fold` | |
+| 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
+| 064 | Stem-audio retry + player hygiene            | READY   | 048, 052   | `064-stem-retry-hygiene` | |
+| 065 | Job-scoped stem session (engine hoist)       | PLANNED | 064        | `065-stem-session` | |
+| 066 | View state survives a reload                 | PLANNED | 033, 065   | `066-view-state-reload` | |
+| 067 | Lane height + fader accessibility            | READY   | 050, 054   | `067-lane-height-a11y` | |
+| 068 | Auto-follow suppressed inside a loop region  | PLANNED | 051, 053, 067 | `068-auto-follow-loop` | |
+| 069 | Release preparation for v0.3.0               | PLANNED | 056–068    | `069-release-preparation-v0.3.0` | |
 
 `*` = depends only on that feature's *contract* (schemas/mocks), not its
 implementation — the frontend feature may proceed against documented contracts,
@@ -361,6 +404,14 @@ graph LR
   051 --> 053
   053 --> 052
   048 & 051 & 052 & 053 & 054 --> 055
+  057 --> 058
+  056 & 057 --> 059
+  058 & 059 --> 060
+  041 --> 062 & 063
+  048 & 052 --> 064 --> 065 --> 066
+  050 & 054 --> 067 --> 068
+  051 & 053 --> 068
+  056 & 057 & 058 & 059 & 060 & 061 & 062 & 063 & 064 & 065 & 066 & 067 & 068 --> 069
 ```
 
 ## Parallel tracks
@@ -403,6 +454,9 @@ with each other.
   automation → **v0.1.0** (M3)
 - **Phase 11 — Waveform timeline:** 048, 049, 050, 051, 052, 053, 054,
   055 → **v0.2.0** (M4)
+- **Phase 12 — Durability, measured quality, timeline polish:** 056, 057,
+  058, 059, 060, 061, 062, 063, 064, 065, 066, 067, 068, 069 → **v0.3.0**
+  (M5)
 
 Note the deliberate ordering: results/preview/export (Phase 6) is built against
 the fake separator *before* real inference (Phase 7), so M1 proves the entire
