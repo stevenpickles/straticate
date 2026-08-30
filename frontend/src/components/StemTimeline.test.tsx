@@ -67,6 +67,7 @@ function bufferEngine(
   )
   return {
     load: () => Promise.resolve(),
+    retryFailedStems: () => Promise.resolve(),
     play: () => Promise.resolve(),
     pause: () => undefined,
     seek: () => undefined,

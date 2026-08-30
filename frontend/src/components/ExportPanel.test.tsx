@@ -15,31 +15,36 @@ import { sampleJob, sampleJobId } from '../test/fixtures'
 const twoStemNames = ['vocals', 'instrumental']
 const fourStemNames = ['vocals', 'drums', 'bass', 'other']
 
-function stem(name: string): Stem {
+/**
+ * One stem of the result. `channels` is a parameter because feature 041's
+ * mono fold-down makes a job report `channels: 1` — see the mono describe
+ * block at the end of this file.
+ */
+function stem(name: string, channels = 2): Stem {
   return {
     name,
     duration_seconds: 227.4,
     sample_rate_hz: 44100,
-    channels: 2,
+    channels,
   }
 }
 
 /** A result over exactly the stem names given — two of them or four. */
-function resultOver(names: readonly string[]): SeparationResult {
+function resultOver(names: readonly string[], channels = 2): SeparationResult {
   return {
     job_id: sampleJobId,
     model_id: 'vocals-hq-001',
-    stems: names.map(stem),
+    stems: names.map((name) => stem(name, channels)),
     metrics: { processing_seconds: 28.8, realtime_factor: 7.9 },
   }
 }
 
-function completedJob(names: readonly string[]): Job {
+function completedJob(names: readonly string[], channels = 2): Job {
   return {
     ...sampleJob,
     state: 'completed',
     progress: 1,
-    result: resultOver(names),
+    result: resultOver(names, channels),
   }
 }
 
@@ -707,6 +712,62 @@ describe('ExportPanel across jobs', () => {
     await waitFor(() => {
       expect(screen.queryByText('Downloaded first.zip.')).toBeNull()
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A single mono stem (feature 041's recorded coverage gap).
+//
+// A job separated with `stereo_handling: "mono"` reports `channels: 1`, and a
+// vocals-only model can return exactly one stem. Review found no hardcoded
+// stereo assumption anywhere in export, so this is coverage rather than a fix:
+// the panel derives everything from the stem list and never reads `channels`,
+// which is what these tests hold it to.
+// ---------------------------------------------------------------------------
+
+describe('ExportPanel with a single mono stem', () => {
+  const monoJob = completedJob(['vocals'], 1)
+
+  it('renders one checkbox and offers it as a single audio file', () => {
+    renderPanel(monoJob)
+
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1)
+    expect(stemCheckbox('vocals')).toBeChecked()
+    expect(
+      screen.getByText('You will get a single .wav file.'),
+    ).toBeInTheDocument()
+  })
+
+  it('exports it with no stems parameter, everything being selected', async () => {
+    const user = userEvent.setup()
+    const fetchMock = stubFetch(exportResponse(`${sampleJobId}-vocals.wav`))
+    renderPanel(monoJob)
+
+    await user.click(exportButton())
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled()
+    })
+    expect(requestedUrl(fetchMock)).toBe(
+      `/api/v1/jobs/${sampleJobId}/export?format=wav_pcm24`,
+    )
+    expect(
+      await screen.findByText(`Downloaded ${sampleJobId}-vocals.wav.`),
+    ).toBeInTheDocument()
+  })
+
+  it('disables export when its only stem is deselected', async () => {
+    const user = userEvent.setup()
+    const fetchMock = stubFetch(exportResponse())
+    renderPanel(monoJob)
+
+    await user.click(stemCheckbox('vocals'))
+
+    expect(exportButton()).toBeDisabled()
+    expect(
+      screen.getByText('Select at least one stem to export.'),
+    ).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })
 

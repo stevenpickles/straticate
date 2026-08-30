@@ -361,7 +361,7 @@ verbatim as the planning record they were.
 | 061 | Persist model install failures               | PR OPEN | —          | `061-persist-install-failures` | #89 |
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | READY | 041 | `062-band-limited-fold` | |
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
-| 064 | Stem-audio retry + player hygiene            | READY   | 048, 052   | `064-stem-retry-hygiene` | |
+| 064 | Stem-audio retry + player hygiene            | PR OPEN | 048, 052   | `064-stem-retry-hygiene` | — |
 | 065 | Job-scoped stem session (engine hoist)       | PLANNED | 064        | `065-stem-session` | |
 | 066 | View state survives a reload                 | PLANNED | 033, 065   | `066-view-state-reload` | |
 | 067 | Lane height + fader accessibility            | READY   | 050, 054   | `067-lane-height-a11y` | |

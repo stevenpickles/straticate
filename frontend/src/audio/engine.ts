@@ -77,6 +77,20 @@
  * still in flight rather than letting whole-file transfers outlive the graph,
  * and `load()` is generation-guarded so two overlapping calls cannot cross
  * their buffers.
+ *
+ * **Recovering one stem (feature 064).** A failed stem-audio download is not
+ * permanent: `retryFailedStems()` re-fetches **only** the entries that failed,
+ * through the same loader and decoder, under the same generation guard. Two
+ * rules make it safe to call while the user is listening:
+ *
+ * - **Loaded stems are never touched.** No buffer is dropped, no gain node is
+ *   rebuilt and nothing is re-decoded — a retry is additive, so recovering one
+ *   stem cannot cost the others their state.
+ * - **A recovered stem joins mid-flight, once.** If the transport is playing,
+ *   the retry ends in exactly one `startSources(currentTime())` — the same
+ *   one-generation rebuild `setLoopRegion` makes while playing, at the
+ *   position the mix has actually reached (the wrapped one under a region).
+ *   Anything less and the new stem would run behind the rest for good.
  */
 
 import { fetchStemAudio } from '../api/stems'
@@ -261,6 +275,22 @@ export interface StemPlayerEngine {
    */
   load(sources: readonly StemSource[]): Promise<void>
   /**
+   * Fetch and decode the stems whose audio **failed**, leaving every stem
+   * that already loaded exactly as it is — same buffers, same gain nodes,
+   * same running sources. A no-op when nothing failed (no request is made)
+   * and after {@link StemPlayerEngine.dispose}.
+   *
+   * **Never rejects**, like {@link StemPlayerEngine.load}: a stem that fails
+   * again lands back on its own entry and in the snapshot's `error`. It is
+   * guarded by the same generation counter, so a `load()` or a `dispose()`
+   * that arrives mid-retry orphans it silently.
+   *
+   * A recovered stem joins a mix that is already playing: the transport
+   * rebuilds once, at the position it has actually reached (the wrapped one
+   * under a loop region), so every stem stays on the one shared clock.
+   */
+  retryFailedStems(): Promise<void>
+  /**
    * Resume the context if suspended, then start every stem together.
    * **Never rejects**, for the same reason {@link StemPlayerEngine.load}
    * does not.
@@ -386,8 +416,17 @@ export interface StemAudioEngineOptions {
   readonly scrubFadeSeconds?: number
 }
 
-/** Default scheduling lookahead, in seconds. */
-const DEFAULT_LOOKAHEAD_SECONDS = 0.05
+/**
+ * Default scheduling lookahead, in seconds.
+ *
+ * Exported alongside {@link DEFAULT_SCRUB_FADE_SECONDS} because the pair has
+ * an invariant a test pins: **the fade must be shorter than the lookahead.**
+ * A motionless click opens a session, sounds one grain and closes it in the
+ * same tick, so the release's `stop(now + fade)` has to land *before* the
+ * grain's `start(now + lookahead)` for the click to stay silent. Change
+ * either number without the other and plain clicks click again.
+ */
+export const DEFAULT_LOOKAHEAD_SECONDS = 0.05
 
 /** Default length of one scrub-preview grain, in seconds. */
 const DEFAULT_SCRUB_GRAIN_SECONDS = 0.09
@@ -395,8 +434,11 @@ const DEFAULT_SCRUB_GRAIN_SECONDS = 0.09
 /** Default gap between two grains, in seconds: a ~30 ms overlap. */
 const DEFAULT_SCRUB_RETRIGGER_SECONDS = 0.06
 
-/** Default grain attack/release, in seconds. */
-const DEFAULT_SCRUB_FADE_SECONDS = 0.008
+/**
+ * Default grain attack/release, in seconds. Must stay below
+ * {@link DEFAULT_LOOKAHEAD_SECONDS} — see the note there.
+ */
+export const DEFAULT_SCRUB_FADE_SECONDS = 0.008
 
 /**
  * The shortest loop region worth having, in seconds. Anything below it is
@@ -617,18 +659,111 @@ export class StemAudioEngine implements StemPlayerEngine {
       return
     }
 
-    const loaded = entries.filter((entry) => entry.status === 'loaded')
-    // One missing stem must not silence the rest, but it must still be
-    // reported: the player shows the remaining stems *and* the failure.
-    this.loadError =
-      entries.find((entry) => entry.error !== null)?.error ?? null
-    this.status = loaded.length > 0 ? 'ready' : 'error'
-    this.durationSeconds = loaded.reduce(
-      (longest, entry) => Math.max(longest, entry.buffer?.duration ?? 0),
-      0,
-    )
-    this.applyGains()
+    this.publishLoadOutcome()
+  }
+
+  retryFailedStems = async (): Promise<void> => {
+    if (this.disposed) {
+      return
+    }
+    // Only the failures are re-fetched. A loaded stem's buffer, gain node and
+    // running source are never touched — recovering one stem must not
+    // interrupt the ones the user is already listening to.
+    const failed = this.entries.filter((entry) => entry.status === 'error')
+    if (failed.length === 0) {
+      // Nothing to recover: not even a request, let alone a graph rebuild. A
+      // transport failure (a refused `resume()`) is not this call's business;
+      // `play()` is its remedy.
+      return
+    }
+
+    // The same generation guard `load()` uses, for the same reason: a
+    // `load()` or a `dispose()` arriving mid-retry must orphan this call
+    // rather than let it publish onto entries that no longer exist.
+    const generation = ++this.loadGeneration
+    this.loadAbort?.abort()
+    const abort = new AbortController()
+    this.loadAbort = abort
+
+    for (const entry of failed) {
+      entry.status = 'loading'
+      // Cleared now, so a stem that recovers leaves no stale rejection behind
+      // for `publishLoadOutcome` to re-report as the engine's `loadError`.
+      entry.error = null
+    }
+    // Deliberately *not* touching `status` or `loadError`: the mix is still
+    // playable and still explaining the failure until this attempt answers it.
     this.notify()
+
+    let context: AudioEngineContext
+    try {
+      context = this.ensureContext()
+    } catch (reason) {
+      this.failLoad(generation, reason)
+      return
+    }
+
+    const buffers = await Promise.all(
+      failed.map(async (entry) => {
+        try {
+          const bytes = await this.loadStemAudio(entry.url, abort.signal)
+          return await context.decodeAudioData(bytes)
+        } catch (reason) {
+          entry.status = 'error'
+          entry.error = reason
+          return null
+        }
+      }),
+    )
+    if (this.disposed || generation !== this.loadGeneration) {
+      return
+    }
+
+    const recovered = new Map<StemEntry, AudioEngineBuffer>()
+    failed.forEach((entry, index) => {
+      const buffer = buffers[index]
+      if (buffer !== undefined && buffer !== null) {
+        recovered.set(entry, buffer)
+      }
+    })
+    try {
+      // Walked in stem order, exactly as `load()` does, so the mixer's node
+      // order stays the result's stem order however the network interleaved.
+      for (const entry of this.entries) {
+        const buffer = recovered.get(entry)
+        if (buffer === undefined) {
+          continue
+        }
+        const gain = context.createGain()
+        gain.connect(context.destination)
+        entry.buffer = buffer
+        entry.gain = gain
+        entry.status = 'loaded'
+      }
+    } catch (reason) {
+      this.failLoad(generation, reason)
+      return
+    }
+
+    this.publishLoadOutcome()
+
+    if (this.playing) {
+      // Read *after* publishing, because a recovered stem can have lengthened
+      // the mix and `currentTime()` clamps to the duration. Under a loop
+      // region this is the wrapped position — where the audio actually is.
+      const at = this.currentTime()
+      try {
+        // One rebuilt generation, the same one-move pattern `setLoopRegion`
+        // uses while playing: the recovered stem joins mid-flight at the
+        // offset every other stem has already reached.
+        this.startSources(at)
+      } catch (reason) {
+        this.transportError = reason
+        this.playing = false
+        this.position = at
+      }
+      this.notify()
+    }
   }
 
   play = async (): Promise<void> => {
@@ -964,6 +1099,30 @@ export class StemAudioEngine implements StemPlayerEngine {
         this.position = at
       }
     }
+    this.notify()
+  }
+
+  /**
+   * Publish what the entries now say: the overall status, the transport's
+   * extent, the failure worth showing, and the resolved gains.
+   *
+   * Shared by `load()` and `retryFailedStems()` so the two can never drift
+   * apart — a retry that recomputed the duration differently from a load
+   * would give the same set of decoded stems two different timelines.
+   * Callers reach here only once their generation is still current.
+   */
+  private publishLoadOutcome(): void {
+    const loaded = this.entries.filter((entry) => entry.status === 'loaded')
+    // One missing stem must not silence the rest, but it must still be
+    // reported: the player shows the remaining stems *and* the failure.
+    this.loadError =
+      this.entries.find((entry) => entry.error !== null)?.error ?? null
+    this.status = loaded.length > 0 ? 'ready' : 'error'
+    this.durationSeconds = loaded.reduce(
+      (longest, entry) => Math.max(longest, entry.buffer?.duration ?? 0),
+      0,
+    )
+    this.applyGains()
     this.notify()
   }
 
