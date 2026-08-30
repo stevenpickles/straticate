@@ -357,13 +357,13 @@ verbatim as the planning record they were.
 | 057 | Durable job records + interrupted recovery   | MERGED  | —          | `057-durable-job-records` | #92 |
 | 058 | Job deletion + exports authority in layout   | MERGED  | 057        | `058-job-deletion` | #98 |
 | 059 | Disk-usage endpoint                          | MERGED  | 056, 057   | `059-disk-usage-endpoint` | #95 |
-| 060 | Prune endpoint                               | PR OPEN | 058, 059   | `060-prune-endpoint` | #101 |
+| 060 | Prune endpoint                               | MERGED  | 058, 059   | `060-prune-endpoint` | #101 |
 | 061 | Persist model install failures               | MERGED  | —          | `061-persist-install-failures` | #89 |
-| 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | PR OPEN | 041 | `062-band-limited-fold` | #100 |
+| 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | MERGED | 041 | `062-band-limited-fold` | #100 |
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
 | 064 | Stem-audio retry + player hygiene            | MERGED  | 048, 052   | `064-stem-retry-hygiene` | #91 |
 | 065 | Job-scoped stem session (engine hoist)       | MERGED  | 064        | `065-stem-session` | #96 |
-| 066 | View state survives a reload                 | PR OPEN | 033, 065   | `066-view-state-reload` | #102 |
+| 066 | View state survives a reload                 | MERGED  | 033, 065   | `066-view-state-reload` | #102 |
 | 067 | Lane height + fader accessibility            | MERGED  | 050, 054   | `067-lane-height-a11y` | #94 |
 | 068 | Auto-follow suppressed inside a loop region  | MERGED  | 051, 053, 067 | `068-auto-follow-loop` | #97 |
 | 069 | Release preparation for v0.3.0               | PLANNED | 056–068    | `069-release-preparation-v0.3.0` | |
