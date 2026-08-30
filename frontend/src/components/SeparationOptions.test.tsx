@@ -1246,6 +1246,65 @@ describe('SeparationOptions stereo handling (feature 041)', () => {
     expect(screen.queryByText(/already mono/i)).not.toBeInTheDocument()
   })
 
+  it('offers the band-limited fold between the two, described by what it keeps', async () => {
+    // Feature 062. The picker renders whatever the contract offers, so a third
+    // value needs no component change — but it does need to be *there*, in the
+    // order the table declares, and to say what it costs like the other two.
+    stubFetch({})
+    renderOptions()
+
+    const keep = await screen.findByRole('radio', { name: 'Keep stereo' })
+    const band = screen.getByRole('radio', { name: 'Centre the low end' })
+    const fold = screen.getByRole('radio', { name: 'Fold to mono' })
+
+    expect(band).not.toBeChecked()
+    expect(band).toHaveAccessibleDescription(/still come back in stereo/i)
+    // Least to most done to the recording, which is the order the table
+    // declares and the order the picker must render.
+    expect(keep.compareDocumentPosition(band)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(band.compareDocumentPosition(fold)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
+  it('posts the band-limited fold when it is chosen', async () => {
+    const fetchMock = stubFetch({})
+    renderOptions()
+
+    await userEvent.click(
+      await screen.findByRole('radio', { name: 'Centre the low end' }),
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start separation' }),
+    )
+
+    await waitFor(() => {
+      expect(postedJobBodies(fetchMock)).toHaveLength(1)
+    })
+    expect(postedJobBodies(fetchMock)[0]).toMatchObject({
+      stereo_handling: 'mono_bass',
+    })
+  })
+
+  it('offers the band-limited fold nothing to do on a mono upload either', async () => {
+    // Every value is a documented no-op on one channel, so the third one must
+    // disappear with the other two rather than being the exception that stays.
+    stubFetch({})
+    renderOptions({
+      ...sampleAudioFile,
+      metadata: { ...sampleAudioFile.metadata, channels: 1 },
+    })
+
+    expect(
+      await screen.findByText(/already mono, so there is nothing to fold/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('radio', { name: 'Centre the low end' }),
+    ).not.toBeInTheDocument()
+  })
+
   it('never applies anything the user did not ask for', async () => {
     const fetchMock = stubFetch({})
     renderOptions()

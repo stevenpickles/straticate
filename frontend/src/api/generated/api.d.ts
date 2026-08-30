@@ -1197,7 +1197,7 @@ export interface components {
              */
             device_id?: string | null;
             /**
-             * @description How to treat the input's stereo image before separating. "as_is" (the default) separates the mixture untouched; "mono" folds it down to a single channel first, which recovers stems a very wide stereo image can otherwise lose, at the cost of mono stems.
+             * @description How to treat the input's stereo image before separating. "as_is" (the default) separates the mixture untouched; "mono" folds it down to a single channel first, which recovers stems a very wide stereo image can otherwise lose, at the cost of mono stems; "mono_bass" folds only the low end to a shared centre and keeps the image above it, so the stems stay stereo.
              * @default as_is
              */
             stereo_handling: components["schemas"]["StereoHandling"];
@@ -1315,9 +1315,17 @@ export interface components {
          *     decoded mixture is handed to the separator untouched. Nothing is ever
          *     applied without being asked for (feature 032's rule, and this feature's
          *     brief) — a wide mix is not detected and silently corrected.
+         *
+         *     Feature 062 added the third value. 041 shipped the whole-spectrum fold and
+         *     recorded the band-limited one as "the most promising unexplored option";
+         *     062 explored it on the same track against the same baselines and it is
+         *     better on every axis that was measured — a *louder* ``bass`` stem than the
+         *     full fold, more of the source's low band in it, a third of the fold's cost
+         *     to ``drums`` and ``other``, and stereo stems instead of mono ones. The
+         *     table is in ``docs/features/062-band-limited-fold.md``.
          * @enum {string}
          */
-        StereoHandling: "as_is" | "mono";
+        StereoHandling: "as_is" | "mono" | "mono_bass";
         /**
          * StorageReport
          * @description How much room the machine running Straticate has for model weights.

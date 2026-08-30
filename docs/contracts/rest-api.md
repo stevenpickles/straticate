@@ -516,12 +516,21 @@ inference parameter (ARCHITECTURE.md §1; the argument is in
 | --- | --- |
 | `as_is` | **Default.** The decoded mixture is separated untouched — bit-for-bit the behaviour before feature 041 |
 | `mono` | The mixture is folded to `(L + R) / 2` before separating. Every stem then comes back with **one channel**, and each `Stem.channels` says so |
+| `mono_bass` | Only the mixture's low end is folded to a shared centre; everything above the crossover keeps its stereo image. The stems come back with **the same channel count as the source** — two, for a stereo upload |
 
-It is never applied unasked and never inferred from the audio: a server does not
-detect a wide stereo mix and quietly correct it. A mono source is unaffected by
-either value. Omitting the field is exactly equivalent to sending `"as_is"`, so
-a client written before this feature is unchanged; the field is always present
-on a `Job`'s echoed `configuration`.
+The `mono_bass` crossover is a fixed constant of the application
+(`BASS_FOLD_CROSSOVER_HZ`, currently 500 Hz), chosen by the measurement in
+`docs/features/062-band-limited-fold.md`. It is deliberately **not** on the
+wire: the question a client can answer is what its recording is like, not where
+a crossover belongs.
+
+None of these is ever applied unasked or inferred from the audio: a server does
+not detect a wide stereo mix and quietly correct it. A mono source is unaffected
+by **any** value — with no stereo image there is nothing for either transform to
+do, and the response is byte-identical to `as_is`. Omitting the field is exactly
+equivalent to sending `"as_is"`, so a client written before feature 041 is
+unchanged; the field is always present on a `Job`'s echoed `configuration`, and
+an unrecognised value is a `422` rather than a silent fallback.
 
 **This holds on every backend**, including the development fixtures a server
 started with `STRATICATE_INCLUDE_DEVELOPMENT_MODELS=1` offers. A job that asks

@@ -142,10 +142,14 @@ describe('cancelJob', () => {
   })
 })
 
-describe('stereo-handling presentation table (feature 041)', () => {
+describe('stereo-handling presentation table (features 041, 062)', () => {
   it('describes every choice the contract offers, in picker order', () => {
+    // The table is keyed by the generated union, so a backend that gains a
+    // value is a type error here until it is described. The order is least to
+    // most done to the recording.
     expect(STEREO_HANDLING_OPTIONS.map((option) => option.id)).toEqual([
       'as_is',
+      'mono_bass',
       'mono',
     ])
     for (const option of STEREO_HANDLING_OPTIONS) {
@@ -170,14 +174,35 @@ describe('stereo-handling presentation table (feature 041)', () => {
     expect(stereoHandlingOption('mono').note).toMatch(/mono/i)
   })
 
-  it('frames the fold as recovering a stem, not as separating better', () => {
-    // Feature 041 measured this: the four stems reconstruct the mixture at
-    // +0.999 folded or not, so nothing is gained overall — a near-silent stem
-    // becomes usable because the low end is reassigned. The note must say that
-    // and stop there.
-    const note = stereoHandlingOption('mono').note
-    expect(note).toMatch(/recovers a stem/i)
-    expect(note).toMatch(/near-silent/i)
-    expect(note).toMatch(/does not otherwise change/i)
+  it.each(['mono', 'mono_bass'] as const)(
+    'frames %s as recovering a stem, not as separating better',
+    (handling) => {
+      // Features 041 and 062 measured this: the four stems reconstruct the
+      // mixture at +0.999 in every case, so nothing is gained overall — a
+      // near-silent stem becomes usable because the low end is reassigned. The
+      // note must say that and stop there.
+      const note = stereoHandlingOption(handling).note
+      expect(note).toMatch(/recovers a stem/i)
+      expect(note).toMatch(/near-silent/i)
+      expect(note).toMatch(/does not otherwise change/i)
+    },
+  )
+
+  it('says what each fold does to the stems, since that is the visible cost', () => {
+    // The two folds differ in exactly one thing a user will notice afterwards,
+    // and each note has to be the one that says so.
+    expect(stereoHandlingOption('mono').note).toMatch(/come back mono/i)
+    expect(stereoHandlingOption('mono_bass').note).toMatch(
+      /come back in stereo/i,
+    )
+  })
+
+  it('does not put a number on the recovery', () => {
+    // Feature 062 measured 19.4% of the source's low band on one track. A note
+    // that quoted it would be presenting a single measurement as a property of
+    // the control; 041 refused the same temptation for the same reason.
+    for (const option of STEREO_HANDLING_OPTIONS) {
+      expect(option.note).not.toMatch(/\d+\s*(%|dB|Hz)/i)
+    }
   })
 })
