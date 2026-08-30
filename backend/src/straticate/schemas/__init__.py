@@ -33,6 +33,7 @@ from straticate.schemas.jobs import (
     Stem,
     StereoHandling,
 )
+from straticate.schemas.maintenance import DiskUsageReport, UsageBucket
 from straticate.schemas.models import (
     Model,
     ModelInstallation,
@@ -52,6 +53,7 @@ __all__ = [
     "AudioFile",
     "AudioMetadata",
     "ComputeDevice",
+    "DiskUsageReport",
     "ErrorEnvelope",
     "ErrorInfo",
     "GpuMetrics",
@@ -83,6 +85,7 @@ __all__ = [
     "StemName",
     "StereoHandling",
     "StorageReport",
+    "UsageBucket",
     "VersionInfo",
     "WebSocketEvent",
 ]
