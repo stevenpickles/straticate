@@ -145,6 +145,16 @@ export interface StemPlayerProps {
  * Playback is an **inspection tool** (ARCHITECTURE.md §13): transport, solo
  * and mute, and nothing that edits audio.
  *
+ * Two failures can be retried here, and they are not the same failure
+ * (feature 064 completed the pair feature 048 started). A failed **result
+ * fetch** replaces the whole body, and its "Try again" refetches the result.
+ * A failed **stem-audio download** leaves the player standing — the stems
+ * that did load are playable — so its "Try again" sits beside the alert and
+ * asks the engine to re-fetch only the stems that failed. It is rendered
+ * only when some stem is in `error`: a transport failure has nothing to
+ * re-fetch, and Play is its remedy. Either click moves focus onto the player
+ * region first, because the button it was made on is about to unmount.
+ *
  * It also carries the route out of the `inspect` phase ("Start another
  * separation"), because the progress panel that offers the same control is
  * mounted only for `separate` — see the handler for why that matters.
@@ -167,6 +177,13 @@ export function StemPlayer({
   // thing that ever changes it. Widening the effect's dependencies on it is
   // what turns that click into a genuine refetch of the same job.
   const [attempt, setAttempt] = useState(0)
+
+  /**
+   * The player region itself, so a retry can put focus somewhere meaningful
+   * before the button it was clicked on unmounts (feature 048 recorded the
+   * drop to `<body>` as an accepted trade-off; this is that handoff).
+   */
+  const playerRef = useRef<HTMLElement>(null)
 
   // The result is fetched rather than read off `job.result`: the REST route
   // is the contract's source of truth, and it is the only thing that can
@@ -386,12 +403,40 @@ export function StemPlayer({
     appDispatch({ type: 'results/startAnother' })
   }, [jobDispatch, appDispatch])
 
+  /**
+   * Move focus onto the player region before a retry control unmounts.
+   *
+   * Both retry buttons disappear the moment their state flips — the result
+   * one takes the whole error branch with it, the stem one loses its
+   * condition — and the browser's default for a focused element that is
+   * removed is to drop focus to `<body>`, stranding a keyboard user at the
+   * top of the document. The region is the nearest thing that survives every
+   * one of these transitions, so it is where focus goes; `tabIndex={-1}`
+   * makes it focusable programmatically without adding a tab stop.
+   */
+  const keepFocusInPlayer = useCallback(() => {
+    playerRef.current?.focus()
+  }, [])
+
   // The remedy for every shape of result-fetch failure: a 409
   // `result_not_available` while the job is still separating resolves once
   // it finishes, and a dropped request is, definitionally, worth retrying.
   const retryResult = useCallback(() => {
+    keepFocusInPlayer()
     setAttempt((current) => current + 1)
-  }, [])
+  }, [keepFocusInPlayer])
+
+  /**
+   * The remedy for a failed **stem-audio** download, which is a different
+   * failure from the one above: the result loaded, so there is an engine, and
+   * only the stems whose bytes never arrived are re-fetched. Deliberately not
+   * a reload — the stems that did load keep their buffers, their levels and,
+   * if the mix is playing, their place in it.
+   */
+  const retryStems = useCallback(() => {
+    keepFocusInPlayer()
+    void engine?.retryFailedStems()
+  }, [engine, keepFocusInPlayer])
 
   let body: ReactNode
   if (jobId === null) {
@@ -429,6 +474,16 @@ export function StemPlayer({
     const ready = snapshot.status === 'ready'
     const engineError =
       snapshot.error === null ? null : errorInfo(snapshot.error)
+    /**
+     * Whether the failure on screen has anything a retry could fix. A stem
+     * whose bytes never arrived does; a transport failure — an autoplay
+     * rejection, a context the browser closed — does not, and `play()` is its
+     * remedy, so offering "Try again" there would be a button that fetches
+     * nothing. Derived from the data, so it never names a stem or a count.
+     */
+    const retryableStems = snapshot.stems.some(
+      (stem) => stem.status === 'error',
+    )
     /** The drag position while a gesture is in flight, the clock otherwise. */
     const position = Math.min(scrubValue ?? currentTime, duration)
     const loopRegion = snapshot.loopRegion
@@ -494,6 +549,16 @@ export function StemPlayer({
           <p className="stem-player-error" role="alert">
             {explainError(engineError)}
           </p>
+        )}
+
+        {retryableStems && (
+          <button
+            type="button"
+            className="stem-player-retry"
+            onClick={retryStems}
+          >
+            Try again
+          </button>
         )}
 
         <StemTimeline
@@ -579,7 +644,14 @@ export function StemPlayer({
   }
 
   return (
-    <section className="stem-player" aria-label="Stem player">
+    <section
+      className="stem-player"
+      aria-label="Stem player"
+      ref={playerRef}
+      // Focusable programmatically but not a tab stop: it exists so a retry
+      // click has somewhere to leave focus when its button unmounts.
+      tabIndex={-1}
+    >
       <h2 className="stem-player-title">Stems</h2>
       {body}
       <button

@@ -15,6 +15,17 @@
   border-radius: 0.75rem;
 }
 
+/*
+ * The region carries `tabindex="-1"` so a retry click can hand focus to it
+ * before the button unmounts (feature 064). It is not a tab stop, so it can
+ * never be reached by keyboard navigation and has no focus ring to draw;
+ * suppressing the outline keeps that handoff invisible rather than flashing a
+ * box around the whole player.
+ */
+.stem-player:focus {
+  outline: none;
+}
+
 .stem-player-title {
   margin: 0;
   font-size: 1.05rem;
