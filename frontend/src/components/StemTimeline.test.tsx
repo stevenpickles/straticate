@@ -145,6 +145,61 @@ async function renderPainted(options: RenderOptions) {
 let canvas: FakeCanvasContext2D
 
 // ---------------------------------------------------------------------------
+// ResizeObserver
+//
+// jsdom implements no `ResizeObserver` at all, which is fine for every test
+// below except the one that drives `useMeasuredHeight` directly (feature
+// 067, Fix 1): it needs to deliver a `contentRect` the way a real observer
+// would, with no `resize` event anywhere in the loop — dispatching one by
+// hand would exercise the mechanism review found broken (`useRootFontSize`,
+// deleted) rather than the one that replaced it.
+// ---------------------------------------------------------------------------
+
+/** A resize observer whose callbacks a test delivers by hand. */
+class FakeResizeObserver {
+  static instances: FakeResizeObserver[] = []
+  readonly targets: Element[] = []
+  readonly callback: ResizeObserverCallback
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback
+    FakeResizeObserver.instances.push(this)
+  }
+
+  observe(target: Element): void {
+    this.targets.push(target)
+  }
+
+  unobserve(): void {
+    // Nothing here observes twice.
+  }
+
+  disconnect(): void {
+    this.targets.length = 0
+  }
+}
+
+function stubResizeObserver(): void {
+  FakeResizeObserver.instances = []
+  vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+}
+
+/**
+ * The observer watching `.stem-timeline-lane` — `useMeasuredHeight`'s, not
+ * `useTimelineGeometry`'s width observer on `.stem-timeline-tracks`, which
+ * the same stub also creates one of.
+ */
+function laneHeightObserver(): FakeResizeObserver | undefined {
+  return FakeResizeObserver.instances.find((observer) =>
+    observer.targets.some(
+      (target) =>
+        target instanceof Element &&
+        target.classList.contains('stem-timeline-lane'),
+    ),
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Animation frames
 //
 // Feature 051's high-resolution tiles are computed on a frame, so that a burst
@@ -277,15 +332,23 @@ describe('StemTimeline lanes', () => {
     )
   })
 
-  it('repaints when the root font size changes, and not when only the playhead moves', async () => {
-    // Feature 067: `laneHeightPx` — resolved from `LANE_HEIGHT_REM` and
-    // `useRootFontSize` — joined the draw effect's dependency list, so the
-    // canvas resizes its backing store when a browser-level font-size
-    // setting changes. This extends the same invariant the "repaints only…"
-    // test above pins for audibility: state that changes what is painted
-    // triggers a repaint, and the playhead's own position — which the
-    // player updates 60 times a second and which `TimelineLane` never
-    // receives as a prop at all — never does.
+  it('repaints when the measured lane height changes, and not when only the playhead moves', async () => {
+    // Feature 067: `laneHeightPx` joined the draw effect's dependency list,
+    // so the canvas resizes its backing store when the lane's own rendered
+    // box changes height. Fix 1 (review) replaced the original mechanism —
+    // `useRootFontSize`, which re-derived `laneHeightPx` from `resize` — with
+    // `useMeasuredHeight`'s direct `ResizeObserver` on the lane box itself,
+    // after a controlled probe found `resize` never fires for a
+    // font-size-only change. This test drives that real signal: a
+    // `ResizeObserver` callback reporting a taller `contentRect`, exactly
+    // what a real browser delivers, with no `resize` event anywhere in it —
+    // dispatching one by hand would exercise the deleted, broken mechanism
+    // instead of the one this pins. It also extends the same invariant the
+    // "repaints only…" test above pins for audibility: state that changes
+    // what is painted triggers a repaint, and the playhead's own position —
+    // which the player updates 60 times a second and which `TimelineLane`
+    // never receives as a prop at all — never does.
+    stubResizeObserver()
     const vocals = loaded('vocals', AXIS_SECONDS)
     const view = await renderPainted({ stems: [vocals], positionSeconds: 0 })
     expect(canvas.fillRects.length).toBeGreaterThan(0)
@@ -316,19 +379,27 @@ describe('StemTimeline lanes', () => {
     )
     expect(canvas.fillRects).toHaveLength(0)
 
-    // A root font size change fires `resize` (the practical signal
-    // `useRootFontSize` documents using), which is a state change like any
-    // other the draw effect already depends on — every lane repaints.
-    const nativeGetComputedStyle = window.getComputedStyle.bind(window)
-    vi.spyOn(window, 'getComputedStyle').mockImplementation((element) =>
-      element === document.documentElement
-        ? ({ fontSize: '20px' } as CSSStyleDeclaration)
-        : nativeGetComputedStyle(element),
-    )
+    // The lane box's own `ResizeObserver` reporting a taller box — a state
+    // change like any other the draw effect already depends on — repaints
+    // every lane.
+    const observer = laneHeightObserver()
+    expect(
+      observer,
+      'the lane box has a resize observer attached',
+    ).toBeDefined()
+    const target = observer?.targets[0]
+    expect(target, 'the observer is watching an element').toBeDefined()
     act(() => {
-      window.dispatchEvent(new Event('resize'))
+      observer?.callback(
+        [
+          {
+            target,
+            contentRect: { height: 95 },
+          } as unknown as ResizeObserverEntry,
+        ],
+        observer as unknown as ResizeObserver,
+      )
     })
-    await act(async () => {})
 
     expect(canvas.fillRects.length).toBeGreaterThan(0)
   })

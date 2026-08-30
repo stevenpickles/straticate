@@ -15,9 +15,11 @@
  * 2. **It repaints on state, not on frames.** The effect's dependencies are
  *    exactly the things that change what is painted — peaks, viewport, device
  *    pixel ratio, audibility, the stem's own length, and (067) the lane's
- *    height in actual pixels, which moves only when the browser's root font
- *    size does. The playhead moves 60 times a second and never touches this
- *    component; it is a transformed div in {@link StemTimeline}.
+ *    height in actual pixels, which moves only when the lane's own rendered
+ *    box does (measured directly, {@link useMeasuredHeight} in
+ *    {@link StemTimeline} — not derived from a proxy signal; see that hook's
+ *    docstring for why). The playhead moves 60 times a second and never
+ *    touches this component; it is a transformed div in {@link StemTimeline}.
  * 3. **It is `React.memo`d over primitives.** The parent re-renders on every
  *    engine snapshot (a mute toggle, a transport change); with the props
  *    below, only the lane that actually changed re-renders, and only the lane
@@ -103,14 +105,16 @@ export interface TimelineLaneProps {
   /** This stem's own length, which may be shorter than the axis. */
   readonly stemDurationSeconds: number
   /**
-   * {@link LANE_HEIGHT_REM} resolved to actual CSS pixels at the current
-   * root font size ({@link useRootFontSize} in {@link StemTimeline}) — what
-   * the canvas backing store needs, since `canvas.width`/`canvas.height` are
-   * plain integers and take no part in `rem`'s own scaling. It changes only
-   * when the root font size changes, which is a state change like any other
-   * the draw effect below already depends on (peaks, viewport, dpr,
-   * audibility) — the canvas still never repaints per animation frame; the
-   * playhead moving 60 times a second touches none of these.
+   * The lane's own rendered box height, in actual CSS pixels — measured
+   * directly off the box with `ResizeObserver` ({@link useMeasuredHeight} in
+   * {@link StemTimeline}), not derived from {@link LANE_HEIGHT_REM} and a
+   * proxy signal. What the canvas backing store needs, since
+   * `canvas.width`/`canvas.height` are plain integers and take no part in
+   * `rem`'s own scaling. It changes only when the measured box actually
+   * changes, which is a state change like any other the draw effect below
+   * already depends on (peaks, viewport, dpr, audibility) — the canvas still
+   * never repaints per animation frame; the playhead moving 60 times a
+   * second touches none of these.
    */
   readonly laneHeightPx: number
 }

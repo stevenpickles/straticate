@@ -14,12 +14,14 @@
  * markup, driven the same way a browser's own font-size setting would drive
  * it: `document.documentElement.style.fontSize`, which every `rem` length on
  * the page resolves against without any application code needing to know it
- * changed. (The one exception — the canvas backing store, which does need to
- * know — has no bearing on any assertion here: every assertion below is
- * about the layout box a `rem` height produces, which CSS updates on its
- * own.)
+ * changed. Most of what follows is about the layout box a `rem` height
+ * produces, which CSS updates on its own — the one exception is the canvas
+ * backing store, which does need to know, and which the last stage in this
+ * file checks directly rather than assuming CSS carries it along too: see
+ * that stage's own comment for the review finding (`resize` does not fire
+ * for a font-size-only change) that makes it worth checking.
  */
-import type { Page } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
 import { FIXTURES } from './environment'
 import {
   Workflow,
@@ -93,6 +95,16 @@ async function laneHeaderHeights(page: Page): Promise<number[]> {
       (element) => element.getBoundingClientRect().height,
     ),
   )
+}
+
+/**
+ * A `<canvas>`'s actual backing-store height — `canvas.height`, the plain
+ * integer the 2D context paints into, not the CSS box `getBoundingClientRect`
+ * reports. This is the number 067's Fix 1 exists to keep in step with the
+ * lane's rendered box on a mid-session root-font change.
+ */
+async function canvasBackingHeight(canvas: Locator): Promise<number> {
+  return canvas.evaluate((element: HTMLCanvasElement) => element.height)
 }
 
 /**
@@ -181,12 +193,28 @@ test.describe('lane layout across browser root font sizes (feature 067)', () => 
           `${name}'s fader reaches the 24px pointer-target minimum at ${String(rootFontPx)}px`,
         ).toBeGreaterThanOrEqual(24)
 
+        // The centre alone does not distinguish this box from the pre-067
+        // ~11 px one — both have a centre, and both land a click there. The
+        // point of a 24 px *hit box* is the edges: a real pointer lands
+        // anywhere inside it, not just in the middle. `y + 1` and
+        // `y + height - 1` sample one pixel inside the top and bottom edges
+        // of the grown box (review-probed: both land on the fader), which
+        // the old ~11 px box could not have passed either — its own edges
+        // were the ~11 px box's edges, not this one's.
         const centerX = box.x + box.width / 2
+        const topY = box.y + 1
         const centerY = box.y + box.height / 2
-        expect(
-          await accessibleNameAtPoint(page, centerX, centerY),
-          `a click at ${name}'s fader's centre lands on the fader itself at ${String(rootFontPx)}px`,
-        ).toBe(`${name} level`)
+        const bottomY = box.y + box.height - 1
+        for (const [label, y] of [
+          ['top edge', topY],
+          ['centre', centerY],
+          ['bottom edge', bottomY],
+        ] as const) {
+          expect(
+            await accessibleNameAtPoint(page, centerX, y),
+            `a click at ${name}'s fader's ${label} lands on the fader itself at ${String(rootFontPx)}px`,
+          ).toBe(`${name} level`)
+        }
       }
 
       // 4. The header column and the lane column stay aligned to the pixel:
@@ -209,4 +237,48 @@ test.describe('lane layout across browser root font sizes (feature 067)', () => 
       }
     })
   }
+
+  test('a mid-session root font-size change keeps the canvas backing store in step (review Fix 1)', async () => {
+    // Review finding: `document.documentElement.style.fontSize` — the same
+    // mechanism a browser's own font-size setting drives, and what
+    // `setRootFontPx` above uses — does NOT fire `resize` on `window` (a
+    // controlled Chromium probe found `innerWidth`/`innerHeight` unchanged
+    // by a font-size-only reflow). 067's first mechanism
+    // (`useRootFontSize`) refreshed the canvas backing store only on
+    // `resize`, so a mid-session change like this one left it stale: the
+    // lane's `rem`-sized CSS box grew for free while the canvas kept
+    // painting at the old pixel height, stretching the waveform. This stage
+    // pins the fix directly — the canvas backing store must follow the
+    // lane's *actual* rendered box, not a proxy signal — with no manual
+    // `resize` dispatch anywhere in it (dispatching one by hand would mask
+    // exactly the bug this exists to catch).
+    await setRootFontPx(page, 16)
+
+    const canvas = workflow.timeline.locator('canvas').first()
+    const dpr = await page.evaluate(() => window.devicePixelRatio)
+
+    const laneBefore = (await laneRowHeights(page))[0] ?? -1
+    const backingBefore = await canvasBackingHeight(canvas)
+    expect(
+      backingBefore,
+      'canvas backing height matches the lane box at the baseline root font',
+    ).toBeCloseTo(Math.round(laneBefore * dpr), 0)
+
+    await setRootFontPx(page, 20)
+
+    const laneAfter = (await laneRowHeights(page))[0] ?? -1
+    const backingAfter = await canvasBackingHeight(canvas)
+    expect(
+      laneAfter,
+      'the lane box itself grew with the root font — plain CSS, no JS involved',
+    ).toBeGreaterThan(laneBefore)
+    expect(
+      backingAfter,
+      'the canvas backing store actually changed, rather than staying at the stale baseline',
+    ).toBeGreaterThan(backingBefore)
+    expect(
+      backingAfter,
+      'the canvas backing store followed the lane box to its new height',
+    ).toBeCloseTo(Math.round(laneAfter * dpr), 0)
+  })
 })

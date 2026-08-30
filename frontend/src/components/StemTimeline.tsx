@@ -128,7 +128,7 @@ import {
   xToTime,
   timeToX,
 } from './timelineGeometry'
-import { useRootFontSize } from './useRootFontSize'
+import { useMeasuredHeight } from './useMeasuredHeight'
 import { useTimelineGeometry } from './useTimelineGeometry'
 import { useWaveformPeaks, useWaveformTiles } from './useWaveformPeaks'
 import './StemTimeline.css'
@@ -348,10 +348,14 @@ export function StemTimeline({
   // Feature 067: the lane height is `rem`-relative (`LANE_HEIGHT_REM`), so
   // the header and lane *boxes* scale with the browser's root font size for
   // free — but each lane's canvas backing store is sized in actual pixels,
-  // which `rem` has no say over. This is that size, recomputed only when the
-  // root font size changes.
-  const rootFontPx = useRootFontSize()
-  const laneHeightPx = LANE_HEIGHT_REM * rootFontPx
+  // which `rem` has no say over. `laneHeightPx` is that size, measured
+  // directly off the first lane's own rendered box (every lane shares the
+  // same height) rather than derived from `LANE_HEIGHT_REM` and a proxy
+  // signal — `useMeasuredHeight`'s docstring has the review finding that
+  // ruled the proxy out. `measuredLaneHeight.ref` is attached to exactly one
+  // lane below.
+  const measuredLaneHeight = useMeasuredHeight()
+  const laneHeightPx = measuredLaneHeight.heightPx
 
   const loaded = stems.filter((stem) => stem.status === 'loaded')
   const peaks = useWaveformPeaks(
@@ -1010,7 +1014,7 @@ export function StemTimeline({
         </div>
 
         <div className="stem-timeline-lanes">
-          {stems.map((stem) => (
+          {stems.map((stem, index) => (
             <div
               className={
                 stem.audible
@@ -1018,6 +1022,9 @@ export function StemTimeline({
                   : 'stem-timeline-lane stem-timeline-lane-silenced'
               }
               key={stem.name}
+              // The first lane's box is what `laneHeightPx` measures — every
+              // lane shares the same `rem` height, so one observer is enough.
+              ref={index === 0 ? measuredLaneHeight.ref : undefined}
               style={{ height: `${String(LANE_HEIGHT_REM)}rem` }}
             >
               {stem.status === 'error' ? (

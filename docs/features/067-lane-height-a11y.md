@@ -5,6 +5,39 @@ Status: PR OPEN
 Dependencies: 050, 054
 PR: —
 
+## Post-review corrections
+
+A cross-model review of this feature's first merge confirmed five findings,
+all applied on this branch:
+
+1. **(Headline) The `resize`-refresh claim was false.** `useRootFontSize`
+   refreshed the canvas backing store's pixel height on window `resize`, on
+   the theory that a root-font change reflows the page and fires it. A
+   controlled Chromium probe found `resize` never fires for a font-size-only
+   change, so a mid-session font change left the backing store stale while
+   the lane's CSS box grew — a real vertical stretch of the waveform for the
+   large-font users this feature serves. **Fix:** `useRootFontSize` is
+   deleted; `useMeasuredHeight` (new) measures the lane's own rendered box
+   directly with `ResizeObserver`, this codebase's own idiom (already used
+   for the tracks strip's width). See Notes §3 and "Fix 1's own fail-first
+   run" below for the measured before/after.
+2. **The fader hit-box spec sampled only its centre**, the same point the
+   pre-fix ~11 px box's centre also passed at — vacuous. **Fix:**
+   `frontend/e2e/layout.spec.ts` now also samples one pixel inside the top
+   and bottom edges of the box.
+3. **The fader's hit box could fall under 24 px below the 16–20 px range
+   this feature targets** — measured `22.39px` at a 14 px root. **Fix:**
+   `padding-block: max(0.45rem, calc((24px - 0.7rem) / 2))` in
+   `StemTimeline.css` floors it at 24 px without changing the already-measured
+   16–20 px figures. See Notes §7.
+4. **B8's per-stem loop in `separation.spec.ts` passed vacuously on an empty
+   stem list.** **Fix:** the stem count is asserted against the mode's own
+   stems before the loop. See Notes §8.
+5. **Test-title honesty for the deleted `useRootFontSize.test.ts`.**
+   `useMeasuredHeight.test.ts` makes no "…and only on X" claim and pins its
+   cleanup test to the specific observer instance it created, not a generic
+   spy.
+
 ## Objective
 
 Close the measured v0.2.0 layout debt 054 recorded and left for whoever
@@ -21,25 +54,36 @@ measures a real Chromium rather than asserting against arithmetic.
 - `frontend/src/components/TimelineLane.tsx` — `LANE_HEIGHT_PX` (fixed
   pixels) replaced with `LANE_HEIGHT_REM` (`rem`); a new `laneHeightPx` prop
   the canvas draw effect and backing-store sizing use instead.
-- `frontend/src/components/useRootFontSize.ts` (new) — reads the root
-  element's computed font size, refreshed on window `resize`.
-- `frontend/src/components/StemTimeline.tsx` — computes `laneHeightPx` from
-  `LANE_HEIGHT_REM` and `useRootFontSize()`, passes it to `TimelineLane`;
-  the lane header row and lane row's inline heights become `rem`.
+- `frontend/src/components/useMeasuredHeight.ts` — measures one attached
+  element's rendered height directly with `ResizeObserver`. **Replaces
+  `useRootFontSize.ts`** (deleted), which multiplied `LANE_HEIGHT_REM` by the
+  root font size read on window `resize`; a post-merge review found `resize`
+  never fires for a font-size-only change, so that mechanism went stale
+  mid-session. See "Post-review corrections" below.
+- `frontend/src/components/StemTimeline.tsx` — computes `laneHeightPx` by
+  attaching `useMeasuredHeight()`'s ref to the first lane's own rendered box
+  (every lane shares the same height) and reading its measured value, passes
+  it to `TimelineLane`; the lane header row and lane row's inline heights
+  become `rem`.
 - `frontend/src/components/StemTimeline.css` — the fader's hit box grows
   independently of its drawn track (C-item, WCAG 2.2 SC 2.5.8); the lane
   header's padding/gap retightened a second time (054 did it once) to fund
   the fader without raising `LANE_HEIGHT_REM` any further than measurement
   showed necessary; C10 — `.stem-timeline-scroll-thumb` lifted above
   `.stem-timeline-playhead` with one `z-index` line.
-- `frontend/e2e/layout.spec.ts` (new) — the multi-root-font measurement
-  spec that is this feature's actual acceptance mechanism.
+- `frontend/e2e/layout.spec.ts` (new; extended post-review) — the
+  multi-root-font measurement spec that is this feature's actual acceptance
+  mechanism, plus (post-review) edge-sampled fader clicks and a mid-session
+  root-font-change stage that pins the canvas backing store against the
+  `resize` finding below.
 - `frontend/e2e/app.ts`, `frontend/e2e/separation.spec.ts` — B10) a
   `chooseStereoHandling` helper and a `startSeparationWithRequest` variant
   that also returns the request body; B8) one new stage exercising "Fold to
-  mono" through real job creation, closing the E2E-coverage gap 041 recorded.
-- Unit tests: `useRootFontSize.test.ts` (new), extended
-  `StemTimeline.test.tsx`.
+  mono" through real job creation, closing the E2E-coverage gap 041 recorded
+  (post-review: the stage now pins the stem count before iterating it, so an
+  empty result cannot pass the loop vacuously).
+- Unit tests: `useMeasuredHeight.test.ts` (new, post-review; replaces
+  `useRootFontSize.test.ts`), extended `StemTimeline.test.tsx`.
 
 ## Out of scope
 
@@ -52,7 +96,8 @@ measures a real Chromium rather than asserting against arithmetic.
 ## Expected modules/files
 
 - `frontend/src/components/TimelineLane.tsx`
-- `frontend/src/components/useRootFontSize.ts`, `useRootFontSize.test.ts`
+- `frontend/src/components/useMeasuredHeight.ts`, `useMeasuredHeight.test.ts`
+  (post-review; replaces `useRootFontSize.ts`/`useRootFontSize.test.ts`)
 - `frontend/src/components/StemTimeline.tsx`, `StemTimeline.css`,
   `StemTimeline.test.tsx`
 - `frontend/e2e/layout.spec.ts`, `frontend/e2e/app.ts`,
@@ -66,10 +111,13 @@ measures a real Chromium rather than asserting against arithmetic.
       size, for every stem, measured in a real Chromium.
 - [x] **Every level fader's pointer target reaches WCAG 2.2 SC 2.5.8's
       24 px minimum** at all four root sizes.
-- [x] **A click at a fader's centre lands on the fader**
-      (`document.elementFromPoint`), not on an overflowing neighbour — the
-      050-era guard, now checked as a real measurement rather than assumed
-      from "it still fits".
+- [x] **A click at a fader's top edge, centre, and bottom edge all land on
+      the fader** (`document.elementFromPoint`), not on an overflowing
+      neighbour — the 050-era guard, now checked as a real measurement
+      rather than assumed from "it still fits". (Post-review: the original
+      spec sampled only the centre, the same point the pre-fix ~11 px box's
+      centre also passed at — vacuous. Edge samples are what a 24 px *box*,
+      as opposed to a 24 px *point*, actually promises.)
 - [x] **The header row and lane row stay aligned to the pixel** for every
       stem, at every root size, with stem counts read from the mode rather
       than hardcoded.
@@ -77,42 +125,70 @@ measures a real Chromium rather than asserting against arithmetic.
       playhead frame** — `laneHeightPx` joined the draw effect's dependency
       list without adding a frame-driven dependency; playhead motion still
       reaches only a transformed `div`.
+- [x] **The canvas backing store follows a mid-session root-font change**,
+      verified directly (post-review, Fix 1) rather than assumed from CSS:
+      `frontend/e2e/layout.spec.ts`'s last stage changes the root font after
+      the page has already rendered and asserts the backing store's height
+      changed to match the lane's new box, with no `resize` event dispatched
+      by the test itself.
 - [x] **C10**: the scroll thumb no longer sits under the playhead hairline.
 - [x] **B8**: the "Fold to mono" stereo-handling radio is exercised through
-      real job creation in the E2E tier.
+      real job creation in the E2E tier, with the stem count pinned
+      (post-review) before the per-stem loop that reads it.
 - [x] Five frontend gates green (`npm ci` first); full E2E tier green,
       including the new spec.
 
 ## Required tests
 
-**Unit — `useRootFontSize.test.ts`** (new): falls back to 16 with no
-measurable root font (the jsdom case, and every other test in this suite);
-reads a real stubbed value when one is measurable; refreshes on `resize`
-and only on `resize`; removes its listener on unmount.
+**Unit — `useMeasuredHeight.test.ts`** (new, post-review; replaces
+`useRootFontSize.test.ts`): reports `0` with nothing attached; measures the
+attached element via `getBoundingClientRect` even with no `ResizeObserver`
+(the real jsdom default this whole suite otherwise runs under); follows a
+later resize reported by a stubbed observer's callback (a `contentRect`
+delivered directly — no `resize` event anywhere in the test, which is the
+point); disconnects **the same observer instance it created** — pinned by
+reference, not a generic "some observer was told to disconnect" spy — both
+on detach and on reattachment to a different element. (Fix 5: the deleted
+`useRootFontSize.test.ts` had a case titled "…and only on a resize", a claim
+that dissolved along with the hook; the replacement makes no such claim, and
+its cleanup case is pinned to the specific instance rather than to
+`expect.any(Function)`.)
 
 **Unit — `StemTimeline.test.tsx`** (extended): a new case in the
 `StemTimeline lanes` describe block extends the existing "repaints only the
 lane whose audibility changed" invariant — a rerender that changes only
 `positionSeconds` (what the player sends 60 times a second while playing)
-produces zero `fillRect` calls, and a simulated root-font change (a stubbed
-`getComputedStyle` plus a dispatched `resize`) produces a fresh repaint of
-every lane. The existing 43 cases stay green unmodified — none of them
-depended on the literal `64`.
+produces zero `fillRect` calls, and (post-review) a stubbed
+`ResizeObserver`'s callback reporting a taller `contentRect` on the lane box
+— the real signal `useMeasuredHeight` uses, with no `resize` event dispatched
+— produces a fresh repaint of every lane. The existing cases stay green
+unmodified — none of them depended on the literal `64`.
 
-**E2E — `frontend/e2e/layout.spec.ts`** (new): for a completed four-stem
-job on the Inspect screen, at root font sizes 16/17/18/20 px (set via
-`document.documentElement.style.fontSize`, the same mechanism a real
-browser setting drives), asserts all four acceptance criteria above. Waits
-are two `requestAnimationFrame`s after the font-size mutation (the same
-idiom `app.ts`'s `renderedFrames` uses elsewhere in this tier) — a real
-condition, never a sleep.
+**E2E — `frontend/e2e/layout.spec.ts`** (new; extended post-review): for a
+completed four-stem job on the Inspect screen, at root font sizes
+16/17/18/20 px (set via `document.documentElement.style.fontSize`, the same
+mechanism a real browser setting drives), asserts all four original
+acceptance criteria above. Waits are two `requestAnimationFrame`s after the
+font-size mutation (the same idiom `app.ts`'s `renderedFrames` uses
+elsewhere in this tier) — a real condition, never a sleep. Post-review: the
+fader-click check now samples the top edge, centre, and bottom edge of the
+box rather than only the centre; a final, separate stage sets the root font
+once more mid-session (after the page has already rendered at 16 px) and
+asserts the first canvas's backing-store `height` attribute changed to
+match the lane's new rendered box — with no `resize` dispatched by the test,
+since dispatching one by hand would exercise the deleted, broken mechanism
+rather than the one that replaced it. See "Proved to fail first" below for
+that stage's own fail-first run.
 
 **E2E — `frontend/e2e/separation.spec.ts`** (extended, rider B8): a new,
 independent-page stage selects "Fold to mono", starts a job through
 `Workflow.startSeparationWithRequest`, asserts the request itself carried
-`stereo_handling: "mono"`, waits for completion, and asserts every
-resulting stem's `channels` is `1` — the fake separator folds for real
-(041), so this is a genuine end-to-end check, not a UI-only one.
+`stereo_handling: "mono"`, waits for completion, and (post-review) asserts
+the result's stem count matches the mode's before asserting every resulting
+stem's `channels` is `1` — the fake separator folds for real (041), so this
+is a genuine end-to-end check, not a UI-only one, and the stem-count
+assertion is what keeps the per-stem loop from passing vacuously on an
+empty result.
 
 ### Proved to fail first
 
@@ -153,12 +229,53 @@ the new spec is pinning the actual, previously-recorded regression rather
 than a synthetic one. `git stash pop` restored the fix; the same command
 then passed 4/4 (below).
 
+### Fix 1's own fail-first run (post-review)
+
+The claim under test: `useRootFontSize`'s original mechanism (window
+`resize`) never fires for a font-size-only change, so a mid-session root-font
+change left the canvas backing store stale while the lane's CSS box grew.
+`git stash push` on `TimelineLane.tsx`, `StemTimeline.tsx`, `StemTimeline.css`
+and `useRootFontSize.ts`/`.test.ts` (restoring the original `resize`-driven
+mechanism; keeping the new mid-session stage in `layout.spec.ts`), then
+`npx playwright test e2e/layout.spec.ts -g "mid-session"`:
+
+```text
+Running 1 test using 1 worker
+
+  1) … a mid-session root font-size change keeps the canvas backing store in step (review Fix 1)
+     Error: the canvas backing store actually changed, rather than staying at the stale baseline
+     Expected: > 76
+     Received:   76
+
+  1 failed
+```
+
+`76` is exactly `LANE_HEIGHT_REM × 16` (the 16 px baseline the stage starts
+at) — the canvas backing store never moved off it even though the stage then
+set the root font to 20 px and gave the page two animation frames to settle,
+which is exactly the staleness the review predicted: `resize` did not fire,
+so `useRootFontSize` never re-read the font size, so `laneHeightPx` never
+changed. `git stash pop` restored this feature's fix (`useMeasuredHeight`);
+the same command then passed (`e2e/layout.spec.ts`'s full run, 5/5, is in the
+PR's test output).
+
 ## Measurements
 
 All measured in a real Chromium (`npx playwright test`), on the Inspect
 screen of a completed four-stem job, one stem's lane header
 (`.stem-timeline-lane-header`) and its fader
 (`.stem-timeline-lane-fader`).
+
+**Re-verified post-review, unchanged.** Neither review fix touches these
+numbers: Fix 1 (`useMeasuredHeight`) only changes how the canvas's *pixel*
+backing store is computed, never measured by anything in this table (all of
+which reads `clientHeight`/`scrollHeight`/`getBoundingClientRect`, plain CSS
+layout); Fix 3's `max()` floor only changes the fader's padding below a
+~14.98 px root, below every size this table covers, and evaluates to the
+same `0.45rem` at 16–20 px (confirmed by re-running
+`frontend/e2e/layout.spec.ts`'s full 16/17/18/20 px matrix after both fixes:
+5/5 passing, including the header/fader/alignment assertions this table
+mirrors).
 
 ### Before (v0.2.0, unmodified)
 
@@ -245,22 +362,49 @@ deliberately not zero (see Notes §2).
    own worked arithmetic once checked against a real browser. The measured
    numbers govern.
 
-3. **`useRootFontSize` exists only for the canvas backing store.** Every
+3. **The canvas backing store is measured directly, not derived from
+   `resize` — `useRootFontSize`'s original mechanism, which a post-review
+   probe found does not fire for the case it existed to catch.** Every
    layout box in the timeline that participates in this feature's
    acceptance criteria — the header row, the lane row — is sized with plain
    CSS `rem`, which the browser recomputes for free on a root-font change;
-   nothing here had to listen for that. The one exception is
+   nothing here has to listen for that. The one exception is
    `<canvas>.width`/`.height`, which are plain integers with no unit and no
-   participation in CSS layout at all. `useRootFontSize` (window `resize`,
-   16 px jsdom/no-layout-engine fallback) exists to give `TimelineLane`
-   something to multiply `LANE_HEIGHT_REM` by. Because of this, the E2E
-   spec's assertions (all about `clientHeight`/`scrollHeight`/
-   `getBoundingClientRect`, i.e. layout boxes) hold regardless of whether a
-   `resize` event happens to fire after `document.documentElement.style.
-   fontSize` is set by hand — CSS updates those on its own. A real browser's
-   own font-size setting does fire `resize` (a root-font change reflows the
-   whole page), which is what keeps the canvas's raster resolution in step
-   with everything else outside of this spec's own assertions.
+   participation in CSS layout at all — something still has to tell
+   `TimelineLane` the lane's actual pixel height.
+
+   **This feature originally shipped `useRootFontSize`**, which multiplied
+   `LANE_HEIGHT_REM` by the root font size, refreshed on window `resize` — on
+   the theory that a root-font change reflows the page and a reflow of the
+   page above the timeline changes the window's content box, which fires
+   `resize`. **A cross-model review tested that theory in a real Chromium
+   with a controlled probe and found it false**: changing
+   `document.documentElement.style.fontSize` does not fire `resize` at all —
+   `innerWidth`/`innerHeight` are unaffected by a font-size-only reflow, and
+   nothing else on this page's layout happens to trigger it either. The
+   consequence was silent and specific to the exact users this feature
+   serves: a mid-session font-size change grew the lane's `rem`-sized CSS box
+   (for free, since CSS recomputes `rem` layout on its own) while the canvas
+   backing store — still multiplying `LANE_HEIGHT_REM` by a `resize`-driven
+   root font size that had gone stale — did not, stretching the waveform
+   vertically by roughly the ratio of the font change (measured: the backing
+   store stuck at `76px`, the 16 px baseline, after the root font moved to
+   20 px — see "Fix 1's own fail-first run" above). This is why the original
+   E2E spec's own note ("holds regardless of whether `resize` fires") was
+   true for every assertion *in that spec* (all CSS layout boxes, which do
+   not need `resize`) but did not generalise to the canvas — the one thing
+   in this feature that did.
+
+   **The fix (`useMeasuredHeight`, replacing `useRootFontSize`) measures the
+   lane's own rendered box with `ResizeObserver`** instead of re-deriving its
+   height from a proxy signal — this codebase's own idiom, already used for
+   the tracks strip's width (`trackRef` in `useTimelineGeometry.ts`). A
+   `ResizeObserver` on the box itself cannot miss a font-size-driven change
+   (probed: `76px → 95px` across a change that fired zero `resize` events)
+   because it is not inferring the change from something else; it is
+   watching the box. `frontend/e2e/layout.spec.ts`'s last stage now checks
+   the canvas backing store directly, rather than relying on the CSS-only
+   assertions above to imply it is correct.
 
 4. **The draw effect still never repaints on a playhead frame.**
    `TimelineLane` never received `positionSeconds` as a prop before this
@@ -290,6 +434,25 @@ deliberately not zero (see Notes §2).
    caring). The new stage opens its own page and uses the tiny (2 s, one
    chunk) fixture, so it costs little and stays independent.
 
+7. **(Post-review) The fader's `padding-block` floors at a 24 px box below
+   the 16–20 px root-font range this feature targets.** The flat `0.45rem`
+   this feature measured sufficient at 16–20 px stops being enough at a
+   14 px root — measured at `22.39px`, under WCAG's 24 px. `padding-block:
+   max(0.45rem, calc((24px - 0.7rem) / 2))` keeps the larger of the flat
+   value (which still wins at 16–20 px, so those measurements are unchanged)
+   and the exact per-side padding that puts the *total* content-box height
+   at 24 px (which wins below that range). See
+   `.stem-timeline-lane-fader` in `StemTimeline.css` for the full arithmetic.
+
+8. **(Post-review) B8's stem-count pin.** The "Fold to mono" stage's
+   `for (const stem of completed.result?.stems ?? [])` loop would pass
+   vacuously if the result ever came back with an empty (or missing) stem
+   list — `?? []` exists so a malformed response does not throw mid-test, but
+   it also means the loop's assertions silently check nothing in that case.
+   `expect(completed.result?.stems ?? []).toHaveLength(mode.stems.length)`
+   before the loop closes that gap, reading the expected count from the
+   mode's own stems the way the rest of this repository's E2E tier does.
+
 ## Known limitations
 
 - **This spec's four root sizes (16/17/18/20 px) are the ones 054 measured
@@ -306,3 +469,13 @@ deliberately not zero (see Notes §2).
   required check, but not nothing) reports a clip at any of the four sizes,
   the fix is another small, measured bump to `LANE_HEIGHT_REM` or the
   header's padding/gap, not a rethink of the approach.
+- **(Noted in post-review, not fixed) The canvas backing store's height is a
+  fractional `rem × devicePixelRatio` product rounded to an integer pixel
+  count** (`Math.round(laneHeightPx * devicePixelRatio)` in
+  `TimelineLane.tsx`), so at some root font / DPR combinations the backing
+  store is up to half a device pixel taller or shorter than the CSS box it
+  fills — an imperceptible sub-pixel stretch or letterbox, not a layout
+  defect. This is the same pre-existing pattern the width side of the same
+  line already uses (`Math.round(cssWidth * devicePixelRatio)`, unchanged by
+  this feature or its review), so it is consistent rather than new; nothing
+  in this feature's scope calls for resolving it.

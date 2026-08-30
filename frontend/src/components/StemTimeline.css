@@ -9,7 +9,8 @@
  * the lane height is `rem` (`LANE_HEIGHT_REM`), so the header and lane boxes
  * grow with the browser's root font size instead of clipping at a fixed pixel
  * height; only the canvas backing store needs the pixel equivalent, which it
- * gets from `useRootFontSize` rather than from CSS.
+ * gets by measuring a lane's own rendered box with `ResizeObserver`
+ * (`useMeasuredHeight`) rather than deriving it from CSS.
  */
 
 .stem-timeline {
@@ -271,11 +272,25 @@
  * 20 px), so nothing else is needed. See
  * docs/features/067-lane-height-a11y.md for the measured before/after at
  * 16/17/18/20 px roots, including this specific measurement.
+ *
+ * **`max()` floors the padding at a 24 px box for roots below the range
+ * above, where `0.45rem` alone stops being enough.** At a 14 px root,
+ * `0.7rem` (the track) is `9.8px` and `2 × 0.45rem` is `12.6px`, for a
+ * measured `22.39px` total (sub-pixel rounding over the `22.4px` the
+ * arithmetic alone gives) — under WCAG's 24 px. `calc((24px - 0.7rem) / 2)`
+ * is exactly the per-side padding that makes the *total* content-box height
+ * (`0.7rem` track plus padding on both sides) land on 24 px, so
+ * `max(0.45rem, that)` keeps whichever is
+ * larger: the flat `0.45rem` this feature already measured sufficient at
+ * 16–20 px roots (where the `calc()` branch evaluates smaller and loses),
+ * and the 24 px floor below that range (where the `calc()` branch overtakes
+ * it). The content-box arithmetic in the paragraph above is unchanged either
+ * way — `max()` only changes which padding value feeds it.
  */
 .stem-timeline-lane-fader {
   width: 100%;
   height: 0.7rem;
-  padding-block: 0.45rem;
+  padding-block: max(0.45rem, calc((24px - 0.7rem) / 2));
   margin: 0;
   box-sizing: content-box;
   accent-color: var(--color-accent);

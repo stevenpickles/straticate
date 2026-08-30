@@ -406,6 +406,10 @@ test('creates a job with "Fold to mono" selected, and the fold reaches the resul
   await expect(workflow.stage).toHaveText('Completed')
   const completed = await fetchJob(request, job.id)
   expect(completed.result, 'the job completed with a result').not.toBeNull()
+  // `?? []` below makes the loop pass vacuously on an empty stem list, which
+  // is exactly what a broken fold could produce — pin the count first so the
+  // per-stem assertions below cannot silently check nothing.
+  expect(completed.result?.stems ?? []).toHaveLength(mode.stems.length)
   for (const stem of completed.result?.stems ?? []) {
     expect(
       stem.channels,
