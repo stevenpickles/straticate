@@ -201,6 +201,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     detector = cast(DeviceDetector | None, getattr(app.state, "device_detector", None))
     if detector is not None:
         detector.refresh()
+    # Feature 056: restore audio records from a previous run's sidecars — see
+    # AudioStore.load's docstring for why this runs here and not in __init__.
+    audio_store = cast(AudioStore | None, getattr(app.state, "audio_store", None))
+    if audio_store is not None:
+        audio_store.load()
     log_bundle_state(app)
     installer = cast(ModelInstaller | None, getattr(app.state, "model_installer", None))
     manager = JobManager()
