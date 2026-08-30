@@ -855,6 +855,67 @@ describe('StemTimeline pan', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Feature 068: auto-follow suppressed inside a loop region
+//
+// 053 note 13: a window zoomed narrower than the loop region page-flipped
+// forward approaching `loopEnd` and back at the wrap — twice per loop pass.
+// The fix narrows the follow gate: skip the flip only while a region is set
+// *and* the playhead is inside it. Follow still runs for the run-up into the
+// region and for a seek trapped past `loopEnd` (053 note 2).
+// ---------------------------------------------------------------------------
+
+describe('StemTimeline auto-follow inside a loop region', () => {
+  it('does not page-flip while the playhead loops inside a region narrower than the window', async () => {
+    const view = await fixture({
+      positionSeconds: 0,
+      loopRegion: { start: 0, end: 40 },
+    })
+    ctrlWheel(-100, 0, 2)
+    // 1.5² is 2.25, so 26.667 s are on screen — narrower than the 40 s region.
+    expect(scrollSeconds()).toBe(0)
+
+    // Approaching loopEnd would ordinarily flip the window forward (051's
+    // rule): 35 s is inside the region but outside this window.
+    view.show({ positionSeconds: 35 })
+    expect(scrollSeconds()).toBe(0)
+
+    // The wrap back to loopStart would ordinarily flip the window back again
+    // — the "visually busy" behaviour 053 note 13 flagged. Suppressed, so
+    // nothing moves.
+    view.show({ positionSeconds: 2 })
+    expect(scrollSeconds()).toBe(0)
+  })
+
+  it('still flips the window on the same playhead move when no region is set', async () => {
+    const view = await fixture({ positionSeconds: 0 })
+    ctrlWheel(-100, 0, 2)
+    expect(scrollSeconds()).toBe(0)
+
+    // Same 35 s move as the suppressed case above, but with no loop region:
+    // follow is not gated, so the window flips.
+    view.show({ positionSeconds: 35 })
+    expect(scrollSeconds()).toBeCloseTo(35 - (60 / 2.25) * 0.1, 3)
+  })
+
+  it('still flips the window once the playhead is trapped past loopEnd', async () => {
+    const view = await fixture({
+      positionSeconds: 0,
+      loopRegion: { start: 0, end: 40 },
+    })
+    ctrlWheel(-100, 0, 2)
+    expect(scrollSeconds()).toBe(0)
+
+    // 45 s is past `loopEnd` (053 note 2: a region is a trap, not a fence —
+    // playback that starts at or after the end plays through). The narrowing
+    // is load-bearing: suppression only applies while the playhead is
+    // *inside* the region, so follow fires here and the window flips,
+    // clamped to the end of the file.
+    view.show({ positionSeconds: 45 })
+    expect(scrollSeconds()).toBeCloseTo(60 - 60 / 2.25, 3)
+  })
+})
+
 describe('StemTimeline seeking under a moved window', () => {
   it('seeks to the absolute second under the pointer, zoomed and panned', async () => {
     const view = await fixture()
