@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../api/client'
 import {
   createStemAudioEngine,
+  DEFAULT_LOOKAHEAD_SECONDS,
+  DEFAULT_SCRUB_FADE_SECONDS,
   StemAudioEngine,
   type StemPlayerEngine,
   type StemSource,
@@ -1574,6 +1576,220 @@ describe('StemAudioEngine scrub preview', () => {
       value: 1,
       time: LOOKAHEAD + 0.02,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Retrying a failed stem (feature 064). The seam is the loader: a stem is
+// "gone" while its name is absent from the durations table and "back" once a
+// test puts it there, so a recovery needs no second engine and no reload.
+// ---------------------------------------------------------------------------
+
+describe('StemAudioEngine retrying a failed stem', () => {
+  /** A loader that also records which stem names it was asked for. */
+  function countingLoader(durations: Record<string, number>): {
+    load: StemLoader
+    calls: string[]
+  } {
+    const calls: string[] = []
+    const inner = loaderFor(durations)
+    return {
+      calls,
+      load: (url, signal) => {
+        calls.push(url.slice(url.lastIndexOf('/') + 1))
+        return inner(url, signal)
+      },
+    }
+  }
+
+  it('recovers a stem whose audio failed, and recomputes the mix', async () => {
+    // `instrumental` is absent from the table, so its fetch 404s.
+    const available: Record<string, number> = { vocals: 10 }
+    await loadEngine(twoStems, { load: loaderFor(available) })
+    expect(engine.getSnapshot().stems[1]?.status).toBe('error')
+    expect(engine.getSnapshot().error).not.toBeNull()
+
+    // The file is there this time — and longer than the one that loaded, so
+    // the recomputed duration cannot be mistaken for the old one.
+    available.instrumental = 12.5
+    await engine.retryFailedStems()
+
+    const snapshot = engine.getSnapshot()
+    expect(snapshot.stems.every((stem) => stem.status === 'loaded')).toBe(true)
+    expect(snapshot.stems.every((stem) => stem.error === null)).toBe(true)
+    expect(snapshot.status).toBe('ready')
+    expect(snapshot.durationSeconds).toBe(12.5)
+    // The load failure has an answer now, so it must not stand.
+    expect(snapshot.error).toBeNull()
+    expect(engine.getStemBuffer('instrumental')?.duration).toBe(12.5)
+  })
+
+  it('leaves every stem that already loaded exactly as it was', async () => {
+    const available: Record<string, number> = { vocals: 10 }
+    await loadEngine(twoStems, { load: loaderFor(available) })
+    const gain = context.gains[0]
+    const buffer = engine.getStemBuffer('vocals')
+
+    available.instrumental = 10
+    await engine.retryFailedStems()
+
+    // Same buffer object, same gain node, never disconnected: recovering one
+    // stem must not cost the stems the user is already listening to.
+    expect(engine.getStemBuffer('vocals')).toBe(buffer)
+    expect(context.gains[0]).toBe(gain)
+    expect(gain?.disconnectCount).toBe(0)
+    // One new decode, not a whole set: the loaded stem was never re-fetched.
+    expect(context.decoded).toHaveLength(2)
+    expect(context.gains).toHaveLength(2)
+  })
+
+  it('does nothing at all when no stem failed', async () => {
+    const loader = countingLoader(twoStems)
+    await loadEngine(twoStems, { load: loader.load })
+    expect(loader.calls).toEqual(['vocals', 'instrumental'])
+    const before = engine.getSnapshot()
+
+    await engine.retryFailedStems()
+
+    // Not one request, and not one new snapshot: a transport failure (a
+    // refused `resume()`) has nothing here to retry, and `play()` is its
+    // remedy.
+    expect(loader.calls).toEqual(['vocals', 'instrumental'])
+    expect(engine.getSnapshot()).toBe(before)
+    expect(context.gains).toHaveLength(2)
+  })
+
+  it('asks only for the stems that failed', async () => {
+    const available: Record<string, number> = { vocals: 10 }
+    const loader = countingLoader(available)
+    await loadEngine(fourStems, { load: loader.load })
+    loader.calls.length = 0
+
+    available.drums = 10
+    await engine.retryFailedStems()
+
+    expect(loader.calls).toEqual(['drums', 'bass', 'other'])
+  })
+
+  it('re-reports a stem that fails again, without rejecting', async () => {
+    await loadEngine(twoStems, { load: loaderFor({ vocals: 10 }) })
+
+    await expect(engine.retryFailedStems()).resolves.toBeUndefined()
+
+    const snapshot = engine.getSnapshot()
+    const failed = snapshot.stems.find((stem) => stem.name === 'instrumental')
+    expect(failed?.status).toBe('error')
+    expect((failed?.error as ApiError).code).toBe('stem_file_missing')
+    expect((snapshot.error as ApiError).code).toBe('stem_file_missing')
+    // …and the stem that did load is still playable.
+    expect(snapshot.status).toBe('ready')
+    expect(snapshot.durationSeconds).toBe(10)
+  })
+
+  it('joins a recovered stem to a mix that is already playing', async () => {
+    const available: Record<string, number> = { vocals: 10 }
+    await loadEngine(twoStems, { load: loaderFor(available) })
+    await engine.play()
+    // Only the stem that loaded is running.
+    expect(context.sources).toHaveLength(1)
+    context.currentTime = 4
+
+    available.instrumental = 10
+    await engine.retryFailedStems()
+
+    // One new generation, both stems in it, one shared `when` and one shared
+    // offset — the position the mix had actually reached.
+    const rebuilt = context.sourcesFrom(1)
+    expect(rebuilt).toHaveLength(2)
+    expect(startTimes(rebuilt)).toEqual([4 + LOOKAHEAD])
+    expect(startOffsets(rebuilt)).toEqual([4 - LOOKAHEAD])
+    expect(rebuilt[1]?.connections).toEqual([context.gains[1]])
+    expect(engine.getSnapshot().playing).toBe(true)
+  })
+
+  it('joins at the wrapped position when a loop region is running', async () => {
+    const longStems = { vocals: 30, instrumental: 30 }
+    const available: Record<string, number> = { vocals: 30 }
+    await loadEngine(longStems, { load: loaderFor(available) })
+    engine.setLoopRegion(10, 20)
+    await engine.play()
+    // 25 s of raw material into a 10–20 s region entered at 0 wraps to 14.95
+    // (the lookahead is still owed at the front).
+    context.currentTime = 25
+    expect(engine.currentTime()).toBeCloseTo(14.95, 6)
+
+    available.instrumental = 30
+    await engine.retryFailedStems()
+
+    const rebuilt = context.sourcesFrom(1)
+    expect(rebuilt).toHaveLength(2)
+    expect(startTimes(rebuilt)).toEqual([25 + LOOKAHEAD])
+    expect(rebuilt[0]?.started?.offset).toBeCloseTo(14.95, 6)
+    expect(startOffsets(rebuilt)).toHaveLength(1)
+    // The region survives the rebuild: `startSources` is where the flags are
+    // set, so the recovered stem wraps with the rest from its first sample.
+    expect(rebuilt.every((source) => source.loop)).toBe(true)
+    expect(rebuilt.every((source) => source.loopEnd === 20)).toBe(true)
+  })
+
+  it('publishes nothing when a load supersedes the retry', async () => {
+    const held = deferred<ArrayBuffer>()
+    let call = 0
+    context = new FakeAudioContext()
+    engine = createStemAudioEngine({
+      createContext: () => context,
+      lookaheadSeconds: LOOKAHEAD,
+      loadStemAudio: (url) => {
+        call += 1
+        // Calls 1–2 are the initial load (`instrumental` 404s); call 3 is the
+        // retry's fetch, held open; the rest belong to the new job.
+        if (call <= 2) {
+          return loaderFor({ vocals: 10 })(url)
+        }
+        return call === 3 ? held.promise : Promise.resolve(stemBytes(30))
+      },
+    })
+    await engine.load(sources(twoStems))
+    expect(engine.getSnapshot().stems[1]?.status).toBe('error')
+
+    const retry = engine.retryFailedStems()
+    await engine.load(sources(fourStems))
+    const afterLoad = context.gains.length
+
+    // The orphaned retry now finishes. It must change nothing.
+    held.resolve(stemBytes(10))
+    await expect(retry).resolves.toBeUndefined()
+
+    expect(engine.getSnapshot().stems.map((stem) => stem.name)).toEqual([
+      'vocals',
+      'drums',
+      'bass',
+      'other',
+    ])
+    expect(engine.getSnapshot().durationSeconds).toBe(30)
+    expect(engine.getSnapshot().status).toBe('ready')
+    expect(context.gains).toHaveLength(afterLoad)
+  })
+
+  it('ignores a retry after disposal', async () => {
+    const loader = countingLoader({ vocals: 10 })
+    await loadEngine(twoStems, { load: loader.load })
+    engine.dispose()
+
+    await expect(engine.retryFailedStems()).resolves.toBeUndefined()
+
+    expect(loader.calls).toEqual(['vocals', 'instrumental'])
+  })
+})
+
+describe('StemAudioEngine scheduling defaults', () => {
+  it('keeps the scrub fade shorter than the scheduling lookahead', () => {
+    // Feature 052's known limitation, pinned. A motionless click opens a
+    // preview session and closes it in the same tick: the release schedules
+    // `stop(now + fade)` while the grain is scheduled to start at
+    // `now + lookahead`, so the click is silent only while the stop lands
+    // first. Nothing else in the suite notices if one default moves.
+    expect(DEFAULT_SCRUB_FADE_SECONDS).toBeLessThan(DEFAULT_LOOKAHEAD_SECONDS)
   })
 })
 

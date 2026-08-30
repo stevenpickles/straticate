@@ -36,21 +36,26 @@ import { sampleAudioFile, sampleJob, sampleJobId } from '../test/fixtures'
 /** Every stem in these fixtures is this long, so the readout is predictable. */
 const STEM_SECONDS = 60
 
-function stem(name: string): Stem {
+/**
+ * One stem of the result. `channels` is a parameter because feature 041's
+ * mono fold-down makes a job report `channels: 1` — see the mono describe
+ * block at the end of this file.
+ */
+function stem(name: string, channels = 2): Stem {
   return {
     name,
     duration_seconds: STEM_SECONDS,
     sample_rate_hz: 44100,
-    channels: 2,
+    channels,
   }
 }
 
 /** A result over exactly the stem names given — two of them or four. */
-function resultOver(names: readonly string[]): SeparationResult {
+function resultOver(names: readonly string[], channels = 2): SeparationResult {
   return {
     job_id: sampleJobId,
     model_id: 'vocals-hq-001',
-    stems: names.map(stem),
+    stems: names.map((name) => stem(name, channels)),
     metrics: { processing_seconds: 8, realtime_factor: 7.5 },
   }
 }
@@ -284,6 +289,18 @@ class FakeEngine implements StemPlayerEngine {
 
   load = (sources: readonly StemSource[]): Promise<void> => {
     this.loaded = [...sources]
+    return Promise.resolve()
+  }
+
+  /**
+   * How many times the stem retry was asked for (feature 064). Counted rather
+   * than simulated: what the component owes is the call, and the recovery
+   * itself is pinned against the real engine in `audio/engine.test.ts`.
+   */
+  retryCalls = 0
+
+  retryFailedStems = (): Promise<void> => {
+    this.retryCalls += 1
     return Promise.resolve()
   }
 
@@ -532,8 +549,9 @@ function renderPlayer(
  */
 async function renderReady(
   names: readonly string[],
+  channels = 2,
 ): Promise<{ engine: FakeEngine }> {
-  stubResultFetch(jsonResponse(resultOver(names)))
+  stubResultFetch(jsonResponse(resultOver(names, channels)))
   const engine = new FakeEngine()
   renderPlayer(engine)
   await screen.findByRole(
@@ -884,6 +902,12 @@ describe('StemPlayer result-fetch retry (feature 048)', () => {
       expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
     })
     expect(screen.queryByRole('alert')).toBeNull()
+    // The same settle `renderReady` ends with. The peak computations are
+    // chunked and therefore async, so without it the lanes paint *after*
+    // `afterEach` has restored `getContext` — past the fake canvas, into
+    // jsdom's unimplemented one, which is where this file's two
+    // "Not implemented: HTMLCanvasElement's getContext()" warnings came from.
+    await act(async () => {})
   })
 
   it('offers "Try again" for a 409 result_not_available while the job is still running', async () => {
@@ -1848,6 +1872,195 @@ describe('StemPlayer route out of the inspect phase (review finding 2)', () => {
     // Both stores always move together: never a cleared job on a stale phase.
     expect(screen.getByTestId('workflow-phase')).toHaveTextContent('select')
     expect(screen.getByTestId('tracked-job')).toHaveTextContent('none')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Feature 064: the other half of 048's retry story.
+//
+// 048 gave the *result fetch* a "Try again"; a failed stem-audio download had
+// none, because widening it needed an engine reload path. The engine has one
+// now (`retryFailedStems`), so the loaded body offers the same control — but
+// only for a failure a re-fetch could actually answer.
+// ---------------------------------------------------------------------------
+
+describe('StemPlayer stem-audio retry', () => {
+  /** The 404 the backend raises when a stem's file is gone from disk. */
+  const stemGone = new ApiError(404, {
+    code: 'stem_file_missing',
+    message: 'The stem file is missing.',
+  })
+
+  /** Publish "one stem's audio failed, the rest is playable". */
+  function failOneStem(engine: FakeEngine): void {
+    act(() => {
+      engine.update({
+        status: 'ready',
+        error: stemGone,
+        stems: [
+          stemState('vocals'),
+          stemState('instrumental', { status: 'error', error: stemGone }),
+        ],
+      })
+    })
+  }
+
+  /** The player region — where a retry click leaves focus. */
+  function playerRegion(): HTMLElement {
+    return screen.getByRole('region', { name: 'Stem player' })
+  }
+
+  it('offers a retry beside the alert when a stem’s audio failed', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+
+    failOneStem(engine)
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'The audio for this job is gone from disk',
+    )
+    expect(
+      screen.getByRole('button', { name: 'Try again' }),
+    ).toBeInTheDocument()
+  })
+
+  it('offers none for a transport failure, which has nothing to re-fetch', async () => {
+    const { engine } = await renderReady(twoStemNames)
+
+    // An autoplay-policy rejection: every stem is loaded, so there is nothing
+    // to fetch again and `play()` is the remedy.
+    act(() => {
+      engine.update({ error: new TypeError('The play request was rejected') })
+    })
+
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+  })
+
+  it('asks the engine to re-fetch the failed stems, without reloading', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    failOneStem(engine)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    expect(engine.retryCalls).toBe(1)
+    // Not a reload: the engine is neither disposed nor asked to load again.
+    expect(engine.disposeCount).toBe(0)
+    expect(engine.loaded).toHaveLength(2)
+  })
+
+  it('keeps focus in the player when the stem retry unmounts', async () => {
+    const { engine } = await renderReady(twoStemNames)
+    failOneStem(engine)
+    const retry = screen.getByRole('button', { name: 'Try again' })
+    retry.focus()
+    expect(document.activeElement).toBe(retry)
+
+    await userEvent.click(retry)
+
+    // The control disappears the moment the stems leave `error`, and the
+    // browser's default would strand a keyboard user on `<body>`.
+    expect(document.activeElement).toBe(playerRegion())
+    expect(document.activeElement).not.toBe(document.body)
+  })
+
+  it('keeps focus in the player when the result retry unmounts (feature 048’s handoff)', async () => {
+    stubResultFetchQueue(
+      () => Promise.reject(new TypeError('network error')),
+      // Held open, so the error branch is replaced by the loading paragraph
+      // and stays there — the button really is gone when focus is asserted.
+      () => new Promise<Response>(() => undefined),
+    )
+    renderPlayer(new FakeEngine())
+    await screen.findByRole('alert')
+    const retry = screen.getByRole('button', { name: 'Try again' })
+    retry.focus()
+
+    await userEvent.click(retry)
+
+    await screen.findByText('Loading the separation result…')
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    expect(document.activeElement).toBe(playerRegion())
+  })
+
+  it('recovers the stem over the real engine, keeping the mix intact', async () => {
+    context = new FakeAudioContext()
+    let attempts = 0
+    const engine = createStemAudioEngine({
+      createContext: () => context,
+      loadStemAudio: (url: string) => {
+        if (!url.endsWith('/instrumental')) {
+          return Promise.resolve(stemBytes(STEM_SECONDS))
+        }
+        attempts += 1
+        // Gone the first time, there the second: the whole point of a retry.
+        return attempts === 1
+          ? Promise.reject(stemGone)
+          : Promise.resolve(stemBytes(STEM_SECONDS))
+      },
+      lookaheadSeconds: 0,
+    })
+    stubResultFetch(jsonResponse(resultOver(twoStemNames)))
+    renderPlayer(engine)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled()
+    }, SETTLE)
+    await act(async () => {})
+    expect(screen.getByRole('alert')).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Mute instrumental' }),
+    ).toBeDisabled()
+    const vocalsGain = context.gains[0]
+
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Mute instrumental' }),
+      ).toBeEnabled()
+    }, SETTLE)
+    await act(async () => {})
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+    // The stem that always worked kept its gain node: a retry is additive.
+    expect(context.gains).toHaveLength(2)
+    expect(context.gains[0]).toBe(vocalsGain)
+    expect(vocalsGain?.disconnectCount).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A single mono stem (feature 041's recorded coverage gap). A job separated
+// with `stereo_handling: "mono"` reports `channels: 1`, and a vocals-only
+// model can return exactly one stem. Nothing in the player reads `channels`;
+// every count comes from the stem list, which is what this holds it to.
+// ---------------------------------------------------------------------------
+
+describe('StemPlayer with a single mono stem', () => {
+  it('renders one of everything, derived from the result', async () => {
+    const { engine } = await renderReady(['vocals'], 1)
+
+    expect(laneNames()).toEqual(['vocals'])
+    expect(document.querySelectorAll('canvas')).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /^Mute /u })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /^Solo /u })).toHaveLength(1)
+    expect(screen.getAllByRole('slider', { name: /level$/u })).toHaveLength(1)
+    expect(engine.loaded).toEqual([
+      { name: 'vocals', url: `/api/v1/jobs/${sampleJobId}/stems/vocals` },
+    ])
+  })
+
+  it('plays and seeks it exactly as it does a stereo mix', async () => {
+    const { engine } = await renderReady(['vocals'], 1)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    expect(engine.playCount).toBe(1)
+
+    dragTimeline(18)
+
+    expect(engine.moves).toHaveLength(1)
+    expect(engine.moves[0]).toBeCloseTo(18, 6)
+    expect(screen.getByText('0:18 / 1:00')).toBeInTheDocument()
   })
 })
 
