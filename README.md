@@ -115,32 +115,41 @@ a specific network architecture. See [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Status
 
-**v0.2.0 — the timeline release.** The workflow above works end to end, on
-real models, on CPU or CUDA, and the Inspect step is now an editor's
-timeline: per-stem waveforms, zoom and pan, audible scrubbing, loop regions
-and per-stem faders. [CHANGELOG.md](CHANGELOG.md) is the release note: what
-it does, what it needs, and — the section worth reading before you separate
-anything — what it cannot do.
+**v0.3.0 — durable, measured, polished.** The workflow above works end to
+end, on real models, on CPU or CUDA. Job records, the upload registry and
+model-install failures now survive a restart; a job's stems and exports are
+deletable in one call, disk usage is visible (`GET /system/disk-usage`), and
+a manual prune reclaims it (`POST /system/prune`). A new stereo-handling
+option, `mono_bass`, recovers a wide-stereo mix's bass stem without folding
+the whole track to mono, and the Inspect timeline's playhead, loop region
+and zoom/scroll window now survive leaving the step and reloading the page.
+[CHANGELOG.md](CHANGELOG.md) is the release note: what it does, what it
+needs, and — the section worth reading before you separate anything — what
+it cannot do.
 
 The four you are most likely to meet:
 
 - **Vocal Isolation has no fast tier.** It runs at about **0.3× real time on
   CPU** — roughly ten minutes for a three-minute song without a GPU. Standard
-  Stems is the mode with a usable CPU path (1.63× real time).
+  Stems is the mode with a usable CPU path (1.63× real time). A fast-vocals
+  model remains blocked on the same unanswered weights-licence question as
+  every prior release ([feature 027](docs/features/027-mdx-fast-separator.md)).
 - **Demucs loses the bass stem on wide-separation stereo mixes** (early stereo
-  records with near-independent channels). "Fold to mono" **recovers** that
-  stem — 33 dB on the measured case — but it does not fix the separation: it
-  moves 16% of the source's low band into `bass`, `other` still holds 41%, and
-  the fold costs `drums` and `other` about 3 dB each while `vocals` gains about
-  2 dB. Every stem then comes back mono, and nothing detects the condition for
-  you.
-- **A job the server stopped under does not resume.** Job records survive a
-  restart, so a finished separation and its stems are still there afterwards —
-  but a job that was queued or running when the backend stopped comes back
-  `failed` ("the server stopped while this job was queued or running") rather
-  than being re-run for you. Start it again when you want it.
-- **Nothing prunes.** Uploads, stems and export artifacts accumulate under the
-  data directory forever; there is no retention policy.
+  records with near-independent channels). **Fold to mono** and the new
+  **`mono_bass`** both recover that stem — `mono_bass` slightly better, at
+  about a third of the cost to the other stems, and it keeps every stem in
+  stereo — but neither fixes the separation, and both are measured on one
+  track, not a survey. Nothing suggests either one to you yet: a detector
+  exists (`GET /audio/{id}/analysis`) but its in-app suggestion is held
+  disabled pending a false-positive measurement on ordinary tracks.
+- **An interrupted job does not resume.** A finished separation and its
+  stems now survive a restart — but a job that was queued or running when
+  the backend stopped comes back `failed` (`job_interrupted`) rather than
+  being re-run for you. Start it again when you want it.
+- **Nothing prunes automatically.** Uploads, stems and export artifacts
+  still accumulate under the data directory until something asks
+  `POST /system/prune` to reclaim them; there is no retention policy or
+  background sweep yet.
 
 Development continues in small, numbered feature branches merged into the `dev`
 integration branch. See [ROADMAP.md](ROADMAP.md) for the feature ledger.
