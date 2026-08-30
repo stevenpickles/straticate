@@ -357,7 +357,7 @@ verbatim as the planning record they were.
 | 057 | Durable job records + interrupted recovery   | MERGED  | —          | `057-durable-job-records` | #92 |
 | 058 | Job deletion + exports authority in layout   | MERGED  | 057        | `058-job-deletion` | #98 |
 | 059 | Disk-usage endpoint                          | MERGED  | 056, 057   | `059-disk-usage-endpoint` | #95 |
-| 060 | Prune endpoint                               | PR OPEN | 058, 059   | `060-prune-endpoint` | |
+| 060 | Prune endpoint                               | PR OPEN | 058, 059   | `060-prune-endpoint` | #101 |
 | 061 | Persist model install failures               | MERGED  | —          | `061-persist-install-failures` | #89 |
 | 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | PR OPEN | 041 | `062-band-limited-fold` | #100 |
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |

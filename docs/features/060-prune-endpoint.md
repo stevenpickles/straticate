@@ -3,7 +3,7 @@
 Branch: `060-prune-endpoint`
 Status: PR OPEN
 Dependencies: 058, 059
-PR: —
+PR: #101
 
 ## Objective
 
