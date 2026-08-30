@@ -61,6 +61,14 @@ class StereoHandling(StrEnum):
     decoded mixture is handed to the separator untouched. Nothing is ever
     applied without being asked for (feature 032's rule, and this feature's
     brief) — a wide mix is not detected and silently corrected.
+
+    Feature 062 added the third value. 041 shipped the whole-spectrum fold and
+    recorded the band-limited one as "the most promising unexplored option";
+    062 measured it on the same single track against the same baselines,
+    where it recovered at least as much ``bass`` as the full fold at a third
+    of the cost to ``drums`` and ``other``, with the stems coming back stereo
+    instead of mono. One track, not a survey — the table and its caveats are
+    in ``docs/features/062-band-limited-fold.md``.
     """
 
     AS_IS = "as_is"
@@ -68,6 +76,14 @@ class StereoHandling(StrEnum):
 
     MONO = "mono"
     """Fold the mixture to mono ``(L + R) / 2`` first; the stems come back mono."""
+
+    MONO_BASS = "mono_bass"
+    """Fold the low end to a shared centre; the image above it, and the stems, stay stereo.
+
+    The crossover is a measured constant of the application
+    (:data:`~straticate.inference.stereo.BASS_FOLD_CROSSOVER_HZ`), not a dial:
+    see that docstring for why it is fixed and how the value was chosen.
+    """
 
 
 class SeparationConfiguration(BaseModel):
@@ -86,7 +102,9 @@ class SeparationConfiguration(BaseModel):
             "How to treat the input's stereo image before separating. "
             '"as_is" (the default) separates the mixture untouched; "mono" folds it '
             "down to a single channel first, which recovers stems a very wide stereo "
-            "image can otherwise lose, at the cost of mono stems."
+            'image can otherwise lose, at the cost of mono stems; "mono_bass" folds '
+            "only the low end to a shared centre and keeps the image above it, so the "
+            "stems stay stereo."
         ),
     )
 

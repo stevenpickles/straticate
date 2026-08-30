@@ -502,6 +502,44 @@ async def test_a_folded_job_reports_mono_stems_on_a_fake_backed_server(
         assert int.from_bytes(audio.content[22:24], "little") == 1
 
 
+async def test_a_band_limited_job_reports_stereo_stems_on_a_fake_backed_server(
+    results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
+) -> None:
+    """Feature 062's half of the same contract, and the harder one to keep honest.
+
+    ``mono_bass`` changes the audio without changing its shape, so "two channels
+    came back" is what a server that *ignored* the field would also report. What
+    makes this test mean something is the pair it forms with
+    :func:`test_a_folded_job_reports_mono_stems_on_a_fake_backed_server`: the
+    two values are distinguishable here only because the fake engine really
+    applies both, and ``tests/test_stereo_handling.py`` separately asserts that
+    the bytes differ from an untouched run on all three separators.
+
+    What a client is told is the level this test is at: the echoed
+    configuration, ``Stem.channels``, and the WAV headers of the bytes served.
+    """
+    job_id = await create_job(
+        results_client, **configuration(audio_id, stereo_handling="mono_bass")
+    )
+    terminal = await recorder.wait_for_terminal(job_id)
+    assert isinstance(terminal, JobCompletedEvent), terminal
+
+    job = (await results_client.get(f"{JOBS_URL}/{job_id}")).json()
+    assert job["configuration"]["stereo_handling"] == "mono_bass"
+
+    response = await results_client.get(result_url(job_id))
+    assert response.status_code == 200, response.text
+    stems = cast(list[dict[str, Any]], response.json()["stems"])
+    assert stems, "the job produced no stems"
+    for stem in stems:
+        assert stem["channels"] == 2, f"{stem['name']} lost its stereo image"
+
+    for stem in stems:
+        audio = await results_client.get(stem_url(job_id, cast(str, stem["name"])))
+        assert audio.status_code == 200, audio.text
+        assert int.from_bytes(audio.content[22:24], "little") == 2
+
+
 async def test_an_unfolded_job_still_reports_stereo_stems(
     results_client: httpx2.AsyncClient, recorder: EventRecorder, audio_id: str
 ) -> None:

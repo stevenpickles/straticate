@@ -359,7 +359,7 @@ verbatim as the planning record they were.
 | 059 | Disk-usage endpoint                          | MERGED  | 056, 057   | `059-disk-usage-endpoint` | #95 |
 | 060 | Prune endpoint                               | PLANNED | 058, 059   | `060-prune-endpoint` | |
 | 061 | Persist model install failures               | MERGED  | —          | `061-persist-install-failures` | #89 |
-| 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | READY | 041 | `062-band-limited-fold` | |
+| 062 | Band-limited fold (measure; `mono_bass` or documented rejection) | PR OPEN | 041 | `062-band-limited-fold` | #100 |
 | 063 | Wide-stereo detection + suggestion           | PLANNED | 041        | `063-wide-stereo-detection` | |
 | 064 | Stem-audio retry + player hygiene            | MERGED  | 048, 052   | `064-stem-retry-hygiene` | #91 |
 | 065 | Job-scoped stem session (engine hoist)       | MERGED  | 064        | `065-stem-session` | #96 |

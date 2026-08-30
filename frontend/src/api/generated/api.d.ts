@@ -1197,7 +1197,7 @@ export interface components {
              */
             device_id?: string | null;
             /**
-             * @description How to treat the input's stereo image before separating. "as_is" (the default) separates the mixture untouched; "mono" folds it down to a single channel first, which recovers stems a very wide stereo image can otherwise lose, at the cost of mono stems.
+             * @description How to treat the input's stereo image before separating. "as_is" (the default) separates the mixture untouched; "mono" folds it down to a single channel first, which recovers stems a very wide stereo image can otherwise lose, at the cost of mono stems; "mono_bass" folds only the low end to a shared centre and keeps the image above it, so the stems stay stereo.
              * @default as_is
              */
             stereo_handling: components["schemas"]["StereoHandling"];
@@ -1315,9 +1315,17 @@ export interface components {
          *     decoded mixture is handed to the separator untouched. Nothing is ever
          *     applied without being asked for (feature 032's rule, and this feature's
          *     brief) — a wide mix is not detected and silently corrected.
+         *
+         *     Feature 062 added the third value. 041 shipped the whole-spectrum fold and
+         *     recorded the band-limited one as "the most promising unexplored option";
+         *     062 measured it on the same single track against the same baselines,
+         *     where it recovered at least as much ``bass`` as the full fold at a third
+         *     of the cost to ``drums`` and ``other``, with the stems coming back stereo
+         *     instead of mono. One track, not a survey — the table and its caveats are
+         *     in ``docs/features/062-band-limited-fold.md``.
          * @enum {string}
          */
-        StereoHandling: "as_is" | "mono";
+        StereoHandling: "as_is" | "mono" | "mono_bass";
         /**
          * StorageReport
          * @description How much room the machine running Straticate has for model weights.
