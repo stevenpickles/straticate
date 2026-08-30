@@ -1,7 +1,7 @@
 # [069] Release preparation for v0.3.0
 
 Branch: `069-release-preparation-v0.3.0`
-Status: PR OPEN
+Status: MERGED
 Dependencies: 056, 057, 058, 059, 060, 061, 062, 063, 064, 065, 066, 067, 068
 PR: #105
 
