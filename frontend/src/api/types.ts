@@ -22,6 +22,7 @@ export type ErrorEnvelope = components['schemas']['ErrorEnvelope']
 // Audio
 export type AudioMetadata = components['schemas']['AudioMetadata']
 export type AudioFile = components['schemas']['AudioFile']
+export type StereoAnalysis = components['schemas']['StereoAnalysis']
 
 // Models and modes
 export type ModelRequirements = components['schemas']['ModelRequirements']

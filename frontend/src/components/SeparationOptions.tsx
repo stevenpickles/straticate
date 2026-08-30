@@ -10,6 +10,8 @@ import type { Model } from '../api/types'
 import { ModelInstallPanel } from './ModelInstallPanel'
 import { ModelLicence } from './ModelLicence'
 import { useModelCatalog } from './useModelCatalog'
+import { useStereoAnalysis } from './useStereoAnalysis'
+import { WideStereoNote } from './WideStereoNote'
 import {
   installationOf,
   startBlockedReason,
@@ -115,11 +117,16 @@ function tierWeightsNote(model: Model | undefined): string | null {
  * Must be rendered under an `AppStateProvider` and a `JobStateProvider`.
  */
 export function SeparationOptions() {
-  const { upload, configure } = useAppState()
+  const { upload, analysis, configure } = useAppState()
   const dispatch = useAppDispatch()
   const jobDispatch = useJobDispatch()
   const requestedRef = useRef(false)
   const creatingRef = useRef(false)
+
+  // Feature 063: measure the upload's stereo image, once, in the background.
+  // It gates nothing here — every control below works while it is outstanding
+  // and if it never answers at all.
+  useStereoAnalysis()
 
   const loadModes = useCallback(() => {
     requestedRef.current = true
@@ -400,6 +407,13 @@ export function SeparationOptions() {
                 This recording is already mono, so there is nothing to fold.
               </p>
             )}
+            {/*
+              What was *measured* about this recording, where the choice about
+              it is made — and only ever as a note. It applies nothing, and it
+              is held disabled pending a false-positive measurement; see
+              WideStereoNote.tsx and docs/features/063-wide-stereo-detection.md.
+            */}
+            {!sourceIsMono && <WideStereoNote analysis={analysis} />}
             {!sourceIsMono &&
               STEREO_HANDLING_OPTIONS.map((option) => {
                 const noteId = `${optionId('stereo', option.id)}-note`

@@ -257,13 +257,15 @@ retention window that would otherwise silently apply to nothing.
 | --- | --- | --- |
 | POST | `/audio` | Multipart upload (`file` field). Validates and probes. → `201` + `AudioFile` |
 | GET | `/audio/{audio_id}` | Fetch `AudioFile` |
+| GET | `/audio/{audio_id}/analysis` | Measure the upload's stereo image → `200` + `StereoAnalysis` |
 | DELETE | `/audio/{audio_id}` | Remove uploaded audio and derived data → `204` |
 
 Upload validation runs in order: size limit (configurable via
 `STRATICATE_MAX_UPLOAD_BYTES`, default 1 GiB) → ffprobe decodability.
 Error codes: `audio_too_large` (413), `audio_not_decodable` (422),
-`audio_probe_timed_out` (504), `audio_not_found` (404, GET/DELETE); a missing
-`file` part is a standard `validation_error` (422).
+`audio_probe_timed_out` (504), `audio_not_found` (404, on `GET`, `DELETE` and
+the analysis route below); a missing `file` part is a standard
+`validation_error` (422).
 
 `audio_probe_timed_out` is deliberately *not* `audio_not_decodable`. Every
 FFmpeg and ffprobe invocation is bounded by `STRATICATE_FFMPEG_TIMEOUT_SECONDS`
@@ -293,6 +295,51 @@ retry, rather than being told its file is broken. See **Timeouts** below.
 
 Metadata comes from `ffprobe` on the actual media — never from the filename
 extension. `bit_depth`/`bit_rate_bps` are nullable (lossy formats).
+
+### Stereo analysis (feature 063)
+
+`GET /audio/{audio_id}/analysis` measures how independent the upload's two
+channels are, and reports it:
+
+```json
+{ "l_r_correlation": 0.229, "wide_stereo": true }
+```
+
+`l_r_correlation` is the Pearson correlation of left and right, **full band,
+over the whole track**, in `[-1, 1]`. `wide_stereo` says whether that is low
+enough for a stem to come back near-silent — feature 041 measured a real mix at
++0.229 whose `bass` stem was −65.7 dBFS, against 0.7–0.95 for modern
+productions. The threshold is **derived server-side and is not part of this
+contract**: a client renders what it is told rather than re-deciding it.
+
+Two documented cases have no correlation to report, and they differ in what
+they mean:
+
+| case | response |
+| --- | --- |
+| single-channel upload — no image to measure | `{"l_r_correlation": null, "wide_stereo": false}` |
+| a channel with zero variance (one side silent, or constant) | `{"l_r_correlation": null, "wide_stereo": true}` |
+
+**This is a measurement, never an instruction.** Nothing here names or implies a
+`stereo_handling` value, no job is configured from it, and separation behaves
+identically whether or not it was ever requested — feature 041's rule is that
+detection may *suggest* and must never apply. See **Stereo handling** under
+Jobs for the control a user chooses for themselves.
+
+The measurement runs on the **first** request for an audio ID and is cached
+in-process for that upload's lifetime, so it is computed once however many
+clients ask; concurrent first requests share the one computation, and
+`DELETE /audio/{audio_id}` drops it. The first request is therefore held open
+for the length of one decode — around a second for a three-minute track,
+proportionally longer for a long one. That is acceptable *because this endpoint
+gates nothing*: it is an enrichment, and a client that never calls it, or whose
+call fails, loses no function.
+
+Error codes: `audio_not_found` (404 — unknown ID, or its file is gone from
+disk), `audio_not_decodable` (422 — FFmpeg cannot decode bytes ffprobe accepted
+at upload), `audio_analysis_timed_out` (504, with `detail.timeout_seconds`).
+The last two are distinct for the same reason they are on upload: a tool that
+ran out of time made no claim about the file.
 
 ## Models and modes
 
@@ -939,6 +986,7 @@ own code — never a generic one, and never a code that means something else:
 | surface | code | status |
 | --- | --- | --- |
 | `POST /audio` (ffprobe) | `audio_probe_timed_out` | 504 |
+| `GET /audio/{audio_id}/analysis` (FFmpeg) | `audio_analysis_timed_out` | 504 |
 | a separation job's decode (FFmpeg) | `audio_decode_timed_out` | *(job `error.code`)* |
 | `GET /jobs/{job_id}/export` (FFmpeg) | `export_timed_out` | 504 |
 
