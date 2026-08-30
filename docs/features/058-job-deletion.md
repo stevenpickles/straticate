@@ -28,8 +28,12 @@ convention.
 - `DELETE /jobs/{job_id}` in `api/jobs.py`: `404 job_not_found` for an unknown
   job, `409 job_active` for a non-terminal one (cancel first — deleting under
   a running executor is the corruption this feature removes, not a case it
-  adds), else `manager.remove()` followed by one `shutil.rmtree(...,
-  ignore_errors=True)` of `{data_dir}/jobs/{job_id}`.
+  adds), else `manager.remove()`, then a synchronous unlink of
+  `job_record_path(...)` (an unlinkable record aborts the delete honestly with
+  `500` and re-seeds the entry via `manager.restore()` rather than
+  half-deleting — see Notes), then `await
+  asyncio.to_thread(shutil.rmtree, ..., ignore_errors=True)` of
+  `{data_dir}/jobs/{job_id}`.
 - A deleted job's record cannot survive a restart: it is gone from disk, so
   the next boot's `JobStore.load_all()` never sees it.
 - Contract: `docs/contracts/rest-api.md` (new route, `job_active`, the
@@ -74,6 +78,11 @@ convention.
       mid-download through `FileResponse`) does not fail the request —
       deletion still answers `204`, the job is gone from every other
       endpoint, and the locked file is left as debris.
+- [x] `job.json` itself resisting removal — locked on Windows, or any other
+      `OSError` — aborts the whole delete with `500` instead of leaving a
+      half-deleted job: the manager entry is re-seeded, the job is served,
+      listed and untouched on disk exactly as before the request, and a
+      restart still lists it.
 - [x] The fail-first check: before the route existed, `DELETE
       /api/v1/jobs/{id}` answered `405 Method Not Allowed` (the path already
       existed for GET/POST). See Notes.
@@ -91,9 +100,15 @@ non-empty), delete a job that was never exported, delete a queued job
 succeeds after cancel + terminal event), delete an unknown job, a second
 delete of an already-deleted job (`404`, not a repeat `204`), a deleted job
 does not survive a restart (via `tests/restart_harness.py`), a sibling job is
-unaffected by another job's deletion, and the Windows lock-tolerance path
-(a real open file handle held during `shutil.rmtree`, verified rather than
-assumed).
+unaffected by another job's deletion, the lock-tolerance path that runs on
+every platform (a real open file handle held during `shutil.rmtree`; the
+record is still gone, the job still 404s, and a restart still does not
+resurrect it), a Windows-only companion (`skipif` gated) that additionally
+asserts the locked file itself survives on disk as debris, and a
+cross-platform record-unlink-failure test (`Path.unlink` monkeypatched to
+raise for `job.json`) proving the fail-first case: the delete answers `500`
+and the job comes back fully intact — served, listed, its directory
+untouched — rather than resurrecting a half-deleted job on the next restart.
 
 `backend/tests/test_jobs_manager.py` — `JobManager.remove` in isolation:
 completed job popped and unreachable via `get`/`list_jobs`, no event emitted,
@@ -172,6 +187,45 @@ the natural place to sweep debris like this; this feature does not attempt to
 retry or wait for handles to close, which would turn a fast, synchronous
 delete into an open-ended one.
 
+### The record unlinks first, synchronously, so a locked `job.json` cannot half-delete a job
+
+`straticate.jobs.store`'s module docstring states the invariant a job
+directory keeps: it is self-describing, so nothing can "be half-deleted into a
+record that points at stems that are gone, or stems no record mentions." A
+single `shutil.rmtree(..., ignore_errors=True)` over the whole job directory
+can violate the second half of that if `job.json` happens to be the one file
+`rmtree` cannot remove (locked on Windows; any other `OSError` elsewhere): the
+stems and exports vanish, the record survives, and a restart serves a
+`completed` job whose result files are all `404`.
+
+The fix makes the record's removal unconditional instead of best-effort: this
+handler unlinks `job_record_path(...)` by itself, synchronously, *before* the
+`rmtree`. If that unlink fails, `manager.remove()`'s already-popped entry is
+re-seeded with `manager.restore([job])` — safe, because the popped job is
+necessarily terminal, the one state `restore()` accepts — and the `OSError` is
+re-raised, so the client gets a `500` and the job is exactly as it was before
+the request: served, listed, and untouched on disk. Only once the record is
+confirmed gone does the (now thread-offloaded — see below) `rmtree` run over
+whatever is left, best-effort as before. This keeps the store's invariant
+holding in both directions: a job never has a record without its stems, and
+after this fix it never has stems without a record either, because the record
+is the first and only unconditionally-required removal.
+
+### The `rmtree` runs in a worker thread
+
+A job directory can be large — a measured 1.17 GB tree took 175 ms to remove,
+run inline on the event loop, which every other connected client (progress
+events, other requests) would feel as a stall. `await
+asyncio.to_thread(shutil.rmtree, ..., ignore_errors=True)` moves it off the
+loop. This is safe specifically because `manager.remove()` pops the entry
+*synchronously*, with no `await` between it and the thread being started (the
+record unlink in between is also synchronous): no other request can observe
+this job id as still active, so nothing can submit, cancel, or race a second
+delete against it while the thread runs. The record unlink itself stays
+synchronous and inline rather than also being offloaded — it is a few hundred
+bytes, and it is the step the delete's correctness now depends on, not merely
+its cleanliness.
+
 ### Idempotence, by design, is at the resource level, not the response
 
 A second `DELETE` of an already-deleted job is `404 job_not_found`, not a
@@ -192,6 +246,21 @@ an unknown or already-deleted audio ID is also `audio_not_found`, not a `204`.
   `DELETE` survives on disk until whatever held it closes and something else
   removes the directory. Nothing in this feature retries, waits, or lists such
   debris — that is 060's job.
+- **An export build racing a delete can recreate an empty orphan directory.**
+  `build_artifact` (feature 022) calls `artifact.parent.mkdir(parents=True,
+  exist_ok=True)` before it writes. If a `GET /jobs/{job_id}/export` request
+  is mid-build when `DELETE /jobs/{job_id}` runs, the `mkdir` can execute after
+  the `rmtree` has already removed the job directory, recreating an empty
+  `exports/` (and job) directory that nothing then populates — the stems the
+  build needs are gone. This is not a resurrection: the record is unlinked
+  before the `rmtree` even starts, so the job is already gone from every
+  endpoint's point of view by the time the race could happen, and the racing
+  export request answers `export_failed` on its own rather than serving
+  anything stale. It is the same debris category as a locked file: acceptable
+  because it is prune's (060) responsibility to sweep, not because this
+  feature prevents it. (This is why the route's docstring no longer claims
+  there is *no* surviving path an export could land on — only that no second
+  path-building function points at one.)
 - **No audit of what a delete actually removed.** The response carries no
   detail about partial removal (a locked file, a permissions failure on some
   other platform); the client learns only that the job is gone from the API.

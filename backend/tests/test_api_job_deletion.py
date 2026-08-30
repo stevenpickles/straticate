@@ -13,10 +13,12 @@ See ``docs/features/058-job-deletion.md`` for the design.
 """
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Any, cast
 
 import httpx2
+import pytest
 from fastapi import FastAPI
 
 from straticate.jobs.layout import job_output_dir
@@ -228,14 +230,18 @@ async def test_a_surviving_sibling_job_is_unaffected_by_a_delete(tmp_path: Path)
 
 
 async def test_delete_tolerates_a_file_locked_by_an_open_handle(tmp_path: Path) -> None:
-    """A held-open stem file cannot be unlinked on Windows; the delete still succeeds.
+    """A held-open stem file does not stop the delete from succeeding.
 
     This is the trade the route's docstring documents: ``shutil.rmtree(...,
     ignore_errors=True)`` best-effort removes everything it can, answers `204`
     regardless, and whatever a locked handle kept alive is debris a later
     pruning feature (060) sweeps up — not a reason to fail a request that, from
     the API's point of view, really did delete the job (it is gone from every
-    other endpoint immediately).
+    other endpoint immediately). Everything asserted here is true on every
+    platform: POSIX happily unlinks a file out from under an open handle (the
+    handle keeps the *inode* alive, not the directory entry), so this does not
+    exercise the Windows-only refusal — see
+    ``test_delete_leaves_a_windows_locked_stem_behind_as_debris`` for that.
     """
     app = build_app(tmp_path)
     audio = register_audio(app)
@@ -258,12 +264,120 @@ async def test_delete_tolerates_a_file_locked_by_an_open_handle(tmp_path: Path) 
             # a locked handle prevented from being unlinked.
             assert_envelope(await client.get(f"{JOBS_URL}/{job_id}"), "job_not_found", 404)
             assert [job["id"] for job in (await client.get(JOBS_URL)).json()] == []
-
-            # The locked file (and the directories it prevented from being
-            # emptied) are the debris a later pruning feature sweeps up — but
-            # the record is gone, which is what makes the job vanish from
-            # every endpoint above.
-            assert locked_stem.exists()
             assert not (directory / "job.json").exists()
         finally:
             handle.close()
+
+    # The record is gone for good: a restart does not resurrect the job,
+    # locked handle or not.
+    async with running_app(build_app(tmp_path)) as client:
+        assert (await client.get(JOBS_URL)).json() == []
+        assert_envelope(await client.get(f"{JOBS_URL}/{job_id}"), "job_not_found", 404)
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32",
+    reason="POSIX unlinks an open file out from under its handle; only Windows refuses.",
+)
+async def test_delete_leaves_a_windows_locked_stem_behind_as_debris(tmp_path: Path) -> None:
+    """On Windows specifically, a stem held open survives the ``rmtree`` as debris.
+
+    The cross-platform assertions (204, gone from the API, no restart
+    resurrection) live in ``test_delete_tolerates_a_file_locked_by_an_open_handle``
+    above, which passes on every platform. This is the one assertion that is
+    true *only* on Windows — ``locked_stem.exists()`` after the delete — kept
+    separate and platform-gated so it does not fail the suite on the
+    ubuntu-latest CI runner, where the same unlink simply succeeds.
+    """
+    app = build_app(tmp_path)
+    audio = register_audio(app)
+    async with running_app(app) as client:
+        recorder = EventRecorder()
+        manager_of(app).add_listener(recorder)
+        job_id = await run_job_to_completion(client, app, recorder, audio)
+
+        directory = job_output_dir(tmp_path, job_id)
+        stems_dir = directory / "stems"
+        locked_stem = next(iter(stems_dir.iterdir()))
+
+        handle = locked_stem.open("rb")
+        try:
+            response = await client.delete(f"{JOBS_URL}/{job_id}")
+            assert response.status_code == 204
+
+            # The record is gone (what makes the job vanish from every
+            # endpoint) but the locked file itself survives the rmtree — the
+            # debris a later pruning feature (060) is responsible for.
+            assert not (directory / "job.json").exists()
+            assert locked_stem.exists()
+        finally:
+            handle.close()
+
+
+# -- a locked record aborts the delete honestly, instead of half-deleting -----
+
+
+async def test_delete_fails_honestly_when_the_record_cannot_be_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unremovable ``job.json`` must abort the delete, not half-delete the job.
+
+    Before this behavior existed, ``shutil.rmtree(..., ignore_errors=True)``
+    over the whole job directory could remove every stem while silently
+    failing on a locked ``job.json`` (the Windows case), leaving a
+    ``completed`` record on disk whose stems a restart would then serve as
+    404s — the exact half-deleted state ``straticate.jobs.store``'s module
+    docstring says can never happen. The fix unlinks the record first and
+    aborts (re-seeding the manager entry) if that fails. Monkeypatching
+    ``Path.unlink`` to fail only for ``job.json`` stands in for the locked
+    file on Windows and makes the scenario reproducible on every platform.
+    """
+    app = build_app(tmp_path)
+    audio = register_audio(app)
+    async with running_app(app) as client:
+        recorder = EventRecorder()
+        manager_of(app).add_listener(recorder)
+        job_id = await run_job_to_completion(client, app, recorder, audio)
+        directory = job_output_dir(tmp_path, job_id)
+
+        original_unlink = Path.unlink
+
+        def failing_unlink(self: Path, *, missing_ok: bool = False) -> None:
+            if self.name == "job.json":
+                raise OSError("simulated: job.json is locked")
+            original_unlink(self, missing_ok=missing_ok)
+
+        # A bare `OSError` is not an `ApplicationError`, so it takes the
+        # "log and re-raise" path `errors.ErrorEnvelopeMiddleware` documents:
+        # the enveloped 500 goes out on the wire, then the exception is
+        # re-raised so a default (`raise_app_exceptions=True`) test client
+        # sees the exception itself, not a response. This is the one request
+        # in this test where the actual HTTP response is what's under test,
+        # so it gets its own client built the way `test_errors.py` builds one
+        # for the same reason.
+        honest_transport = httpx2.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx2.AsyncClient(
+            transport=honest_transport, base_url="http://test"
+        ) as honest_client:
+            with monkeypatch.context() as patched:
+                patched.setattr(Path, "unlink", failing_unlink)
+                response = await honest_client.delete(f"{JOBS_URL}/{job_id}")
+        assert_envelope(response, "internal_error", 500)
+
+        # The job is exactly as it was before the request: served, listed,
+        # and every one of its files still on disk. Not half-deleted.
+        assert (await client.get(f"{JOBS_URL}/{job_id}")).status_code == 200
+        assert [job["id"] for job in (await client.get(JOBS_URL)).json()] == [job_id]
+        assert (directory / "job.json").is_file()
+        assert any((directory / "stems").iterdir())
+
+    # And the entry was genuinely re-seeded, not just left dangling in the
+    # request that failed: a fresh process still lists the job too.
+    async with running_app(build_app(tmp_path)) as client:
+        assert [job["id"] for job in (await client.get(JOBS_URL)).json()] == [job_id]
+        assert (await client.get(f"{JOBS_URL}/{job_id}")).status_code == 200
+
+        # And a subsequent, unpatched delete now succeeds normally.
+        response = await client.delete(f"{JOBS_URL}/{job_id}")
+        assert response.status_code == 204
+        assert not directory.exists()

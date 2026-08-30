@@ -469,6 +469,18 @@ class JobManager:
         deletion request arriving while the manager winds down is served the
         same as one arriving before it.
 
+        This is a theoretical affordance rather than a reachable one: FastAPI
+        stops routing new requests to a handler before the application
+        lifespan runs :meth:`aclose`, so in practice ``DELETE /jobs/{job_id}``
+        (:func:`straticate.api.jobs.delete_job`) never actually calls this
+        post-shutdown — there would be no uncancellable
+        :func:`asyncio.to_thread` writer left racing an ``rmtree`` underneath
+        it, which is the scenario that would make ``remove`` unsafe to call
+        that late. :func:`test_jobs_manager.test_remove_is_available_after_aclose`
+        exists to pin *this method's* contract (that it does not itself raise
+        or depend on the worker/dispatcher once closed), not to assert that
+        route is reachable in the running application.
+
         Raises:
             ApplicationError: ``job_not_found`` (404) for an unknown id;
                 ``job_active`` (409, with the job's current ``state`` in

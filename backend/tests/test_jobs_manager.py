@@ -456,7 +456,13 @@ async def test_remove_of_an_unknown_job_is_job_not_found(manager: JobManager) ->
 
 
 async def test_remove_is_available_after_aclose() -> None:
-    """Unlike ``submit``/``cancel``, removal touches no queue or worker."""
+    """Unlike ``submit``/``cancel``, removal touches no queue or worker.
+
+    This pins ``remove()``'s own contract, not a reachable API path: FastAPI
+    stops routing requests before the lifespan's ``aclose()`` runs, so
+    ``DELETE /jobs/{job_id}`` never actually calls this post-shutdown in the
+    running application (see the docstring on ``JobManager.remove``).
+    """
     m = JobManager()
     recorder = EventRecorder()
     m.add_listener(recorder)
