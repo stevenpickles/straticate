@@ -136,7 +136,9 @@ async def create_job(
 async def list_jobs(manager: ManagerDep) -> list[Job]:
     """List every known job in **submission order** (oldest first).
 
-    Job records are in-memory only, so the list is empty after a restart.
+    Job records survive a restart (feature 057): the list a restarted server
+    returns holds the jobs of previous runs too, in the same order, with the
+    one repair described on ``GET /jobs/{job_id}``.
     """
     return manager.list_jobs()
 
@@ -144,6 +146,13 @@ async def list_jobs(manager: ManagerDep) -> list[Job]:
 @router.get("/{job_id}")
 async def get_job(job_id: str, manager: ManagerDep) -> Job:
     """Fetch one job — the source of truth for reconnect and refresh.
+
+    **A job outlives the process that ran it.** A completed job restarts
+    identical, result and all, so its stems and exports stay reachable. A job
+    that was ``queued`` or still running when the server stopped comes back
+    ``failed`` with ``error.code == "job_interrupted"``: it is never silently
+    re-run (the work nobody asked for twice) and never reported ``cancelled``
+    (nobody cancelled it). See ``docs/contracts/rest-api.md``.
 
     Errors: ``job_not_found`` (404).
     """
