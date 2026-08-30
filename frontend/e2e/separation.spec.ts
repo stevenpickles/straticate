@@ -18,6 +18,7 @@ import {
   Workflow,
   attachFailedApiRequests,
   expect,
+  fetchJob,
   fourStemMode,
   installSocketTracking,
   recordFailedApiRequests,
@@ -367,4 +368,48 @@ test.describe.serial('a separation, end to end', () => {
       workflow.options.getByRole('button', { name: 'Start separation' }),
     ).toBeEnabled()
   })
+})
+
+// ---------------------------------------------------------------------------
+// Stereo handling (feature 067, rider B8)
+//
+// Feature 041 shipped "Fold to mono" with unit and reducer coverage on both
+// sides of the contract and an API-level test that a fake-backed "mono" job
+// comes back one-channel, but recorded that no Playwright case drove the
+// radio itself through actual job creation — 041 and 044 (this tier's owner)
+// ran concurrently, so 041 could not add one. The fake separator folds for
+// real, so this is a standalone, independent-page stage rather than a step of
+// the serial workflow above: it does not need the rest of that scenario, and
+// perturbing the shared job's stereo handling there would change what later
+// stages in the block are asserting about.
+// ---------------------------------------------------------------------------
+
+test('creates a job with "Fold to mono" selected, and the fold reaches the result', async ({
+  page,
+  request,
+}) => {
+  const workflow = new Workflow(page)
+  const mode = await fourStemMode(request)
+
+  await workflow.open()
+  await workflow.uploadWithPicker(FIXTURES.tiny.path)
+  await workflow.choose(mode)
+  await workflow.chooseStereoHandling('Fold to mono')
+
+  const { configuration, job } = await workflow.startSeparationWithRequest()
+  expect(
+    configuration.stereo_handling,
+    'the request the radio drives carried the fold',
+  ).toBe('mono')
+  await expect(workflow.phase).toHaveText('Separate')
+
+  await expect(workflow.stage).toHaveText('Completed')
+  const completed = await fetchJob(request, job.id)
+  expect(completed.result, 'the job completed with a result').not.toBeNull()
+  for (const stem of completed.result?.stems ?? []) {
+    expect(
+      stem.channels,
+      `${stem.name} came back mono, as the fold promised`,
+    ).toBe(1)
+  }
 })

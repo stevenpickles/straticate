@@ -14,9 +14,10 @@
  *    visible window instead — same canvas, same columns, sharper source.
  * 2. **It repaints on state, not on frames.** The effect's dependencies are
  *    exactly the things that change what is painted — peaks, viewport, device
- *    pixel ratio, audibility, the stem's own length. The playhead moves 60
- *    times a second and never touches this component; it is a transformed div
- *    in {@link StemTimeline}.
+ *    pixel ratio, audibility, the stem's own length, and (067) the lane's
+ *    height in actual pixels, which moves only when the browser's root font
+ *    size does. The playhead moves 60 times a second and never touches this
+ *    component; it is a transformed div in {@link StemTimeline}.
  * 3. **It is `React.memo`d over primitives.** The parent re-renders on every
  *    engine snapshot (a mute toggle, a transport change); with the props
  *    below, only the lane that actually changed re-renders, and only the lane
@@ -42,11 +43,33 @@ import {
 import type { WaveformTile } from './useWaveformPeaks'
 
 /**
- * Height of one waveform lane, in CSS pixels. It is also the height of the
- * lane's header row, which is what keeps the two columns aligned — so it has
- * to leave room for a stem name and a pair of toggles.
+ * Height of one waveform lane, in `rem`. It is also the height of the lane's
+ * header row, which is what keeps the two columns aligned — so it has to
+ * leave room for a stem name, the Mute/Solo toggles, and (054) a level
+ * fader.
+ *
+ * **`rem`, not a fixed pixel count, since feature 067.** Feature 050 shipped
+ * this as `LANE_HEIGHT_PX = 64`, and by 054 the header's three rows filled it
+ * to within about a pixel *at the default 16 px browser root font* — at
+ * larger root fonts (a real accessibility setting, not a hypothetical one)
+ * the rem-sized rows outgrew the fixed box and `overflow: hidden` clipped
+ * them, worse the larger the root font. A `rem` height grows the *box* at
+ * exactly the rate its rem-sized contents grow, so the slack measured at
+ * 16 px holds at every root font instead of shrinking through zero.
+ *
+ * `4.75rem` is measured, not derived: it is the smallest quarter-`rem` step
+ * that left every one of `.stem-timeline-lane-header`'s three rows unclipped
+ * at every one of 16/17/18/20 px root fonts in a real Chromium, *after* the
+ * header's own padding and row gap were retightened the same way 054 already
+ * tightened them once (see `.stem-timeline-lane-header` in
+ * `StemTimeline.css`) to fund the fader's WCAG-sized pointer target (see
+ * `.stem-timeline-lane-fader`, same file) — a couple of pixels of margin
+ * over the exact fit, deliberately, since font rendering is not identical
+ * across platforms and this repository's CI runs a different one than any
+ * one contributor's machine. The before/after measurements at all four root
+ * sizes are in `docs/features/067-lane-height-a11y.md`.
  */
-export const LANE_HEIGHT_PX = 64
+export const LANE_HEIGHT_REM = 4.75
 
 /**
  * Colours, as CSS custom properties with hard fallbacks. The properties are
@@ -79,6 +102,17 @@ export interface TimelineLaneProps {
   readonly audible: boolean
   /** This stem's own length, which may be shorter than the axis. */
   readonly stemDurationSeconds: number
+  /**
+   * {@link LANE_HEIGHT_REM} resolved to actual CSS pixels at the current
+   * root font size ({@link useRootFontSize} in {@link StemTimeline}) — what
+   * the canvas backing store needs, since `canvas.width`/`canvas.height` are
+   * plain integers and take no part in `rem`'s own scaling. It changes only
+   * when the root font size changes, which is a state change like any other
+   * the draw effect below already depends on (peaks, viewport, dpr,
+   * audibility) — the canvas still never repaints per animation frame; the
+   * playhead moving 60 times a second touches none of these.
+   */
+  readonly laneHeightPx: number
 }
 
 /** Resolve a design token off an element, falling back to its literal value. */
@@ -98,6 +132,7 @@ function TimelineLaneImpl({
   devicePixelRatio,
   audible,
   stemDurationSeconds,
+  laneHeightPx,
 }: TimelineLaneProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
@@ -111,7 +146,7 @@ function TimelineLaneImpl({
     // which is what guarantees a repaint never leaves a previous, longer
     // waveform showing past the end of a shorter one.
     canvas.width = Math.max(1, Math.round(cssWidth * devicePixelRatio))
-    canvas.height = Math.max(1, Math.round(LANE_HEIGHT_PX * devicePixelRatio))
+    canvas.height = Math.max(1, Math.round(laneHeightPx * devicePixelRatio))
     if (peaks === null || cssWidth === 0 || stemDurationSeconds <= 0) {
       // Nothing to draw yet — and nothing asked of the canvas, which is what
       // keeps a stem that never decodes from reaching for a 2D context at all.
@@ -148,11 +183,19 @@ function TimelineLaneImpl({
       context,
       visible,
       stemWidthPx,
-      LANE_HEIGHT_PX,
+      laneHeightPx,
       devicePixelRatio,
       resolveColor(canvas, audible ? AUDIBLE_COLOR : SILENCED_COLOR),
     )
-  }, [peaks, tile, viewport, devicePixelRatio, audible, stemDurationSeconds])
+  }, [
+    peaks,
+    tile,
+    viewport,
+    devicePixelRatio,
+    audible,
+    stemDurationSeconds,
+    laneHeightPx,
+  ])
 
   return (
     <canvas
@@ -160,7 +203,7 @@ function TimelineLaneImpl({
       className="stem-timeline-canvas"
       data-stem={name}
       ref={canvasRef}
-      style={{ height: `${String(LANE_HEIGHT_PX)}px` }}
+      style={{ height: `${String(LANE_HEIGHT_REM)}rem` }}
     />
   )
 }

@@ -119,7 +119,7 @@ import type {
   StemPlayerEngine,
 } from '../audio/engine'
 import { formatDuration } from '../format'
-import { LANE_HEIGHT_PX, TimelineLane } from './TimelineLane'
+import { LANE_HEIGHT_REM, TimelineLane } from './TimelineLane'
 import { TimelineRuler } from './TimelineRuler'
 import {
   maxZoom,
@@ -128,6 +128,7 @@ import {
   xToTime,
   timeToX,
 } from './timelineGeometry'
+import { useRootFontSize } from './useRootFontSize'
 import { useTimelineGeometry } from './useTimelineGeometry'
 import { useWaveformPeaks, useWaveformTiles } from './useWaveformPeaks'
 import './StemTimeline.css'
@@ -343,6 +344,15 @@ export function StemTimeline({
     panBy,
     scrollTo,
   } = useTimelineGeometry(durationSeconds)
+
+  // Feature 067: the lane height is `rem`-relative (`LANE_HEIGHT_REM`), so
+  // the header and lane *boxes* scale with the browser's root font size for
+  // free — but each lane's canvas backing store is sized in actual pixels,
+  // which `rem` has no say over. This is that size, recomputed only when the
+  // root font size changes.
+  const rootFontPx = useRootFontSize()
+  const laneHeightPx = LANE_HEIGHT_REM * rootFontPx
+
   const loaded = stems.filter((stem) => stem.status === 'loaded')
   const peaks = useWaveformPeaks(
     engine,
@@ -894,7 +904,7 @@ export function StemTimeline({
           <div
             className="stem-timeline-lane-header"
             key={stem.name}
-            style={{ height: `${String(LANE_HEIGHT_PX)}px` }}
+            style={{ height: `${String(LANE_HEIGHT_REM)}rem` }}
           >
             <div className="stem-timeline-lane-label">
               <span className="stem-player-stem-name">{stem.name}</span>
@@ -1008,7 +1018,7 @@ export function StemTimeline({
                   : 'stem-timeline-lane stem-timeline-lane-silenced'
               }
               key={stem.name}
-              style={{ height: `${String(LANE_HEIGHT_PX)}px` }}
+              style={{ height: `${String(LANE_HEIGHT_REM)}rem` }}
             >
               {stem.status === 'error' ? (
                 <p className="stem-timeline-lane-placeholder">Unavailable</p>
@@ -1021,6 +1031,7 @@ export function StemTimeline({
                   devicePixelRatio={devicePixelRatio}
                   audible={stem.audible}
                   stemDurationSeconds={stem.durationSeconds}
+                  laneHeightPx={laneHeightPx}
                 />
               )}
             </div>

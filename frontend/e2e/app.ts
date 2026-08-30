@@ -214,7 +214,16 @@ export interface JobRecord {
   readonly state: string
   readonly progress: number
   readonly result: {
-    readonly stems: readonly { readonly name: string }[]
+    readonly stems: readonly {
+      readonly name: string
+      /**
+       * Channel count of the produced stem. `1` after a `"mono"`
+       * `stereo_handling` fold, `2` otherwise — the fake separator folds for
+       * real (feature 041), which is what feature 067's "Fold to mono"
+       * coverage checks.
+       */
+      readonly channels: number
+    }[]
   } | null
   readonly finished_at: string | null
 }
@@ -581,12 +590,26 @@ export class Workflow {
   }
 
   /**
-   * Start the separation and return the job the backend created. Waiting on
-   * the `POST /jobs` response is what gives the specs the job ID they need to
-   * talk to the backend directly — and it is a real condition, so nothing
+   * Pick a stereo-handling choice by its picker label ("Keep stereo" /
+   * "Fold to mono") — the control feature 041 added. Only present when the
+   * uploaded source is stereo; every fixture this suite generates is.
+   */
+  async chooseStereoHandling(label: string): Promise<void> {
+    await this.options.getByLabel(label, { exact: true }).check()
+  }
+
+  /**
+   * Start the separation and return both the job the backend created and the
+   * configuration the `POST /jobs` request actually carried — for a spec that
+   * cares what reached the backend, not only that something was queued.
+   * Waiting on the response is what gives the specs the job ID they need to
+   * talk to the backend directly, and it is a real condition, so nothing
    * here guesses how long creating a job takes.
    */
-  async startSeparation(): Promise<JobRecord> {
+  async startSeparationWithRequest(): Promise<{
+    readonly configuration: Record<string, unknown>
+    readonly job: JobRecord
+  }> {
     const created = this.page.waitForResponse(
       (response) =>
         response.request().method() === 'POST' &&
@@ -595,7 +618,18 @@ export class Workflow {
     await this.options.getByRole('button', { name: 'Start separation' }).click()
     const response = await created
     expect(response.status(), 'the backend queues the job').toBe(201)
-    return (await response.json()) as JobRecord
+    return {
+      configuration: response.request().postDataJSON() as Record<
+        string,
+        unknown
+      >,
+      job: (await response.json()) as JobRecord,
+    }
+  }
+
+  /** Start the separation and return the job the backend created. */
+  async startSeparation(): Promise<JobRecord> {
+    return (await this.startSeparationWithRequest()).job
   }
 }
 

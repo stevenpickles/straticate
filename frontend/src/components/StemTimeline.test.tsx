@@ -276,6 +276,62 @@ describe('StemTimeline lanes', () => {
       true,
     )
   })
+
+  it('repaints when the root font size changes, and not when only the playhead moves', async () => {
+    // Feature 067: `laneHeightPx` — resolved from `LANE_HEIGHT_REM` and
+    // `useRootFontSize` — joined the draw effect's dependency list, so the
+    // canvas resizes its backing store when a browser-level font-size
+    // setting changes. This extends the same invariant the "repaints only…"
+    // test above pins for audibility: state that changes what is painted
+    // triggers a repaint, and the playhead's own position — which the
+    // player updates 60 times a second and which `TimelineLane` never
+    // receives as a prop at all — never does.
+    const vocals = loaded('vocals', AXIS_SECONDS)
+    const view = await renderPainted({ stems: [vocals], positionSeconds: 0 })
+    expect(canvas.fillRects.length).toBeGreaterThan(0)
+    canvas.reset()
+
+    // A rerender that changes only the displayed playhead position — exactly
+    // what `StemPlayer` does on every animation frame — reaches `StemTimeline`
+    // but stops there: nothing about what a lane paints depends on it.
+    view.rerender(
+      <StemTimeline
+        stems={[vocals]}
+        durationSeconds={AXIS_SECONDS}
+        positionSeconds={30}
+        ready
+        engine={view.engine}
+        onScrubStart={() => undefined}
+        onScrub={() => undefined}
+        onScrubCancel={() => undefined}
+        onSeek={() => undefined}
+        loopRegion={null}
+        onSetLoopRegion={() => undefined}
+        onClearLoopRegion={() => undefined}
+        onTogglePlayback={() => undefined}
+        onToggleMute={() => undefined}
+        onToggleSolo={() => undefined}
+        onSetLevel={() => undefined}
+      />,
+    )
+    expect(canvas.fillRects).toHaveLength(0)
+
+    // A root font size change fires `resize` (the practical signal
+    // `useRootFontSize` documents using), which is a state change like any
+    // other the draw effect already depends on — every lane repaints.
+    const nativeGetComputedStyle = window.getComputedStyle.bind(window)
+    vi.spyOn(window, 'getComputedStyle').mockImplementation((element) =>
+      element === document.documentElement
+        ? ({ fontSize: '20px' } as CSSStyleDeclaration)
+        : nativeGetComputedStyle(element),
+    )
+    act(() => {
+      window.dispatchEvent(new Event('resize'))
+    })
+    await act(async () => {})
+
+    expect(canvas.fillRects.length).toBeGreaterThan(0)
+  })
 })
 
 describe('StemTimeline ruler', () => {
