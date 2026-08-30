@@ -17,6 +17,11 @@ The :class:`JobManager` is the job engine described in ARCHITECTURE.md §6:
   transition write ``{data_dir}/jobs/{job_id}/job.json``, and ``restore()``
   seeds the records a previous run left behind — without queueing them and
   without emitting a single event.
+- ``remove()`` forgets a **terminal** job's entry (feature 058); a non-terminal
+  one is refused (``job_active``, 409) rather than torn out from under a
+  running executor. It is the in-memory half of ``DELETE /jobs/{job_id}`` —
+  :mod:`straticate.api.jobs` deletes the job's directory (record, stems and
+  exports together) once this call has confirmed it is safe to.
 - Every lifecycle change is published to registered listeners as the typed
   event models from :mod:`straticate.schemas.events` (the WebSocket hub of
   feature 013 subscribes here; REST endpoints of feature 015 call the manager
@@ -448,6 +453,54 @@ class JobManager:
         Remains available after :meth:`aclose` (read-only).
         """
         return [entry.job.model_copy(deep=True) for entry in self._entries.values()]
+
+    def remove(self, job_id: str) -> Job:
+        """Forget a terminal job's entry; returns a snapshot of it as it was.
+
+        This is the in-memory half of ``DELETE /jobs/{job_id}`` (feature 058):
+        the caller is responsible for removing the job's directory from disk
+        (record, stems and exports together) after this call succeeds — see
+        :mod:`straticate.api.jobs`. Only the entry is dropped here; no event is
+        emitted, symmetrically with :meth:`restore` (a deleted job is gone, not
+        a lifecycle transition a listener should hear about).
+
+        Deliberately available after :meth:`aclose`: unlike ``submit`` or
+        ``cancel``, removing an entry touches no queue and no worker, so a
+        deletion request arriving while the manager winds down is served the
+        same as one arriving before it.
+
+        This is a theoretical affordance rather than a reachable one: FastAPI
+        stops routing new requests to a handler before the application
+        lifespan runs :meth:`aclose`, so in practice ``DELETE /jobs/{job_id}``
+        (:func:`straticate.api.jobs.delete_job`) never actually calls this
+        post-shutdown — there would be no uncancellable
+        :func:`asyncio.to_thread` writer left racing an ``rmtree`` underneath
+        it, which is the scenario that would make ``remove`` unsafe to call
+        that late. :func:`test_jobs_manager.test_remove_is_available_after_aclose`
+        exists to pin *this method's* contract (that it does not itself raise
+        or depend on the worker/dispatcher once closed), not to assert that
+        route is reachable in the running application.
+
+        Raises:
+            ApplicationError: ``job_not_found`` (404) for an unknown id;
+                ``job_active`` (409, with the job's current ``state`` in
+                ``detail``) if the job has not reached a terminal state.
+                Deleting a job whose executor is still writing into its
+                directory is the corruption this feature exists to prevent,
+                not a case it adds — the client must cancel first and wait for
+                the terminal event.
+        """
+        entry = self._entry_or_404(job_id)
+        job = entry.job
+        if not job.state.is_terminal:
+            raise ApplicationError(
+                "job_active",
+                f"Job {job_id!r} is still {job.state.value!r}; cancel it before deleting.",
+                status_code=409,
+                detail={"job_id": job_id, "state": job.state.value},
+            )
+        del self._entries[job_id]
+        return job.model_copy(deep=True)
 
     def cancel(self, job_id: str) -> Job:
         """Request cancellation of a job; returns a post-request snapshot.
