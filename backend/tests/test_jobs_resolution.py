@@ -5,6 +5,7 @@ produce are what feature 015's endpoint promises, and they are cheaper and
 clearer to pin down here than through a client.
 """
 
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -196,8 +197,10 @@ def test_resolve_audio_creates_nothing_on_disk(tmp_path: Path) -> None:
     """
     store = AudioStore(tmp_path)
     audio_id, path = register_audio(store)
-    path.unlink()
-    path.parent.rmdir()
+    # Remove everything feature 056 now also writes (the ``audio.json``
+    # sidecar), not just the original media: the point of this test is that
+    # a registered record backed by nothing on disk at all leaves no trace.
+    shutil.rmtree(path.parent)
     before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
 
     with pytest.raises(ApplicationError):
