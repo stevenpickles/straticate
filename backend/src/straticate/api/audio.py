@@ -121,7 +121,15 @@ async def upload_audio(file: UploadFile, store: StoreDep, settings: SettingsDep)
         uploaded_at=datetime.now(UTC),
         metadata=metadata,
     )
-    store.register(record)
+    try:
+        store.register(record)
+    except BaseException:
+        # A failed sidecar write (disk full, permissions) must not leave a
+        # half-registered upload: the client is getting a 500, so the files
+        # go too, and the "rejected uploads never leave files behind"
+        # guarantee holds for this failure the way it does for a bad probe.
+        store.remove_files(audio_id)
+        raise
     return record
 
 
