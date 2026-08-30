@@ -1,20 +1,23 @@
 """On-disk layout of a job's separation outputs.
 
-One place defines where a job's artifacts live, so the separator that writes
-them (feature 014), the result API that serves them (feature 021) and the
-export path (feature 022) cannot drift apart::
+The stems half of the job directory :mod:`straticate.jobs.layout` defines, so
+the separator that writes them (feature 014), the result API that serves them
+(feature 021) and the export path (feature 022) cannot drift apart::
 
     {data_dir}/jobs/{job_id}/stems/{stem}.wav
 
-``data_dir`` is :attr:`straticate.config.Settings.data_dir` — the same root
-:class:`straticate.audio.AudioStore` writes uploads under
-(``{data_dir}/audio/{audio_id}/original{ext}``), so uploads and job outputs sit
-side by side and a single directory holds everything the application produced.
+The directory itself, and the ``job.json`` record that makes it legible after a
+restart (feature 057), belong to :mod:`straticate.jobs.layout`, which this
+module re-exports :data:`JOBS_DIRECTORY` and :func:`job_output_dir` from. They
+live there rather than here because the job store needs them and ``jobs`` must
+not import ``inference`` — the dependency already runs the other way.
 
-Directories are created lazily by whoever writes into them. Nothing here
-persists across restarts: like the audio registry, job records are in-memory
-only, so files left behind by a previous run are orphaned (a known limitation
-until a persistent registry exists).
+Directories are created lazily by whoever writes into them. **Since feature 057
+a job directory is self-describing**: its ``job.json`` is what lets the next
+process serve the stems beside it rather than orphaning them. A job directory
+with no record is still possible — the leftovers of a run older than that
+feature, or of one whose record never landed — and is simply ignored at
+startup.
 """
 
 from __future__ import annotations
@@ -22,20 +25,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from straticate.inference.base import STEM_NAME_PATTERN
-
-JOBS_DIRECTORY = "jobs"
-"""Name of the per-job artifact root under ``data_dir``."""
+from straticate.jobs.layout import JOBS_DIRECTORY, job_output_dir
 
 STEMS_DIRECTORY = "stems"
 """Name of the stem directory under a job's output directory."""
 
 STEM_SUFFIX = ".wav"
 """File suffix of a written stem (16-bit PCM WAV; export formats are 022)."""
-
-
-def job_output_dir(data_dir: Path, job_id: str) -> Path:
-    """Return ``{data_dir}/jobs/{job_id}`` — everything a job produced."""
-    return data_dir / JOBS_DIRECTORY / job_id
 
 
 def job_stems_dir(data_dir: Path, job_id: str) -> Path:

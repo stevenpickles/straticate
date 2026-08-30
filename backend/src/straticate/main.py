@@ -52,7 +52,7 @@ from straticate.config import Settings, get_settings
 from straticate.errors import ErrorEnvelopeMiddleware, register_error_handlers
 from straticate.frontend import log_bundle_state, mount_frontend
 from straticate.inference import SeparatorRegistry, default_separator_builders
-from straticate.jobs import EventHub, JobManager
+from straticate.jobs import EventHub, JobManager, JobStore
 from straticate.logging import configure_logging, ensure_logging_configured
 from straticate.models import ModelCatalog, ModelInstaller
 from straticate.system import DeviceDetector
@@ -162,7 +162,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     ``app.state.telemetry_sampler`` (retrieved in endpoints via
     :func:`straticate.jobs.get_job_manager`,
     :func:`straticate.jobs.get_event_hub` and
-    :func:`straticate.telemetry.get_telemetry_sampler`).
+    :func:`straticate.telemetry.get_telemetry_sampler`). The
+    :class:`~straticate.jobs.store.JobStore` the manager persists through is
+    created here too and left on ``app.state.job_store``, where a feature that
+    removes a job's files can reach the same record paths the manager writes.
+    It is ``None`` only when a bare ``FastAPI()`` drives this lifespan with no
+    settings, which is how the wiring tests isolate it — and a manager without
+    a store behaves exactly as it did before feature 057.
+
+    **The job records of previous runs are loaded here** (feature 057), from
+    ``{data_dir}/jobs/*/job.json`` via
+    :meth:`~straticate.jobs.store.JobStore.recover`, and handed to
+    :meth:`~straticate.jobs.JobManager.restore` before the worker starts. Three
+    properties of that step are deliberate:
+
+    - **Startup is the only place it can happen.** The manager is created per
+      lifespan cycle, so this is the one moment at which a fresh manager exists
+      and no job of this run has been submitted — which is what keeps
+      ``GET /jobs`` in ULID order across the join.
+    - **It emits no events**, and the listeners above are already registered
+      when it runs, so that is a property of ``restore`` rather than of the
+      ordering here. There is no WebSocket client at startup to receive them,
+      and a replayed ``job_completed`` would claim on a live channel that a job
+      from a previous run had just finished.
+    - **It never fails startup.** A record that cannot be read is skipped with
+      a warning (see :mod:`straticate.jobs.store`), and a job left ``queued``
+      or running by a stopped process comes back ``failed`` with
+      ``job_interrupted`` rather than being re-queued.
+
+    The scan is synchronous, like the catalog read in :func:`create_app`: it is
+    a few hundred bytes per job, once, before the application serves anything.
 
     Two listeners are registered with the manager, in this order: the hub's
     :meth:`~straticate.jobs.EventHub.publish`, so every job event is broadcast
@@ -208,14 +237,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
         audio_store.load()
     log_bundle_state(app)
     installer = cast(ModelInstaller | None, getattr(app.state, "model_installer", None))
-    manager = JobManager()
+    store = JobStore(settings.data_dir) if settings is not None else None
+    manager = JobManager(store=store)
     hub = EventHub()
     sampler = TelemetrySampler(hub)
     app.state.job_manager = manager
     app.state.event_hub = hub
     app.state.telemetry_sampler = sampler
+    app.state.job_store = store
     manager.add_listener(hub.publish)
     manager.add_listener(sampler.on_job_event)
+    if store is not None:
+        manager.restore(store.recover())
     manager.start()
     try:
         yield
