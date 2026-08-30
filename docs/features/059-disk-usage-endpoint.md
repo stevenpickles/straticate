@@ -175,3 +175,16 @@ re-implemented for a second directory.
 - **The `exports/` directory name is duplicated, briefly.** See the "Out of
   scope" section above — 058 is expected to consolidate it into
   `jobs/layout.py`.
+
+## Known limitations (post-review)
+
+- **An unreadable subtree reports `{count: 0, bytes: 0}`, indistinguishable
+  from empty** — the one place this feature's own null-means-unknown
+  argument cuts against it (review finding 3). There is no `partial` flag.
+  Feature 060 must make a conscious call before building prune decisions on
+  these numbers; a `complete: bool` field is the cheap fix if it matters.
+- **`JobManager.ids()` symmetry**: the route deep-copies every `Job` via
+  `list_jobs()` just to read ids (review finding 5). `AudioStore.ids()`
+  exists for exactly this reason; the manager-side twin is left for 060
+  (which wants it anyway) to avoid colliding with 058's concurrent
+  `manager.py` changes in this wave.
