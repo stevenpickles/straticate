@@ -309,8 +309,57 @@ export interface paths {
         /**
          * Delete Audio
          * @description Delete an uploaded audio record and its files; 404 if unknown.
+         *
+         *     Also drops any cached stereo analysis: the ID is the cache key, and a future
+         *     upload cannot reuse it (they are ULIDs), so a surviving entry would be dead
+         *     weight that outlived the bytes it described.
          */
         delete: operations["delete_audio_api_v1_audio__audio_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/audio/{audio_id}/analysis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Audio Analysis
+         * @description Measure an upload's stereo image (feature 063).
+         *
+         *     Returns the full-band L/R correlation of the whole track and the derived
+         *     ``wide_stereo`` flag — see :class:`~straticate.schemas.StereoAnalysis` and
+         *     :mod:`straticate.audio.analysis`, which holds the threshold, its provenance
+         *     and the streaming discipline.
+         *
+         *     **It measures and never applies.** No job configuration is derived from the
+         *     answer on either side of the wire, and this route is not reachable from the
+         *     separation path at all: an upload separates identically whether or not
+         *     anyone ever asks for it.
+         *
+         *     The measurement runs on the **first** request and is then cached in-process
+         *     for the audio's lifetime; concurrent first requests share one computation
+         *     rather than starting a second decode of the same file, and
+         *     ``DELETE /audio/{audio_id}`` drops the entry. That first request is held
+         *     open for the length of the pass — about a second for a three-minute track —
+         *     which is acceptable precisely because this endpoint **gates nothing**: it is
+         *     an enrichment, and every control works while it is outstanding.
+         *
+         *     Errors: ``audio_not_found`` (404) when the ID is unknown *or* its file is
+         *     gone from disk; ``audio_not_decodable`` (422) when FFmpeg cannot decode
+         *     bytes that ffprobe accepted at upload; ``audio_analysis_timed_out`` (504)
+         *     when the decode exceeds ``Settings.ffmpeg_timeout_seconds``. The last two are
+         *     distinct for the reason :func:`upload_audio` gives: a tool that ran out of
+         *     time has said nothing about the file, and retrying is the right response.
+         */
+        get: operations["get_audio_analysis_api_v1_audio__audio_id__analysis_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1622,6 +1671,40 @@ export interface components {
             channels: number;
         };
         /**
+         * StereoAnalysis
+         * @description What measuring an upload's stereo image found (feature 063).
+         *
+         *     A **measurement, not a decision**. It says what the recording is like; it
+         *     never says what to do about it, and nothing in the separation path reads it.
+         *     Feature 041's rule for any detection built on this signal is that it may
+         *     *suggest* and must never apply, and the contract keeps that true by having no
+         *     field that could be applied: there is no `stereo_handling` here, and a job
+         *     runs identically whether or not this was ever requested.
+         *
+         *     ``wide_stereo`` is derived **server-side** from ``l_r_correlation`` and the
+         *     threshold, so no client has to know the number to agree with the server about
+         *     what the server measured. The two are therefore not independent, with two
+         *     documented exceptions where the correlation does not exist:
+         *
+         *     - a **single-channel** upload has no image to measure:
+         *       ``{null, wide_stereo: false}``;
+         *     - a channel with **zero variance** — one side silent, or a constant — has no
+         *       defined correlation but is the extreme of the very failure mode this
+         *       detects: ``{null, wide_stereo: true}``.
+         */
+        StereoAnalysis: {
+            /**
+             * L R Correlation
+             * @description Pearson correlation of the left and right channels, full band, over the whole track. Null when there is none to report: a mono source, a channel with zero variance, or audio too short to correlate.
+             */
+            l_r_correlation: number | null;
+            /**
+             * Wide Stereo
+             * @description Whether the channels are independent enough that a stem may come back near-silent. Derived from the correlation server-side; the threshold is not part of the contract.
+             */
+            wide_stereo: boolean;
+        };
+        /**
          * StereoHandling
          * @description What the separator does with the input's stereo image before separating.
          *
@@ -2263,6 +2346,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_audio_analysis_api_v1_audio__audio_id__analysis_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                audio_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StereoAnalysis"];
+                };
             };
             /** @description Validation Error */
             422: {

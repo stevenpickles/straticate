@@ -3,6 +3,7 @@ import { act, renderHook } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import {
   appReducer,
+  initialAnalysisState,
   initialAppState,
   initialConfigureState,
   AppStateProvider,
@@ -13,6 +14,7 @@ import {
   type WorkflowPhase,
 } from './appState'
 import { sampleAudioFile, sampleSeparationModes } from '../test/fixtures'
+import type { StereoAnalysis } from '../api/types'
 
 describe('appReducer', () => {
   it('starts at the select phase', () => {
@@ -506,5 +508,76 @@ describe('appReducer stereo handling (feature 041)', () => {
       { type: 'upload/reset' },
     )
     expect(state.configure.stereoHandling).toBe('as_is')
+  })
+})
+
+describe('appReducer stereo measurement (feature 063)', () => {
+  const wide: StereoAnalysis = { l_r_correlation: 0.229, wide_stereo: true }
+
+  /** State with an upload registered and its measurement loaded. */
+  function measured(analysis: StereoAnalysis = wide): AppState {
+    return appReducer(
+      appReducer(
+        {
+          ...initialAppState,
+          upload: { status: 'uploaded', file: sampleAudioFile },
+        },
+        { type: 'analysis/requested' },
+      ),
+      { type: 'analysis/loaded', analysis },
+    )
+  }
+
+  it('starts idle: nothing is measured until something asks', () => {
+    expect(initialAppState.analysis).toEqual(initialAnalysisState)
+    expect(initialAnalysisState.status).toBe('idle')
+  })
+
+  it('records the measurement it was given', () => {
+    const state = measured()
+    expect(state.analysis).toEqual({ status: 'loaded', analysis: wide })
+  })
+
+  it('records a failure with nothing to render or retry', () => {
+    const state = appReducer(
+      appReducer(initialAppState, { type: 'analysis/requested' }),
+      { type: 'analysis/failed' },
+    )
+    expect(state.analysis).toEqual({ status: 'failed' })
+  })
+
+  it('changes no selection when a wide measurement arrives', () => {
+    // The load-bearing one. A measurement is a statement about the recording;
+    // acting on it is the user's to do (feature 041). If this ever fails, the
+    // application has started altering someone's audio on its own initiative.
+    const before = appReducer(
+      {
+        ...initialAppState,
+        upload: { status: 'uploaded', file: sampleAudioFile },
+      },
+      { type: 'configure/modesLoaded', modes: sampleSeparationModes },
+    )
+    const after = appReducer(before, {
+      type: 'analysis/loaded',
+      analysis: wide,
+    })
+    expect(after.configure).toBe(before.configure)
+    expect(after.configure.stereoHandling).toBe('as_is')
+    expect(after.phase).toBe(before.phase)
+    expect(after.upload).toBe(before.upload)
+  })
+
+  it('resets when the upload is discarded', () => {
+    const state = appReducer(measured(), { type: 'upload/reset' })
+    expect(state.analysis).toEqual(initialAnalysisState)
+  })
+
+  it('resets when a different file is uploaded', () => {
+    const next = { ...sampleAudioFile, id: '01ANOTHERUPLOAD0000000000' }
+    const state = appReducer(measured(), {
+      type: 'upload/succeeded',
+      file: next,
+    })
+    expect(state.analysis).toEqual(initialAnalysisState)
   })
 })

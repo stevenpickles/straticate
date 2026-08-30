@@ -7,7 +7,7 @@ by hand on the other side. See docs/contracts/rest-api.md and
 docs/contracts/websocket-events.md.
 """
 
-from straticate.schemas.audio import AudioFile, AudioMetadata
+from straticate.schemas.audio import AudioFile, AudioMetadata, StereoAnalysis
 from straticate.schemas.common import ErrorEnvelope, ErrorInfo, HealthStatus, VersionInfo
 from straticate.schemas.devices import ComputeDevice
 from straticate.schemas.events import (
@@ -96,6 +96,7 @@ __all__ = [
     "SeparationResultMetrics",
     "Stem",
     "StemName",
+    "StereoAnalysis",
     "StereoHandling",
     "StorageReport",
     "UsageBucket",

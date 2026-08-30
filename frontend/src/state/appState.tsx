@@ -10,7 +10,12 @@ import {
   type ReactNode,
 } from 'react'
 import { DEFAULT_STEREO_HANDLING } from '../api/jobs'
-import type { AudioFile, SeparationMode, StereoHandling } from '../api/types'
+import type {
+  AudioFile,
+  SeparationMode,
+  StereoAnalysis,
+  StereoHandling,
+} from '../api/types'
 
 /** The phases of the product workflow, in order. */
 export type WorkflowPhase =
@@ -41,6 +46,28 @@ export type UploadState =
       readonly code: string
       readonly message: string
     }
+
+/**
+ * State of the uploaded audio's stereo measurement (feature 063),
+ * discriminated on `status`: `idle` (never asked), `loading`, `loaded` (the
+ * backend's {@link StereoAnalysis}), or `failed`.
+ *
+ * **It belongs to the upload** — it describes that file and nothing else — so
+ * it is cleared whenever the upload changes or is discarded. It is kept beside
+ * `upload` rather than inside it because {@link UploadState} is discriminated
+ * on the upload's own progress, and an enrichment that arrives later is not a
+ * stage of uploading.
+ *
+ * **A failure carries no message**, and that is the point rather than an
+ * omission: nothing on screen depends on this, so there is nothing to tell the
+ * user or to retry. The precedent is `useModelCatalog`, whose failed read
+ * simply leaves the quality tiers unannotated — an enrichment never gates.
+ */
+export type AnalysisState =
+  | { readonly status: 'idle' }
+  | { readonly status: 'loading' }
+  | { readonly status: 'loaded'; readonly analysis: StereoAnalysis }
+  | { readonly status: 'failed' }
 
 /**
  * State of the separation-mode catalog fetch, discriminated on `status`.
@@ -108,6 +135,8 @@ export interface AppState {
   readonly phase: WorkflowPhase
   /** State of the audio upload step. */
   readonly upload: UploadState
+  /** The uploaded audio's stereo measurement; resets with the upload. */
+  readonly analysis: AnalysisState
   /** State of the separation mode + quality selection step. */
   readonly configure: ConfigureState
 }
@@ -148,6 +177,29 @@ export type AppAction =
        * workflow to the `select` phase.
        */
       readonly type: 'upload/reset'
+    }
+  | {
+      /** The stereo measurement of the current upload has been requested. */
+      readonly type: 'analysis/requested'
+    }
+  | {
+      /**
+       * The backend answered with the upload's stereo measurement.
+       *
+       * **It changes nothing else.** In particular it never touches
+       * `configure.stereoHandling`: this application does not alter someone's
+       * audio because it noticed something about it (feature 041, and the
+       * fake-separator honesty rule behind it). A test asserts exactly that.
+       */
+      readonly type: 'analysis/loaded'
+      readonly analysis: StereoAnalysis
+    }
+  | {
+      /**
+       * The measurement could not be read. Deliberately carries no code or
+       * message: nothing renders it, and nothing retries.
+       */
+      readonly type: 'analysis/failed'
     }
   | {
       /** The separation-mode catalog fetch has started. */
@@ -241,10 +293,14 @@ export const initialConfigureState: ConfigureState = {
   create: { status: 'idle' },
 }
 
+/** Initial state of the analysis slice: nothing measured, nothing asked. */
+export const initialAnalysisState: AnalysisState = { status: 'idle' }
+
 /** Initial application state: the workflow starts at file selection. */
 export const initialAppState: AppState = {
   phase: 'select',
   upload: { status: 'idle' },
+  analysis: initialAnalysisState,
   configure: initialConfigureState,
 }
 
@@ -284,6 +340,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         upload: { status: 'uploaded', file: action.file },
+        // A different file is a different recording, so whatever was measured
+        // about the last one says nothing about this one.
+        analysis: initialAnalysisState,
         phase: state.phase === 'select' ? 'configure' : state.phase,
       }
     case 'upload/failed':
@@ -295,9 +354,21 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         upload: { status: 'idle' },
+        analysis: initialAnalysisState,
         phase: 'select',
         configure: initialConfigureState,
       }
+    case 'analysis/requested':
+      return { ...state, analysis: { status: 'loading' } }
+    case 'analysis/loaded':
+      // Note what is *not* here: nothing in `configure` moves. Measuring the
+      // user's recording never changes what will be done to it.
+      return {
+        ...state,
+        analysis: { status: 'loaded', analysis: action.analysis },
+      }
+    case 'analysis/failed':
+      return { ...state, analysis: { status: 'failed' } }
     case 'configure/modesRequested':
       return {
         ...state,
