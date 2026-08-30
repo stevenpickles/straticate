@@ -26,6 +26,15 @@
  * query that stops matching when the ratio moves, re-armed at the new ratio
  * each time it fires — dragging a window between a retina and a non-retina
  * display then re-renders the canvases at the right backing-store size.
+ *
+ * **The window can outlive the hook (feature 065).** Pass a
+ * {@link TimelineWindowStore} and the `{ zoom, scrollSeconds }` pair is seeded
+ * from it on mount and written back through on every change, so a timeline
+ * that is unmounted and mounted again — the Inspect UI left and re-entered —
+ * comes back looking at the same seconds. The store is a plain ref pair held by
+ * whoever owns the session, deliberately *not* React state: a wheel tick must
+ * not re-render anything above the timeline. With no store the hook behaves
+ * exactly as it did before, opening on the whole file.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -81,13 +90,25 @@ export interface TimelineGeometry {
 }
 
 /** The window into the material, independent of how wide the strip is. */
-interface TimelineWindow {
+export interface TimelineWindow {
   readonly zoom: number
   readonly scrollSeconds: number
 }
 
 /** Whole file, from the start: where a timeline opens, and where Fit goes. */
-const WHOLE_FILE: TimelineWindow = { zoom: 1, scrollSeconds: 0 }
+export const WHOLE_FILE: TimelineWindow = { zoom: 1, scrollSeconds: 0 }
+
+/**
+ * Somewhere for the window to live that is not this hook — see the module
+ * docstring. Implemented over a ref by the owner of the session, so writing to
+ * it costs no render; `get()` is read **once**, to seed the hook's state.
+ */
+export interface TimelineWindowStore {
+  /** The window to open on. */
+  get(): TimelineWindow
+  /** Record a window the hook has just moved to. */
+  set(next: TimelineWindow): void
+}
 
 /** The display's pixel ratio, defaulting to 1 wherever it is unreadable. */
 function readDevicePixelRatio(): number {
@@ -98,11 +119,23 @@ function readDevicePixelRatio(): number {
   return Number.isFinite(ratio) && ratio > 0 ? ratio : 1
 }
 
-/** Viewport state for a timeline over `durationSeconds` of material. */
-export function useTimelineGeometry(durationSeconds: number): TimelineGeometry {
+/**
+ * Viewport state for a timeline over `durationSeconds` of material.
+ *
+ * `windowStore`, when given, is where the `{ zoom, scrollSeconds }` pair is
+ * seeded from and written back to, so the window survives this hook being
+ * unmounted (feature 065).
+ */
+export function useTimelineGeometry(
+  durationSeconds: number,
+  windowStore?: TimelineWindowStore | null,
+): TimelineGeometry {
   const [widthPx, setWidthPx] = useState(0)
-  const [timelineWindow, setTimelineWindow] =
-    useState<TimelineWindow>(WHOLE_FILE)
+  // Seeded once, from the store when there is one: a re-entered timeline opens
+  // on the window it was left at rather than back at the whole file.
+  const [timelineWindow, setTimelineWindow] = useState<TimelineWindow>(
+    () => windowStore?.get() ?? WHOLE_FILE,
+  )
   const [devicePixelRatio, setDevicePixelRatio] = useState(readDevicePixelRatio)
   const observerRef = useRef<ResizeObserver | null>(null)
 
@@ -178,6 +211,15 @@ export function useTimelineGeometry(durationSeconds: number): TimelineGeometry {
     [durationSeconds, widthPx, timelineWindow],
   )
 
+  // One of exactly **two** places a window changes — `zoomToFit` below is the
+  // other — which is what makes the write-through to `windowStore` complete.
+  // Adding a third would have to write through as well, or a re-entered
+  // timeline would open on a stale window.
+  //
+  // The write happens inside the updater because that is where the new window
+  // exists. It is idempotent (the same `current` yields the same `next`), so
+  // React re-running the updater — StrictMode, a discarded render — records
+  // the same pair rather than a different one.
   const applyToViewport = useCallback(
     (transform: ViewportTransform) => {
       setTimelineWindow((current) => {
@@ -189,10 +231,12 @@ export function useTimelineGeometry(durationSeconds: number): TimelineGeometry {
             scrollSeconds: current.scrollSeconds,
           }),
         )
-        return { zoom: next.zoom, scrollSeconds: next.scrollSeconds }
+        const moved = { zoom: next.zoom, scrollSeconds: next.scrollSeconds }
+        windowStore?.set(moved)
+        return moved
       })
     },
-    [durationSeconds, widthPx],
+    [durationSeconds, widthPx, windowStore],
   )
 
   const zoomBy = useCallback(
@@ -221,14 +265,19 @@ export function useTimelineGeometry(durationSeconds: number): TimelineGeometry {
   )
 
   const zoomToFit = useCallback(() => {
-    setTimelineWindow((current) =>
-      current.zoom === WHOLE_FILE.zoom &&
-      current.scrollSeconds === WHOLE_FILE.scrollSeconds
-        ? // Same window: keep the identity so nothing downstream repaints.
-          current
-        : WHOLE_FILE,
-    )
-  }, [])
+    setTimelineWindow((current) => {
+      if (
+        current.zoom === WHOLE_FILE.zoom &&
+        current.scrollSeconds === WHOLE_FILE.scrollSeconds
+      ) {
+        // Same window: keep the identity so nothing downstream repaints, and
+        // leave the store alone — it already holds this pair.
+        return current
+      }
+      windowStore?.set(WHOLE_FILE)
+      return WHOLE_FILE
+    })
+  }, [windowStore])
 
   const panBy = useCallback(
     (deltaSeconds: number) => {
