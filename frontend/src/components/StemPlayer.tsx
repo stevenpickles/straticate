@@ -138,6 +138,7 @@ export function StemPlayer() {
     windowStore,
     openSession,
     retryResult: refetchResult,
+    persistView,
   } = useStemSession()
 
   // Opening the session is what starts the result fetch and, in time, the
@@ -171,6 +172,17 @@ export function StemPlayer() {
   // The readout's *value* always comes from the audio clock; animation
   // frames only decide how often it is repainted, which is why pausing stops
   // the loop instead of freezing a counter.
+  //
+  // `snapshot.status` is in the dependency list for feature 066: the session
+  // can move the clock itself, restoring a persisted playhead once the
+  // engine reaches `ready`, with no gesture on this component to have called
+  // `setCurrentTime` on the way. That restore lands before this effect's next
+  // run — `engine.seek()` is called synchronously from the same snapshot
+  // notification that flips `status`, and this effect only runs after — so
+  // re-reading the clock on that transition is what picks it up. Reading it
+  // on every other `status` change is free: `engine.currentTime()` has not
+  // moved since the last read, `setCurrentTime` bails out on the same value,
+  // and nothing repaints.
   useEffect(() => {
     if (engine === null) {
       return
@@ -186,7 +198,7 @@ export function StemPlayer() {
     return () => {
       cancelAnimationFrame(frame)
     }
-  }, [engine, snapshot.playing])
+  }, [engine, snapshot.playing, snapshot.status])
 
   const togglePlayback = useCallback(() => {
     if (engine === null) {
@@ -194,12 +206,17 @@ export function StemPlayer() {
     }
     if (snapshot.playing) {
       engine.pause()
+      // A pause is a commit point (feature 066): the playhead has stopped
+      // moving, so this is where it is worth writing down. Play is not — the
+      // position at the moment of pressing Play is whatever the last commit
+      // already recorded.
+      persistView()
     } else {
       // Reached from a click, which is the user gesture a suspended
       // AudioContext needs in order to resume.
       void engine.play()
     }
-  }, [engine, snapshot.playing])
+  }, [engine, snapshot.playing, persistView])
 
   // A drag across the timeline moves only what is *displayed*; the seek is
   // committed once, on release. Seeking on every pointer move would stop,
@@ -276,8 +293,11 @@ export function StemPlayer() {
       } else {
         engine?.seek(seconds)
       }
+      // The seek commit (feature 066) — one write per gesture, exactly like
+      // the one transport move above it.
+      persistView()
     },
-    [engine],
+    [engine, persistView],
   )
 
   const toggleMute = useCallback(
@@ -302,13 +322,18 @@ export function StemPlayer() {
   const setLoopRegion = useCallback(
     (startSeconds: number, endSeconds: number) => {
       engine?.setLoopRegion(startSeconds, endSeconds)
+      // The loop-set commit (feature 066).
+      persistView()
     },
-    [engine],
+    [engine, persistView],
   )
 
   const clearLoopRegion = useCallback(() => {
     engine?.clearLoopRegion()
-  }, [engine])
+    // The loop-clear commit (feature 066): a cleared region is itself
+    // worth persisting, or a reload would restore the one it replaced.
+    persistView()
+  }, [engine, persistView])
 
   // Continuous, deliberately — unlike `commitSeek`, which batches a whole
   // drag into one call because a seek tears down and rebuilds every source

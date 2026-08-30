@@ -5,6 +5,12 @@
  * `components/StemPlayer.test.tsx`. What is pinned here is the session's
  * **lifetime**: what survives the Inspect UI being unmounted, and what — and
  * only what — takes it down.
+ *
+ * Feature 066 adds the view-persistence describe block near the bottom:
+ * what gets written to `sessionStorage` at each commit, and what a *fresh*
+ * provider — the unit-test stand-in for a page reload, since a reload tears
+ * down every bit of JS state and leaves only what is on disk — restores from
+ * it once its engine reaches `ready`.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,6 +20,7 @@ import { useState } from 'react'
 import { StemSessionProvider, useStemSession } from './stemSession'
 import { AppStateProvider, initialAppState } from './appState'
 import { JobStateProvider, initialJobState, useJobDispatch } from './jobState'
+import { readSessionSnapshot, writeViewSnapshot } from './persistence'
 import { StemPlayer } from '../components/StemPlayer'
 import type { Job, SeparationResult } from '../api/types'
 import type {
@@ -82,6 +89,10 @@ class SessionEngine implements StemPlayerEngine {
   disposeCount = 0
   retryCalls = 0
   time = 0
+  /** Every `seek()` call, in order — feature 066's "exactly one" restore. */
+  seekCalls: number[] = []
+  /** Every `setLoopRegion()` call, in order, for the same reason. */
+  setLoopRegionCalls: Array<{ start: number; end: number }> = []
 
   private readonly listeners = new Set<() => void>()
   private readonly buffers = new Map<string, FakeAudioBuffer>()
@@ -116,6 +127,7 @@ class SessionEngine implements StemPlayerEngine {
   }
 
   seek = (seconds: number): void => {
+    this.seekCalls.push(seconds)
     this.time = seconds
   }
 
@@ -126,6 +138,7 @@ class SessionEngine implements StemPlayerEngine {
   setLevel = (): void => undefined
 
   setLoopRegion = (startSeconds: number, endSeconds: number): void => {
+    this.setLoopRegionCalls.push({ start: startSeconds, end: endSeconds })
     this.update({ loopRegion: { start: startSeconds, end: endSeconds } })
   }
 
@@ -333,6 +346,9 @@ afterEach(() => {
   // `stubLayout` and `installFakeCanvas` are `vi.spyOn`, which
   // `unstubAllGlobals` does not touch (feature 049, note 9).
   vi.restoreAllMocks()
+  // Feature 066 writes to `sessionStorage`; without this a later test's
+  // "fresh provider" would read the previous test's leftovers.
+  sessionStorage.clear()
 })
 
 // ---------------------------------------------------------------------------
@@ -755,5 +771,248 @@ describe('StemSessionProvider result retry (feature 048) on one engine', () => {
     expect(engines).toHaveLength(1)
     expect(engines[0]).toBe(engine)
     expect(engine?.disposeCount).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Feature 066: the view survives a reload.
+//
+// A page reload tears down every bit of JS state and starts a fresh provider
+// over whatever `sessionStorage` holds — which is exactly what mounting a
+// second, independent session over the same (real, jsdom) storage simulates.
+// Nothing here reuses a provider or an engine instance across the "reload":
+// doing so would test something a reload can never actually do.
+// ---------------------------------------------------------------------------
+
+describe('StemSessionProvider view restore (feature 066)', () => {
+  it('restores the playhead and loop region exactly once, once the engine is ready', async () => {
+    writeViewSnapshot({
+      jobId: sampleJobId,
+      positionSeconds: 24,
+      loopStart: 10,
+      loopEnd: 30,
+      zoom: 1,
+      scrollSeconds: 0,
+    })
+
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    const engine = engines[0]!
+    await becomeReady(engine)
+
+    expect(engine.seekCalls).toEqual([24])
+    expect(engine.setLoopRegionCalls).toEqual([{ start: 10, end: 30 }])
+    expect(screen.getByText('0:24 / 1:00')).toBeInTheDocument()
+    expect(document.querySelector('.stem-player-loop-badge')?.textContent).toBe(
+      'Loop 0:10 – 0:30',
+    )
+
+    // A later snapshot notification — Play toggles `playing`, which every
+    // stem's mute/solo does too — must not repeat the restore: 023's "one
+    // seek" invariant extends to "one restore per page load".
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    expect(engine.seekCalls).toEqual([24])
+    expect(engine.setLoopRegionCalls).toEqual([{ start: 10, end: 30 }])
+  })
+
+  it('restores the playhead alone when the view carried no loop region', async () => {
+    writeViewSnapshot({
+      jobId: sampleJobId,
+      positionSeconds: 24,
+      loopStart: null,
+      loopEnd: null,
+      zoom: 1,
+      scrollSeconds: 0,
+    })
+
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    expect(engines[0]?.seekCalls).toEqual([24])
+    expect(engines[0]?.setLoopRegionCalls).toEqual([])
+  })
+
+  it('restores nothing when nothing was persisted', async () => {
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    expect(engines[0]?.seekCalls).toEqual([])
+    expect(engines[0]?.setLoopRegionCalls).toEqual([])
+    expect(screen.getByText('0:00 / 1:00')).toBeInTheDocument()
+    expect(document.querySelector('.stem-player-loop-badge')).toBeNull()
+  })
+
+  it('drops a view recorded for a different job', async () => {
+    writeViewSnapshot({
+      jobId: otherJobId,
+      positionSeconds: 24,
+      loopStart: 10,
+      loopEnd: 30,
+      zoom: 1,
+      scrollSeconds: 0,
+    })
+
+    const { create, engines } = engineFactory()
+    // The persisted view names `otherJobId`; the session opens for
+    // `sampleJobId` (the default `renderSession` job) — a mismatch exactly
+    // as stale as an unknown job id, dropped the same way.
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    expect(engines[0]?.seekCalls).toEqual([])
+    expect(engines[0]?.setLoopRegionCalls).toEqual([])
+  })
+
+  it('seeds the window store before the first StemTimeline mount', async () => {
+    writeViewSnapshot({
+      jobId: sampleJobId,
+      positionSeconds: 0,
+      loopStart: null,
+      loopEnd: null,
+      zoom: 2.5,
+      scrollSeconds: 5,
+    })
+
+    const { create } = engineFactory()
+    // Deliberately no `becomeReady()`: the window has nothing to do with the
+    // engine, and this is already on the strip once `renderSession` settles.
+    await renderSession(create)
+
+    expect(shownWindow()).toEqual({ zoom: '2.5', scroll: '5' })
+  })
+})
+
+describe('StemSessionProvider view commits (feature 066)', () => {
+  it('persists a seek commit, keyed by the tracked job', async () => {
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    dragTimeline(12)
+
+    expect(readSessionSnapshot().view).toMatchObject({
+      jobId: sampleJobId,
+      positionSeconds: 12,
+      loopStart: null,
+      loopEnd: null,
+    })
+  })
+
+  it('persists a loop set and a loop clear', async () => {
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    const ruler = screen.getByTestId('stem-timeline-ruler-row')
+    fireEvent.pointerDown(ruler, { clientX: xFor(10), pointerId: 1 })
+    fireEvent.pointerMove(ruler, { clientX: xFor(35), pointerId: 1 })
+    fireEvent.pointerUp(ruler, { pointerId: 1 })
+
+    // `xToTime` pixel math, not the exact arithmetic `xFor` used to place the
+    // drag — a fraction of a second of slack either way.
+    expect(readSessionSnapshot().view?.loopStart).toBeCloseTo(10, 5)
+    expect(readSessionSnapshot().view?.loopEnd).toBeCloseTo(35, 5)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear loop' }))
+
+    expect(readSessionSnapshot().view).toMatchObject({
+      loopStart: null,
+      loopEnd: null,
+    })
+  })
+
+  it('writes nothing to sessionStorage on a viewport move alone (post-review should-fix)', async () => {
+    // `windowStore.set` used to call `persistView()` unconditionally, and it
+    // is reached by every pan/zoom/thumb-drag/auto-follow event — on the
+    // order of 100/s on a trackpad wheel. "Zoom in" is this suite's
+    // stand-in for one of those events; a click is one call into the same
+    // `set`, so it pins the fix regardless of how many times a real gesture
+    // would call it.
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    const setItemSpy = vi.spyOn(window.sessionStorage, 'setItem')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    expect(Number(shownWindow().zoom)).toBeGreaterThan(1)
+
+    // Fail-first: restore the write-through in `windowStore.set` and this is
+    // what fails — `setItemSpy` gets called and `view` stops being `null`.
+    expect(setItemSpy).not.toHaveBeenCalled()
+    expect(readSessionSnapshot().view).toBeNull()
+
+    setItemSpy.mockRestore()
+  })
+
+  it('captures the current window on the pagehide flush, with no viewport commit of its own', async () => {
+    // The window moves without ever persisting on its own (previous test);
+    // this is the write path that catches it up before a reload — the same
+    // `pagehide` flush that already covers "reload while playing" also
+    // covers "reload right after zooming/panning".
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    const zoomed = shownWindow()
+    expect(readSessionSnapshot().view).toBeNull()
+
+    window.dispatchEvent(new Event('pagehide'))
+
+    const persisted = readSessionSnapshot().view
+    expect(persisted?.jobId).toBe(sampleJobId)
+    expect(String(persisted?.zoom)).toBe(zoomed.zoom)
+    expect(String(persisted?.scrollSeconds)).toBe(zoomed.scroll)
+  })
+
+  it('persists a pause', async () => {
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    await userEvent.click(screen.getByRole('button', { name: 'Play' }))
+    expect(readSessionSnapshot().view).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    expect(readSessionSnapshot().view).not.toBeNull()
+  })
+
+  it('flushes the live position on pagehide, ahead of the last discrete commit', async () => {
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    const engine = engines[0]!
+    await becomeReady(engine)
+
+    dragTimeline(10)
+    expect(readSessionSnapshot().view?.positionSeconds).toBeCloseTo(10, 5)
+
+    // Playback carries the clock on without a discrete commit — the "reload
+    // while playing" case the flush exists for. The fake's `currentTime()`
+    // just returns `time`, so setting it directly is the fake's stand-in for
+    // the audio clock having moved on its own.
+    engine.time = 45
+    window.dispatchEvent(new Event('pagehide'))
+
+    expect(readSessionSnapshot().view?.positionSeconds).toBe(45)
+  })
+
+  it('wipes the persisted view when the job is cleared', async () => {
+    const { create, engines } = engineFactory()
+    await renderSession(create)
+    await becomeReady(engines[0]!)
+
+    dragTimeline(12)
+    expect(readSessionSnapshot().view).not.toBeNull()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Start another separation' }),
+    )
+
+    expect(readSessionSnapshot().view).toBeNull()
   })
 })

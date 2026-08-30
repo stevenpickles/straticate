@@ -287,6 +287,57 @@ test.describe.serial('a separation, end to end', () => {
     await expect(workflow.clearLoop).toBeDisabled()
   })
 
+  test('restores the playhead, the loop region and the zoom window across a reload', async () => {
+    // Feature 066. The engine cannot survive a reload — the stems really do
+    // come back down over the network and get redecoded from scratch, which
+    // is why this stage waits for Play to re-enable before asserting
+    // anything the engine answers — but the *view* can, and this is the
+    // stage that proves it end to end.
+    expect(await workflow.window()).toEqual({ zoom: 1, scrollSeconds: 0 })
+
+    // Seek: a fifth of the 60 s fixture is 0:12.
+    await workflow.seekToFraction(0.2)
+    await expect(workflow.playhead).toContainText('0:12')
+
+    // A loop region.
+    await workflow.dragRuler(0.1, 0.4)
+    await expect(workflow.loopBadge).toHaveText(/^Loop 0:0[5-7] – 0:2[3-5]$/)
+    const loopText = await workflow.loopBadge.textContent()
+
+    // Zoomed in, not the whole file — the window this stage checks survives
+    // has to actually be a window, not the default it would restore to
+    // anyway if nothing here worked.
+    await workflow.zoomIn.click()
+    await workflow.zoomIn.click()
+    const zoomed = await workflow.window()
+    expect(zoomed.zoom, 'zoomed in from the whole file').toBeGreaterThan(1)
+
+    await page.reload()
+
+    await expect(workflow.phase).toHaveText('Inspect')
+    await expect(
+      workflow.player.getByRole('button', { name: 'Play' }),
+    ).toBeEnabled()
+
+    // The playhead: seeded from the restored position, not from zero.
+    await expect(workflow.playhead).not.toContainText('0:00 /')
+    await expect(workflow.playhead).toContainText('0:12')
+
+    // The loop region: the same badge, restored from the same two numbers.
+    await expect(workflow.loopBadge).toHaveCount(1)
+    await expect(workflow.loopBadge).toHaveText(loopText ?? '')
+
+    // The zoom window: the strip's own data, exactly as it was before the
+    // reload — not just "some" window, the *same* one.
+    expect(await workflow.window()).toEqual(zoomed)
+
+    // Leave the shared job the way the next stage expects it: no region, the
+    // whole file on screen.
+    await workflow.clearLoop.click()
+    await workflow.zoomFit.click()
+    expect(await workflow.window()).toEqual({ zoom: 1, scrollSeconds: 0 })
+  })
+
   test('scrubs the playhead while playing, and lands where it is released', async () => {
     // Feature 052. Sound cannot be asserted from here, so this stage pins the
     // two things that are observable in a real browser: a drag over a *live*
