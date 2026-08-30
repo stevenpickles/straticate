@@ -125,14 +125,21 @@ class AudioStore:
         Called only after the upload has already been probed successfully
         (``api/audio.py``), so a rejected upload never reaches here and never
         leaves a sidecar behind, matching its existing no-file guarantee.
+
+        The sidecar is written **before** the in-memory record is assigned
+        (review finding): a failed write raises out of here with the registry
+        untouched, so the caller's cleanup path removes the files and the 500
+        the client sees agrees with what the server holds. The old order left
+        a live, servable record whose upload had "failed" — and, after a
+        restart, an orphan.
         """
-        self._records[record.id] = record
         directory = self._audio_root / record.id
         directory.mkdir(parents=True, exist_ok=True)
         sidecar = directory / SIDECAR_FILENAME
         tmp = directory / f"{SIDECAR_FILENAME}.{uuid.uuid4().hex}.tmp"
         tmp.write_text(record.model_dump_json())
         os.replace(tmp, sidecar)
+        self._records[record.id] = record
 
     def load(self) -> None:
         """Rebuild the registry from sidecars a previous run left on disk.
@@ -167,16 +174,24 @@ class AudioStore:
           is ignored: it is not named ``audio.json``, so nothing here looks
           at it.
 
-        The directory name, not the sidecar's own ``id`` field, is used to
-        key the restored record and to locate its original file: the
-        directory is the ground truth this sweep is walking, so a sidecar
-        whose ``id`` disagrees with the directory it lives in (which
-        :meth:`register` never produces) cannot restore a record under the
-        wrong key.
+        The directory name is the ground truth this sweep walks. A sidecar
+        whose own ``id`` field disagrees with the directory it lives in
+        (which :meth:`register` never produces — only a hand-edit or
+        cross-directory copy can) is **skipped with a warning**, exactly like
+        a corrupt one: restoring it under either id would serve a record
+        whose links point at the other (review finding).
         """
         if not self._audio_root.is_dir():
             return
-        for directory in sorted(self._audio_root.iterdir()):
+        try:
+            directories = sorted(self._audio_root.iterdir())
+        except OSError as exc:
+            # An unreadable audio root must degrade like one bad record does,
+            # not fail startup: the sweep's whole contract is that nothing on
+            # this path can stop the application from booting.
+            logger.warning("Cannot read the audio directory %s: %s", self._audio_root, exc)
+            return
+        for directory in directories:
             if not directory.is_dir():
                 continue
             audio_id = directory.name
@@ -184,9 +199,16 @@ class AudioStore:
             if not sidecar.is_file():
                 continue
             try:
-                record = AudioFile.model_validate_json(sidecar.read_text())
+                record = AudioFile.model_validate_json(sidecar.read_bytes())
             except (OSError, ValueError) as exc:
                 logger.warning("Skipping unreadable audio record %r: %s", audio_id, exc)
+                continue
+            if record.id != audio_id:
+                logger.warning(
+                    "Skipping audio record %r: its sidecar names a different id %r",
+                    audio_id,
+                    record.id,
+                )
                 continue
             if not self.original_path(audio_id, record.filename).is_file():
                 continue

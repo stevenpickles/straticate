@@ -13,7 +13,9 @@ indistinguishable from just reusing the same store.
 
 import asyncio
 import io
+import json
 import logging
+import os
 import wave
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -303,7 +305,81 @@ async def test_corrupt_sidecar_is_a_warning_not_a_startup_failure(
             assert response.status_code == 404
             assert response.json()["error"]["code"] == "audio_not_found"
 
-    assert any(record.levelno == logging.WARNING for record in caplog.records), caplog.records
+    # Pinned to the logger and the id (review finding): a bare "any warning"
+    # would pass on any unrelated startup warning a future feature adds.
+    assert any(
+        record.levelno == logging.WARNING
+        and record.name == "straticate.audio.storage"
+        and audio_id in record.getMessage()
+        for record in caplog.records
+    ), caplog.records
+
+
+async def test_mismatched_sidecar_id_is_skipped_with_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A sidecar whose ``id`` disagrees with its directory restores nothing.
+
+    Review finding: restored verbatim, the record was served under the
+    directory's id while its body carried the foreign one — a client
+    following the contract then posted the foreign id to ``/jobs`` and got a
+    404 for audio it had just fetched. Either id would be wrong; the record
+    is skipped like a corrupt one.
+    """
+    data_dir = tmp_path / "data"
+    async with RunningApp(data_dir) as client1:
+        uploaded = (await upload(client1, "song.wav", make_wav_bytes())).json()
+        audio_id = uploaded["id"]
+
+    sidecar = data_dir / "audio" / audio_id / SIDECAR_FILENAME
+    body = json.loads(sidecar.read_text())
+    body["id"] = "01TOTALLY0OTHER0ID0000000000"
+    sidecar.write_text(json.dumps(body))
+
+    with caplog.at_level(logging.WARNING, logger="straticate.audio.storage"):
+        async with RunningApp(data_dir) as client2:
+            for requested in (audio_id, body["id"]):
+                response = await client2.get(f"{AUDIO_URL}/{requested}")
+                assert response.status_code == 404, requested
+
+    assert any(
+        record.name == "straticate.audio.storage" and "different id" in record.getMessage()
+        for record in caplog.records
+    ), caplog.records
+
+
+async def test_failed_sidecar_write_leaves_no_record_and_no_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sidecar write failure fails the upload wholesale.
+
+    Review finding: the record used to be cached before the sidecar write,
+    so a disk-full 500 left a live, servable record and — after a restart —
+    an orphan. Now the client's 500 agrees with the server: no record, no
+    files, nothing to restore.
+    """
+    data_dir = tmp_path / "data"
+    real_replace = os.replace
+
+    def disk_full_for_sidecars(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        # Only the sidecar publish fails; every other rename stays real, so
+        # the app under test is otherwise healthy.
+        if str(dst).endswith(SIDECAR_FILENAME):
+            raise OSError(28, "No space left on device")
+        real_replace(src, dst)
+
+    monkeypatch.setattr("straticate.audio.storage.os.replace", disk_full_for_sidecars)
+    async with RunningApp(data_dir) as client:
+        # The ASGI test transport re-raises unhandled server exceptions
+        # instead of rendering them; production uvicorn turns this same
+        # escape into the 500 the client sees.
+        with pytest.raises(OSError, match="No space left"):
+            await upload(client, "song.wav", make_wav_bytes())
+    monkeypatch.undo()
+
+    audio_root = data_dir / "audio"
+    leftovers = sorted(audio_root.iterdir()) if audio_root.is_dir() else []
+    assert leftovers == [], "the failed upload's directory must be gone"
 
 
 async def test_stray_tmp_file_is_ignored(tmp_path: Path) -> None:

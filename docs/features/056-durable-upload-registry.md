@@ -98,11 +98,12 @@ later feature") — every restart orphaned the files already sitting under
   feature's explicit out-of-scope list.
 - **No `fsync` on the sidecar write.** A power cut between the write and
   the next successful upload can lose the *most recent* upload's record
-  (the client re-uploads; ffprobe is sub-second). This mirrors the
-  documented trade-off already accepted for the export artifact
-  (`api/export.py`) and is a deliberate asymmetry with the model installer,
-  whose weights are expensive to re-download and do `fsync` before
-  publishing.
+  (the client re-uploads; ffprobe is sub-second). It is a deliberate
+  asymmetry with the model installer, whose weights are expensive to
+  re-download and which does `fsync` before publishing — the one place in
+  the repo that documents an explicit fsync decision either way. (An earlier
+  draft claimed `api/export.py` documented the same trade; it documents its
+  atomic-rename discipline but says nothing about fsync — review finding.)
 - **`register()` now does filesystem I/O it previously didn't** (a
   `mkdir` + a small synchronous file write). It runs on the request's
   event loop, same as `prepare_original_path`'s directory creation already
