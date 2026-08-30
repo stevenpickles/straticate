@@ -14,6 +14,7 @@ EXPECTED_COMPONENTS = {
     "VersionInfo",
     "AudioMetadata",
     "AudioFile",
+    "StereoAnalysis",
     "ModelRequirements",
     "Model",
     "QualityOption",

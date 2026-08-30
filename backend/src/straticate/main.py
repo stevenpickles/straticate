@@ -47,7 +47,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from straticate import __version__
 from straticate.api import audio, export, jobs, results, system, ws
 from straticate.api import models as models_api
-from straticate.audio import AudioStore
+from straticate.audio import AudioStore, StereoAnalysisCache
 from straticate.config import Settings, get_settings
 from straticate.errors import ErrorEnvelopeMiddleware, register_error_handlers
 from straticate.frontend import log_bundle_state, mount_frontend
@@ -337,6 +337,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="Straticate", version=__version__, lifespan=lifespan)
     app.state.settings = settings
     app.state.audio_store = AudioStore(settings.data_dir)
+    # Feature 063's in-process memo of ``GET /audio/{id}/analysis``. Per
+    # application rather than process-global, so two apps in one test session
+    # cannot serve each other's measurements, and silent: it holds nothing
+    # until a client asks.
+    app.state.stereo_analysis_cache = StereoAnalysisCache()
     catalog = ModelCatalog.from_directory(
         settings.models_dir, include_development=settings.include_development_models
     )

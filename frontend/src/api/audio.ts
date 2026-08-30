@@ -7,7 +7,7 @@
  */
 
 import { API_BASE, ApiError, del, errorBodyFromText, get } from './client'
-import type { AudioFile } from './types'
+import type { AudioFile, StereoAnalysis } from './types'
 
 /**
  * Reports upload progress as a fraction in `[0, 1]`, or `null` when the
@@ -134,4 +134,26 @@ export function getAudio(id: string): Promise<AudioFile> {
 /** Delete an uploaded audio file and its derived data (`DELETE /api/v1/audio/{id}`). */
 export function deleteAudio(id: string): Promise<void> {
   return del(`/audio/${encodeURIComponent(id)}`)
+}
+
+/**
+ * Measure an upload's stereo image (`GET /api/v1/audio/{id}/analysis`).
+ *
+ * A **measurement, not a decision**: the backend reports the full-band L/R
+ * correlation of the whole track and whether that is wide enough for a stem to
+ * come back near-silent. Nothing about a job is derived from it on either side
+ * of the wire — feature 041's rule is that detection may suggest and must never
+ * apply, and this client is why that stays true here: it returns a record, and
+ * no caller writes a `stereo_handling` from it.
+ *
+ * The **first** request for an audio ID is held open for the length of one
+ * decode (about a second for a three-minute track); the backend caches the
+ * answer, so later ones return immediately. Callers treat this as an
+ * enrichment and never gate a control on it.
+ *
+ * Rejects with an {@link ApiError}: `audio_not_found` (404),
+ * `audio_not_decodable` (422), `audio_analysis_timed_out` (504).
+ */
+export function getAudioAnalysis(id: string): Promise<StereoAnalysis> {
+  return get<StereoAnalysis>(`/audio/${encodeURIComponent(id)}/analysis`)
 }

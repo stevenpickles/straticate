@@ -1,8 +1,14 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { deleteAudio, startAudioUpload, uploadAudio } from './audio'
+import {
+  deleteAudio,
+  getAudioAnalysis,
+  startAudioUpload,
+  uploadAudio,
+} from './audio'
 import { ApiError } from './client'
 import { installMockXhr, lastXhr } from '../test/mockXhr'
 import { sampleAudioFile } from '../test/fixtures'
+import type { StereoAnalysis } from './types'
 
 function makeFile(name = 'song.wav'): File {
   return new File(['RIFF....WAVE'], name, { type: 'audio/wav' })
@@ -144,5 +150,64 @@ describe('deleteAudio', () => {
     expect(error).toBeInstanceOf(ApiError)
     expect((error as ApiError).code).toBe('audio_not_found')
     expect((error as ApiError).status).toBe(404)
+  })
+})
+
+describe('getAudioAnalysis', () => {
+  it('GETs the analysis of one upload', async () => {
+    const analysis: StereoAnalysis = {
+      l_r_correlation: 0.229,
+      wide_stereo: true,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(analysis), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getAudioAnalysis('01ABC')).resolves.toEqual(analysis)
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/api/v1/audio/01ABC/analysis')
+  })
+
+  it('encodes the audio id into the path', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ l_r_correlation: null, wide_stereo: false }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await getAudioAnalysis('a/b?c')
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      '/api/v1/audio/a%2Fb%3Fc/analysis',
+    )
+  })
+
+  it('throws a typed ApiError when the analysis times out', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'audio_analysis_timed_out',
+              message: 'Measuring the uploaded file timed out.',
+            },
+          }),
+          { status: 504, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    )
+
+    const error = await getAudioAnalysis('01ABC').catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).code).toBe('audio_analysis_timed_out')
+    expect((error as ApiError).status).toBe(504)
   })
 })
