@@ -123,17 +123,20 @@ auto-prune policies, resumable model downloads / update path /
 re-verification, export transport (progress/cancel), streaming stem decode
 (C12) and the zipper-noise level ramp (C9).
 
-## Current state (2026-08-30)
+## Current state (2026-08-31)
 
-**v0.3.0 is prepared on `dev`.** Every feature 056–068 is merged, and 069 is
-the release preparation: `CHANGELOG.md` carries the `[0.3.0]` entry written
-from this ledger, `backend/pyproject.toml` is at `0.3.0`, and the workflow —
-including restart survival, job deletion, disk-usage reporting, prune, the
-`mono_bass` stereo-handling option, and the timeline's job-scoped session
-and reload persistence — was verified from a clean clone. Details in
-`docs/features/069-release-preparation-v0.3.0.md`. What remains is the
-project owner's, per `AGENTS.md`: the release PR `dev → main`, the merge,
-and the annotated tag `v0.3.0`.
+**v0.3.0 is released** (tag `v0.3.0`, release PR #107 rebase-merged
+2026-08-31; the tag-triggered workflow published the GitHub release). Every
+feature 056–068 is merged, and 069 was the release preparation:
+`CHANGELOG.md` carries the `[0.3.0]` entry written from this ledger,
+`backend/pyproject.toml` is at `0.3.0`, and the workflow — including restart
+survival, job deletion, disk-usage reporting, prune, the `mono_bass`
+stereo-handling option, and the timeline's job-scoped session and reload
+persistence — was verified from a clean clone. No release-branch fixes were
+made, so there is nothing to reconcile back into `dev`. Details in
+`docs/features/069-release-preparation-v0.3.0.md`. The one held surface:
+063's wide-stereo suggestion stays disabled pending the owner's
+false-positive measurement (protocol in its feature doc).
 
 The remainder of this section is the v0.2.0 state as recorded at its
 release.
